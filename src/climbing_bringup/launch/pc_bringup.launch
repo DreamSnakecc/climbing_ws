@@ -1,0 +1,18 @@
+<launch>
+  <arg name="enable_state_logger" default="false" />
+
+  <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
+
+  <node pkg="climbing_state_estimator" type="mocap_bridge.py" name="mocap_bridge" output="screen" />
+  <node pkg="climbing_state_estimator" type="state_estimator.py" name="state_estimator" output="screen" />
+  <node pkg="climbing_control_core" type="body_planner.py" name="body_planner" output="screen" />
+  <node pkg="climbing_control_core" type="stance_force_optimizer.py" name="stance_force_optimizer" output="screen" />
+  <node pkg="climbing_control_core" type="swing_leg_controller.py" name="swing_leg_controller" output="screen" />
+  <node pkg="climbing_control_core" type="mission_supervisor.py" name="mission_supervisor" output="screen" />
+
+  <group if="$(arg enable_state_logger)">
+    <node pkg="climbing_control_core" type="state_logger.py" name="state_logger" output="screen">
+      <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" ns="" />
+    </node>
+  </group>
+</launch>

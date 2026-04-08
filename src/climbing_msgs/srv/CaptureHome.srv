@@ -1,0 +1,4 @@
+bool save_as_runtime_home
+---
+bool accepted
+string message

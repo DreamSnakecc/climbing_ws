@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>climbing_description</name>
+  <version>0.0.1</version>
+  <description>Robot and environment parameters for the climbing quadruped.</description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+</package>

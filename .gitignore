@@ -1,0 +1,17 @@
+build/
+devel/
+logs/
+.catkin_tools/
+
+*.bag
+*.pyc
+*.pyo
+
+__pycache__/
+.pytest_cache/
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db

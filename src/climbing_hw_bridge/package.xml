@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>climbing_hw_bridge</name>
+  <version>0.0.1</version>
+  <description>Jetson-side hardware bridge nodes for the climbing quadruped.</description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>climbing_msgs</depend>
+  <depend>dynamixel_control</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>python3-serial</exec_depend>
+</package>

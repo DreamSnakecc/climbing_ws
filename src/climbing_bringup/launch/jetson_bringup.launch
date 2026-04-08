@@ -1,0 +1,24 @@
+<launch>
+  <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
+
+  <group ns="jetson">
+    <node pkg="dynamixel_control" type="multi_dxl_node" name="multi_dxl_node_left" ns="left_board" output="screen">
+      <param name="board_name" value="left_board" />
+      <remap from="set_position" to="/set_position" />
+    </node>
+
+    <node pkg="dynamixel_control" type="multi_dxl_node" name="multi_dxl_node_right" ns="right_board" output="screen">
+      <param name="board_name" value="right_board" />
+      <remap from="set_position" to="/set_position" />
+    </node>
+
+    <node pkg="climbing_hw_bridge" type="dynamixel_bridge.py" name="dynamixel_bridge" output="screen">
+      <rosparam param="ordered_motor_ids">[11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]</rosparam>
+    </node>
+
+    <node pkg="climbing_hw_bridge" type="imu_serial_bridge.py" name="imu_serial_bridge" output="screen" />
+    <node pkg="climbing_hw_bridge" type="fan_serial_bridge.py" name="fan_serial_bridge" output="screen" />
+    <node pkg="climbing_hw_bridge" type="leg_ik_executor.py" name="leg_ik_executor" output="screen" />
+    <node pkg="climbing_hw_bridge" type="local_safety_supervisor.py" name="local_safety_supervisor" output="screen" />
+  </group>
+</launch>
