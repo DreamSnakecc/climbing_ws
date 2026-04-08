@@ -58,13 +58,19 @@ fan_controller:
   baudrate: 115200
   float_endianness: >
   protocol: total_rpm
+  telemetry_protocol: stm32_rpm_current_frame
   leg_count: 4
   command_leg_order: [lf, rf, rr, lr]
   msg_leg_order: [lf, rf, lr, rr]
+  rpm_leg_order: [lf, rf, rr, lr]
   telemetry_rate_hz: 50.0
+  stm32_frame_header: [0xFF, 0xDD]
+  stm32_payload_length: 32
+  stm32_float_count: 8
+  rpm_scale: 1.0
   current_frame_header: [0x03, 0x04]
   current_payload_format: 4f
-  current_leg_order: [lf, rf, lr, rr]
+  current_leg_order: [lf, rf, rr, lr]
   current_scale: 1.0
 
 wall:

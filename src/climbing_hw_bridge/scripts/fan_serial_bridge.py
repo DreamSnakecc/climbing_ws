@@ -24,6 +24,7 @@ class FanSerialBridge(object):
         self.baudrate = int(get_cfg("baudrate", 115200))
         self.float_endianness = get_cfg("float_endianness", ">")
         self.protocol = str(get_cfg("protocol", "total_rpm")).lower()
+        self.telemetry_protocol = str(get_cfg("telemetry_protocol", "current_frame")).lower()
         self.leg_count = int(get_cfg("leg_count", 4))
         self.telemetry_rate_hz = float(get_cfg("telemetry_rate_hz", 50.0))
         self.total_rpm_header = bytes([0x01, 0x02])
@@ -32,11 +33,19 @@ class FanSerialBridge(object):
         self.current_payload_format = self.float_endianness + str(get_cfg("current_payload_format", "4f"))
         self.command_leg_order = [str(name) for name in get_cfg("command_leg_order", ["lf", "rf", "rr", "lr"])]
         self.msg_leg_order = [str(name) for name in get_cfg("msg_leg_order", ["lf", "rf", "lr", "rr"])]
+        self.rpm_leg_order = [str(name) for name in get_cfg("rpm_leg_order", list(self.msg_leg_order))]
         self.current_leg_order = [str(name) for name in get_cfg("current_leg_order", list(self.msg_leg_order))]
+        self.rpm_scale = float(get_cfg("rpm_scale", 1.0))
         self.current_scale = float(get_cfg("current_scale", 1.0))
+        self.stm32_frame_header = bytes(self._parse_byte_list(get_cfg("stm32_frame_header", [0xFF, 0xDD])))
+        self.stm32_payload_length = int(get_cfg("stm32_payload_length", 32))
+        self.stm32_float_count = int(get_cfg("stm32_float_count", 8))
+        self.stm32_payload_format = ">" + str(self.stm32_float_count) + "f"
+        self.stm32_checksum_size = 1
         self.command_fan_ids = dict((leg_name, index + 1) for index, leg_name in enumerate(self.command_leg_order))
         self.msg_leg_index_map = dict((leg_name, index) for index, leg_name in enumerate(self.msg_leg_order))
         self.rx_index_to_leg_name = dict((index, leg_name) for leg_name, index in self.msg_leg_index_map.items())
+        self.rpm_leg_index_map = dict((leg_name, index) for index, leg_name in enumerate(self.rpm_leg_order))
         self.current_leg_index_map = dict((leg_name, index) for index, leg_name in enumerate(self.current_leg_order))
         self.port = None
         self.rx_buffer = bytearray()
@@ -45,12 +54,22 @@ class FanSerialBridge(object):
             for leg_name in self.command_leg_order
         )
         self.last_total_payload = None
+        self.last_leg_rpm = dict((leg_name, 0.0) for leg_name in self.msg_leg_order)
         self.last_fan_currents = dict((leg_name, 0.0) for leg_name in self.msg_leg_order)
         self.current_payload_size = struct.calcsize(self.current_payload_format)
         self.current_packet_size = len(self.current_frame_header) + self.current_payload_size
+        self.stm32_packet_size = len(self.stm32_frame_header) + 1 + self.stm32_payload_length + self.stm32_checksum_size
+
+        max_supported_legs = max(self.stm32_float_count // 2, 0)
+        if self.leg_count > max_supported_legs:
+            rospy.logwarn(
+                "fan_serial_bridge leg_count=%d exceeds STM32 telemetry capacity=%d; truncating telemetry parse",
+                self.leg_count,
+                max_supported_legs,
+            )
 
         self.echo_pub = rospy.Publisher("~/last_command", Float32, queue_size=10)
-        self.leg_echo_pub = rospy.Publisher("~/leg_rpm", Float32MultiArray, queue_size=10)
+        self.leg_rpm_pub = rospy.Publisher("~/leg_rpm", Float32MultiArray, queue_size=10)
         self.current_pub = rospy.Publisher("~/fan_currents", Float32MultiArray, queue_size=10)
         rospy.Subscriber("~/adhesion_command", AdhesionCommand, self.adhesion_callback, queue_size=20)
         rospy.Service("~/set_fan_speed_once", SetFanSpeed, self.handle_set_fan_speed)
@@ -99,10 +118,10 @@ class FanSerialBridge(object):
             rospy.logerr("Failed to send fan command: %s", exc)
             return False, str(exc)
 
-    def _publish_leg_echo(self):
+    def _publish_leg_rpm(self):
         msg = Float32MultiArray()
-        msg.data = [float(self.leg_targets[leg_name]["target_rpm"]) for leg_name in self.command_leg_order]
-        self.leg_echo_pub.publish(msg)
+        msg.data = [float(self.last_leg_rpm.get(leg_name, 0.0)) for leg_name in self.msg_leg_order]
+        self.leg_rpm_pub.publish(msg)
 
     def _publish_fan_currents(self):
         msg = Float32MultiArray()
@@ -127,6 +146,18 @@ class FanSerialBridge(object):
             if not chunk:
                 return
             self.rx_buffer.extend(bytearray(chunk))
+            if self.telemetry_protocol == "stm32_rpm_current_frame":
+                while True:
+                    telemetry = self._extract_stm32_telemetry_frame()
+                    if telemetry is None:
+                        break
+                    for leg_name, value in telemetry["rpm"].items():
+                        self.last_leg_rpm[leg_name] = float(value)
+                    for leg_name, value in telemetry["currents"].items():
+                        self.last_fan_currents[leg_name] = float(value)
+                    self._publish_leg_rpm()
+                    self._publish_fan_currents()
+                return
             while True:
                 currents = self._extract_current_frame()
                 if currents is None:
@@ -136,6 +167,57 @@ class FanSerialBridge(object):
                 self._publish_fan_currents()
         except Exception as exc:
             rospy.logwarn_throttle(2.0, "fan serial telemetry read failed: %s", exc)
+
+    def _extract_stm32_telemetry_frame(self):
+        telemetry_leg_count = min(
+            self.leg_count,
+            self.stm32_float_count // 2,
+            len(self.rpm_leg_order),
+            len(self.current_leg_order),
+        )
+        while True:
+            if len(self.rx_buffer) < len(self.stm32_frame_header):
+                return None
+            start = self.rx_buffer.find(self.stm32_frame_header)
+            if start < 0:
+                keep = max(len(self.stm32_frame_header) - 1, 0)
+                self.rx_buffer = self.rx_buffer[-keep:] if keep > 0 else bytearray()
+                return None
+            if start > 0:
+                del self.rx_buffer[:start]
+            if len(self.rx_buffer) < self.stm32_packet_size:
+                return None
+
+            payload_length = int(self.rx_buffer[len(self.stm32_frame_header)])
+            if payload_length != self.stm32_payload_length:
+                del self.rx_buffer[0]
+                continue
+
+            packet = bytes(self.rx_buffer[:self.stm32_packet_size])
+            checksum = sum(bytearray(packet[:-1])) & 0xFF
+            if checksum != int(packet[-1]):
+                del self.rx_buffer[0]
+                continue
+
+            payload_start = len(self.stm32_frame_header) + 1
+            payload_end = payload_start + self.stm32_payload_length
+            payload = packet[payload_start:payload_end]
+            try:
+                unpacked = struct.unpack(self.stm32_payload_format, payload)
+            except struct.error:
+                del self.rx_buffer[0]
+                continue
+
+            del self.rx_buffer[:self.stm32_packet_size]
+
+            rpm = {}
+            currents = {}
+            for index in range(telemetry_leg_count):
+                rpm_leg_name = self.rpm_leg_order[index]
+                current_leg_name = self.current_leg_order[index]
+                rpm[rpm_leg_name] = float(unpacked[2 * index]) * self.rpm_scale
+                currents[current_leg_name] = float(unpacked[2 * index + 1]) * self.current_scale
+            return {"rpm": rpm, "currents": currents}
 
     def _extract_current_frame(self):
         while True:
@@ -197,7 +279,6 @@ class FanSerialBridge(object):
             "normal_force_limit": float(msg.normal_force_limit),
             "required_adhesion_force": float(msg.required_adhesion_force),
         }
-        self._publish_leg_echo()
 
         if self.protocol == "indexed_leg_rpm":
             fan_id = self.command_fan_ids[leg_name]
