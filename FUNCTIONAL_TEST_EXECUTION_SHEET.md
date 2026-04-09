@@ -1114,6 +1114,7 @@ source devel/setup.bash
 rosservice list | grep set_fan_speed_once
 rosservice type /set_fan_speed_once
 rosservice call /set_fan_speed_once "leg: 'lf'
+rosservice call /set_fan_speed_once "target_rpm: 0.0"
 grep -n "slip_risk" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head
 ```
 
