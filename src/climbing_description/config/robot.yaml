@@ -36,17 +36,17 @@ mission_supervisor:
   pause_on_adhesion_loss: true
   high_slip_threshold: 0.92
   adhesion_required_count: 4
-  attach_rpm: 3200.0
-  climb_rpm: 3200.0
-  pause_rpm: 3200.0
-  fault_rpm: 3400.0
+  attach_rpm: 30000.0
+  climb_rpm: 30000.0
+  pause_rpm: 30000.0
+  fault_rpm: 34000.0
   release_rpm: 0.0
   swing_release_rpm: 0.0
-  touchdown_rpm: 3400.0
+  touchdown_rpm: 34000.0
   touchdown_boost_duration_s: 0.25
   pre_attach_time_s: 0.12
   default_normal_force_limit: 150.0
-  adhesion_force_reference_n: 35.0
+  adhesion_force_reference_n: 100.0
   adhesion_rpm_min_scale: 0.85
   adhesion_rpm_max_scale: 1.35
   # Swing-leg attachment timing is now state-driven: wall touch -> preload -> fan attach -> stable attachment.
