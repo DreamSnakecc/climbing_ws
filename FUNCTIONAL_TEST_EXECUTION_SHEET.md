@@ -1079,7 +1079,184 @@ rostopic echo /control/stance_wrench/lf | grep -E "active|planned_support|actual
 执行命令：
 
 ```bash
+
+### A05 Jetson 侧风机通信单测（不启动舵机）
+
+- 目标：只验证 Jetson 与 STM32 风机板之间的串口收发、协议解析和 ROS 发布，不启动任何舵机控制节点
+
+执行步骤：
+
+终端 1：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roscore
+```
+
+终端 2：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosparam load src/climbing_description/config/robot.yaml
+rosrun climbing_hw_bridge fan_serial_bridge.py
+```
+
+终端 3：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosservice list | grep set_fan_speed_once
+rosservice type /set_fan_speed_once
+rosservice call /set_fan_speed_once "leg: 'lf'
 grep -n "slip_risk" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head
+```
+
+终端 4：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rostopic echo /fan_currents
+rostopic echo /leg_rpm
+rostopic hz /fan_currents
+rostopic hz /leg_rpm
+```
+
+必要时的原始串口抽查：
+
+```bash
+pkill -f fan_serial_bridge.py
+sudo stty -F /dev/ttyUSB_fan 115200 raw -echo
+timeout 2s cat /dev/ttyUSB_fan | hexdump -C | head
+```
+
+观测点：
+
+- `fan_serial_bridge.py` 启动日志应显示已打开 `/dev/ttyUSB_fan`
+- 服务 `/set_fan_speed_once` 存在且调用返回 `accepted: True`
+- `/leg_rpm` 应接近下发目标值，例如 `10000 rpm` 时误差通常只在几十 rpm 内
+- `/fan_currents` 应持续有非零电流反馈
+- 原始串口反馈帧应能看到 `ff dd 20` 开头
+
+通过标准：
+
+- 不启动 `jetson_bringup.launch` 也能独立完成风机命令发送与反馈接收
+- `/leg_rpm`、`/fan_currents` 持续更新且数值与实际工况一致
+- 单独改某一条腿目标转速时，仅对应 ROS 数组位置发生变化
+
+记录：
+
+- 实际现象：
+- 关键观测数据：
+- 结果： [ ] 通过 [ ] 失败 [ ] 阻塞
+- 问题与备注：
+
+### A06 Jetson 侧 IMU 接收与解码单测（不启动舵机）
+
+- 目标：只验证 Jetson 能否从 IMU 串口收到 FDILink 数据、完成解码并发布 `sensor_msgs/Imu`，不启动任何舵机节点
+
+已知配置：
+
+- IMU 参数位于 `robot.yaml` 的 `/imu` 命名空间
+- 当前协议为 `fdilink`
+- 当前串口为 `/dev/ttyUSB_imu`
+- 当前波特率为 `921600`
+- 当前代码发布的话题是 `/imu`
+- 如需确认实际话题名，以 `rostopic list | grep imu` 为准
+
+执行步骤：
+
+终端 1：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roscore
+```
+
+终端 2：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosparam load src/climbing_description/config/robot.yaml
+rosrun climbing_hw_bridge imu_serial_bridge.py
+```
+
+终端 3：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosnode list | grep imu_serial_bridge
+rostopic list | grep imu
+rostopic hz /imu
+rostopic echo -n 1 /imu
+```
+
+如果需要先看原始串口字节，先停掉桥接节点，再执行：
+
+```bash
+pkill -f imu_serial_bridge.py
+sudo stty -F /dev/ttyUSB_imu 921600 raw -echo
+timeout 2s cat /dev/ttyUSB_imu | hexdump -C | head -n 20
+```
+
+静态解码检查步骤：
+
+```bash
+rosrun tf tf_echo /world /imu
+rostopic echo /imu
+```
+
+1. 让机器人或 IMU 模块静止放置 10 秒。
+2. 观察 `angular_velocity` 三轴是否接近 0。
+3. 观察 `linear_acceleration` 的模是否接近 `9.8 m/s^2`。
+4. 观察 `orientation` 四元数是否稳定，不应持续跳变或归一化失效。
+
+动态解码检查步骤：
+
+1. 手动绕一个轴缓慢转动 IMU。
+2. 观察 `angular_velocity` 是否只在对应轴显著变化。
+3. 观察 `orientation` 是否随姿态连续变化，不应出现突跳到全零或 `NaN`。
+4. 将 IMU 放回初始姿态后，姿态应基本回到初始值附近。
+
+推荐的快速定量检查：
+
+```bash
+rostopic echo /imu | grep -E "orientation:|angular_velocity:|linear_acceleration:" -A 12
+```
+
+观测点：
+
+- `imu_serial_bridge.py` 日志应显示已打开 `/dev/ttyUSB_imu`
+- `/imu` 频率应接近配置值 `100 Hz`
+- 静止时角速度接近 0，线加速度模接近 `9.8`
+- 缓慢单轴转动时，姿态和角速度响应方向一致且连续
+- 无连续 CRC/串口重连告警，无明显丢帧卡顿
+
+通过标准：
+
+- Jetson 在不启动舵机链路的情况下可稳定收到 IMU 数据并持续发布 `Imu` 消息
+- 发布频率、姿态连续性和静态重力幅值均合理
+- 原始串口有稳定数据流，ROS 话题数值与人工转动方向一致
+
+记录：
+
+- 实际现象：
+- 关键观测数据：
+- 结果： [ ] 通过 [ ] 失败 [ ] 阻塞
+- 问题与备注：
 grep -n "seal_confidence" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head
 grep -n "required_adhesion_force" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head
 grep -n "joint_currents" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head

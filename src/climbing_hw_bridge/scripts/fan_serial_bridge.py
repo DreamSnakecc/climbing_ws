@@ -27,9 +27,9 @@ class FanSerialBridge(object):
         self.telemetry_protocol = str(get_cfg("telemetry_protocol", "current_frame")).lower()
         self.leg_count = int(get_cfg("leg_count", 4))
         self.telemetry_rate_hz = float(get_cfg("telemetry_rate_hz", 50.0))
-        self.total_rpm_header = bytes([0x01, 0x02])
-        self.indexed_leg_header = bytes([0x02, 0x03])
-        self.current_frame_header = bytes(self._parse_byte_list(get_cfg("current_frame_header", [0x03, 0x04])))
+        self.total_rpm_header = self._byte_buffer([0x01, 0x02])
+        self.indexed_leg_header = self._byte_buffer([0x02, 0x03])
+        self.current_frame_header = self._byte_buffer(self._parse_byte_list(get_cfg("current_frame_header", [0x03, 0x04])))
         self.current_payload_format = self.float_endianness + str(get_cfg("current_payload_format", "4f"))
         self.command_leg_order = [str(name) for name in get_cfg("command_leg_order", ["lf", "rf", "rr", "lr"])]
         self.msg_leg_order = [str(name) for name in get_cfg("msg_leg_order", ["lf", "rf", "lr", "rr"])]
@@ -37,7 +37,7 @@ class FanSerialBridge(object):
         self.current_leg_order = [str(name) for name in get_cfg("current_leg_order", list(self.msg_leg_order))]
         self.rpm_scale = float(get_cfg("rpm_scale", 1.0))
         self.current_scale = float(get_cfg("current_scale", 1.0))
-        self.stm32_frame_header = bytes(self._parse_byte_list(get_cfg("stm32_frame_header", [0xFF, 0xDD])))
+        self.stm32_frame_header = self._byte_buffer(self._parse_byte_list(get_cfg("stm32_frame_header", [0xFF, 0xDD])))
         self.stm32_payload_length = int(get_cfg("stm32_payload_length", 32))
         self.stm32_float_count = int(get_cfg("stm32_float_count", 8))
         self.stm32_payload_format = ">" + str(self.stm32_float_count) + "f"
@@ -90,6 +90,10 @@ class FanSerialBridge(object):
                 parsed.append(int(value))
         return parsed
 
+    @staticmethod
+    def _byte_buffer(values):
+        return bytearray([int(value) & 0xFF for value in values])
+
     def try_open_port(self):
         try:
             self.port = serial.Serial(self.port_name, self.baudrate, timeout=0.1)
@@ -100,10 +104,10 @@ class FanSerialBridge(object):
 
     def _pack_total_rpm_command(self):
         ordered_targets = [float(self.leg_targets[leg_name]["target_rpm"]) for leg_name in self.command_leg_order]
-        return self.total_rpm_header + struct.pack(self.float_endianness + "4f", *ordered_targets)
+        return self.total_rpm_header + bytearray(struct.pack(self.float_endianness + "4f", *ordered_targets))
 
     def _pack_indexed_leg_command(self, fan_id, target_rpm):
-        payload = struct.pack(self.float_endianness + "Bf", int(fan_id), float(target_rpm))
+        payload = bytearray(struct.pack(self.float_endianness + "Bf", int(fan_id), float(target_rpm)))
         return self.indexed_leg_header + payload
 
     def _send_bytes(self, payload, log_value):
@@ -193,7 +197,7 @@ class FanSerialBridge(object):
                 del self.rx_buffer[0]
                 continue
 
-            packet = bytes(self.rx_buffer[:self.stm32_packet_size])
+            packet = bytearray(self.rx_buffer[:self.stm32_packet_size])
             checksum = sum(bytearray(packet[:-1])) & 0xFF
             if checksum != int(packet[-1]):
                 del self.rx_buffer[0]
