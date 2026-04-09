@@ -1,0 +1,386 @@
+robot:
+  mass_kg: 8.5
+  support_legs: [lf, rf, lr, rr]
+  # Control uses the universal-joint center as the non-adhesive quadruped-style support point.
+  active_endpoint: universal_joint_center
+  suction_cavity_height_mm: 20.0
+  skirt_height_uncompressed_mm: 20.0
+  skirt_height_compressed_min_mm: 8.0
+  skirt_height_compressed_max_mm: 10.0
+
+body_planner:
+  publish_rate_hz: 50.0
+  gait: crawl    # crawl or trot
+  gait_frequency_hz: 0.25
+  crawl_swing_ratio: 0.25
+  trot_swing_ratio: 0.50
+  startup_hold_s: 1.0
+  step_transition_margin: 0.08
+  nominal_position_m: [0.0, 0.0, 0.0]
+  nominal_rpy_deg: [0.0, 0.0, 0.0]
+  linear_velocity_world_mps: [0.0, 0.0, 0.0]
+  angular_velocity_world_rps: [0.0, 0.0, 0.0]
+  com_shift_gain_m: [0.025, 0.03, 0.0]
+  orientation_shift_gain_deg: [6.0, 4.0, 0.0]
+  slip_pause_threshold: 0.92
+  slip_hold_all_support: true
+
+mission_supervisor:
+  publish_rate_hz: 20.0
+  auto_start: true
+  auto_resume: false
+  init_duration_s: 1.0
+  stick_timeout_s: 3.0
+  pause_on_safe_mode: true
+  pause_on_high_slip: true
+  pause_on_adhesion_loss: true
+  high_slip_threshold: 0.92
+  adhesion_required_count: 4
+  attach_rpm: 3200.0
+  climb_rpm: 3200.0
+  pause_rpm: 3200.0
+  fault_rpm: 3400.0
+  release_rpm: 0.0
+  swing_release_rpm: 0.0
+  touchdown_rpm: 3400.0
+  touchdown_boost_duration_s: 0.25
+  pre_attach_time_s: 0.12
+  default_normal_force_limit: 150.0
+  adhesion_force_reference_n: 35.0
+  adhesion_rpm_min_scale: 0.85
+  adhesion_rpm_max_scale: 1.35
+  # Swing-leg attachment timing is now state-driven: wall touch -> preload -> fan attach -> stable attachment.
+  leg_count: 4
+  leg_names: [lf, rf, lr, rr]
+
+fan_controller:
+  port: /dev/ttyUSB_fan
+  baudrate: 115200
+  float_endianness: ">"
+  protocol: total_rpm   # Options: total_rpm, indexed_leg_rpm
+  telemetry_protocol: stm32_rpm_current_frame
+  leg_count: 4
+  command_leg_order: [lf, rf, rr, lr]
+  msg_leg_order: [lf, rf, lr, rr]
+  rpm_leg_order: [lf, rf, rr, lr]
+  telemetry_rate_hz: 50.0
+  stm32_frame_header: [0xFF, 0xDD]
+  stm32_payload_length: 32
+  stm32_float_count: 8
+  rpm_scale: 1.0
+  current_frame_header: [0x03, 0x04]
+  current_payload_format: 4f
+  current_leg_order: [lf, rf, rr, lr]
+  current_scale: 1.0
+
+wall:
+  default_friction_coefficient: 0.5
+  max_normal_force_n: 150.0
+  adhesion_friction_coefficient: 0.5
+  adhesion_safety_factor: 1.15
+  normal_body: [0.0, 0.0, 1.0]
+  legacy_contact_normal_axis: z
+
+stance_optimizer:
+  wall_normal_body: [0.0, 0.0, 1.0]
+  min_normal_force_n: 5.0
+  regularization: 0.001
+  gradient_step_size: 0.02
+  qp_iterations: 80
+  kp_linear: [60.0, 60.0, 80.0]
+  kd_linear: [18.0, 18.0, 20.0]
+  kp_angular: [18.0, 18.0, 12.0]
+  kd_angular: [2.5, 2.5, 1.5]
+  gravity_world: [0.0, 0.0, -9.81]
+  force_tracking_weight: [1.0, 1.0, 1.0]
+  torque_tracking_weight: [0.15, 0.15, 0.1]
+  # Support-force QP uses the universal-joint center rather than the suction-cup bottom center.
+  contact_point_source: universal_joint_center
+
+state_estimator:
+  publish_rate_hz: 50.0
+  mocap_timeout_s: 0.25
+  use_external_pose_estimate: false
+  gravity_world: [0.0, 0.0, -9.81]
+  linear_velocity_alpha: 0.35
+  angular_velocity_alpha: 0.35
+  support_force_threshold_n: 5.0
+  adhesion_force_threshold_n: 10.0
+  current_contact_threshold_a: 0.4
+  torque_contact_threshold_nm: 0.5
+  # Torque/current/fan-current derived contact states feed the guided swing attachment state machine.
+  slip_warning_ratio: 0.75
+  early_contact_phase_threshold: 0.5
+  compression_ready_ratio: 0.8
+  normal_force_to_compression_gain_m_per_n: 8.0e-5
+  # Placeholder for the future experimentally fitted suction-force/skirt-compression map.
+  adhesion_force_to_compression_gain_m_per_n: 0.0
+  adhesion_force_to_compression_bias_m: 0.0
+  contact_confidence_threshold: 0.45
+  stable_contact_confidence_threshold: 0.75
+  recent_contact_position_alpha: 0.2
+  fan_min_active_rpm: 300.0
+  fan_current_reference_rpm: 3200.0
+  fan_current_free_spin_a: 0.08
+  fan_current_stable_a: 0.45
+  ekf_initial_covariance: 0.25
+  ekf_body_position_process_std_m: 0.02
+  ekf_body_velocity_process_std_mps: 0.15
+  ekf_body_acceleration_process_std_mps2: 1.5
+  # Legacy key names kept for compatibility. These process noises are for the universal-joint-center support point.
+  ekf_contact_foot_process_std_m: 0.003
+  ekf_swing_foot_process_std_m: 0.08
+  ekf_contact_position_measurement_std_m: 0.01
+  ekf_swing_position_measurement_std_m: 0.20
+  ekf_contact_velocity_measurement_std_mps: 0.05
+  ekf_swing_velocity_measurement_std_mps: 1.20
+  ekf_external_position_measurement_std_m: 0.01
+  ekf_reset_position_jump_m: 0.75
+  contact_offset_sign: 1.0
+  friction_coefficient: 0.5
+  default_normal_force_limit: 150.0
+  wall_normal_body: [0.0, 0.0, 1.0]
+
+state_logger:
+  enabled: false
+  output_dir: ~/.ros/climbing_logs
+  session_name: climbing_session
+  snapshot_rate_hz: 10.0
+  flush_every_n_records: 10
+  compact_mode: true
+  record_events: true
+  record_snapshots: true
+  event_topics: [/state/estimated, /control/body_reference, /control/swing_leg_target, /control/mission_state, /control/mission_active, /jetson/fan_serial_bridge/adhesion_command, /jetson/fan_serial_bridge/fan_currents, /jetson/fan_serial_bridge/leg_rpm, /jetson/dynamixel_bridge/joint_currents, /jetson/local_safety_supervisor/safe_mode]
+  snapshot_topics: [/state/estimated, /control/body_reference, /control/swing_leg_target, /control/mission_state, /control/mission_active, /jetson/fan_serial_bridge/adhesion_command, /jetson/fan_serial_bridge/fan_currents, /jetson/fan_serial_bridge/leg_rpm, /jetson/dynamixel_bridge/joint_state, /jetson/dynamixel_bridge/joint_currents, /jetson/imu_serial_bridge/imu, /sensing/mocap_pose, /jetson/local_safety_supervisor/safe_mode]
+  record_stance_wrench_events: true
+  record_stance_wrench_snapshots: true
+  leg_names: [lf, rf, lr, rr]
+  parameter_roots: [/robot, /wall, /gait_controller, /body_planner, /state_estimator, /stance_optimizer, /swing_leg_controller, /mission_supervisor, /state_logger]
+
+swing_leg_controller:
+  publish_rate_hz: 50.0
+  swing_duration_s: 0.65
+  clearance_m: 0.035
+  retraction_m: 0.015
+  touchdown_extension_m: 0.008
+  slip_clearance_gain: 0.5
+  raibert_height_gain: 1.0
+  raibert_velocity_gain: 1.0
+  foot_delta_x_limit_m: 0.10
+  foot_delta_y_limit_m: 0.10
+  nominal_skirt_compression_target: 0.0
+  swing_skirt_compression_target: 0.0
+  max_position_offset_m: [0.045, 0.035, 0.05]
+  max_velocity_mps: [0.30, 0.25, 0.30]
+  feedforward_twist_gain: [0.16, 0.16, 0.0]
+  body_position_gain: [0.70, 0.70, 0.35]
+  body_velocity_gain: [0.12, 0.12, 0.08]
+  body_angular_position_gain: [0.10, 0.10, 0.06]
+  body_angular_velocity_gain: [0.02, 0.02, 0.01]
+  admittance_mass: [0.8, 0.8, 0.6]
+  admittance_damping: [18.0, 18.0, 16.0]
+  admittance_stiffness: [85.0, 85.0, 70.0]
+  wall_normal_body: [0.0, 0.0, 1.0]
+  # Guided wall-attachment swing phases: keep light wall contact, align tangentially, preload, then attach compliantly.
+  detach_contact_offset_m: 0.006
+  detach_slide_duration_s: 0.12
+  tangential_align_duration_s: 0.28
+  preload_duration_s: 0.16
+  fan_attach_command_duration_s: 0.05
+  compliant_settle_timeout_s: 0.40
+  preload_extra_normal_m: 0.004
+  fan_attach_sink_m: 0.008
+  tangential_alignment_tolerance_m: 0.008
+  normal_alignment_tolerance_m: 0.004
+  light_contact_skirt_compression_target: 0.20
+  preload_skirt_compression_target: 0.85
+  preload_normal_force_limit_n: 15.0
+  attach_normal_force_limit_n: 25.0
+  fan_attach_current_threshold_a: 0.10
+  fan_attach_current_full_scale_a: 0.35
+  detach_velocity_limit_mps: [0.05, 0.05, 0.05]
+  tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
+  preload_velocity_limit_mps: [0.04, 0.04, 0.03]
+  compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
+  compliant_tangential_gain: 8.0
+  compliant_normal_gain: 10.0
+
+jetson:
+  command_rate_hz: 100.0
+  max_command_rate_hz: 200.0
+
+dynamixel_telemetry:
+  telemetry_rate_hz: 20.0
+  current_command_rate_hz: 50.0
+  position_service: /get_position
+  current_service: /get_current
+  current_lsb_ma: 2.69
+  support_operating_mode: 5
+  default_operating_mode_marker: 255
+  jacobian_delta_rad: 0.001
+  support_current_margin_a: 0.08
+  max_goal_current_a: 4.8
+  min_goal_current_a: 0.0
+  joint_current_scale: [0.35, 1.0, 1.0]
+  # Approximate piecewise fits digitized from the provided motor current-torque plots.
+  # The bridge uses absolute current for interpolation and restores the sign afterward.
+  # xw540 is used on joint 1 (IDs 11-14), xw430 is used on joints 2/3 (IDs 1-8).
+  torque_models:
+    xw540:
+      current_to_torque_points:
+        - current_a: 0.48
+          torque_nm: 0.70
+        - current_a: 1.60
+          torque_nm: 2.80
+        - current_a: 2.55
+          torque_nm: 4.50
+        - current_a: 3.65
+          torque_nm: 6.30
+        - current_a: 4.70
+          torque_nm: 8.00
+      torque_constant_nm_per_a: 1.78
+      torque_bias_nm: -0.32
+    xw430:
+      current_to_torque_points:
+        - current_a: 0.14
+          torque_nm: 0.10
+        - current_a: 0.32
+          torque_nm: 0.35
+        - current_a: 0.68
+          torque_nm: 0.85
+        - current_a: 0.97
+          torque_nm: 1.15
+        - current_a: 1.24
+          torque_nm: 1.45
+      torque_constant_nm_per_a: 1.28
+      torque_bias_nm: -0.06
+  torque_model_by_motor:
+    "1": xw430
+    "2": xw430
+    "3": xw430
+    "4": xw430
+    "5": xw430
+    "6": xw430
+    "7": xw430
+    "8": xw430
+    "11": xw540
+    "12": xw540
+    "13": xw540
+    "14": xw540
+  torque_constant_nm_per_a:
+    default: 1.0
+  torque_bias_nm:
+    default: 0.0
+
+imu:
+  protocol: fdilink
+  frame_id: imu
+  use_mock_data: false
+  # IMU mounting default: imu y || body x and reverse direction, imu x || body y
+  # and reverse direction, so right-hand consistency implies imu z || -body z.
+  sensor_vector_to_body_xyzw: [0.70710678, -0.70710678, 0.0, 0.0]
+  # FDILink quaternion conversion keeps the same static sensor-to-body rotation
+  # explicit on both sides of the raw orientation quaternion transform.
+  fdilink_orientation_pre_xyzw: [0.70710678, -0.70710678, 0.0, 0.0]
+  fdilink_orientation_post_xyzw: [0.70710678, -0.70710678, 0.0, 0.0]
+  port: /dev/ttyUSB_imu
+  baudrate: 921600
+  timeout_s: 0.02
+  publish_rate_hz: 100.0
+  read_chunk_size: 512
+  reconnect_interval_s: 1.0
+  device_type: 1
+  frame_header: [0x55, 0xAA]
+  payload_format: <9f
+  fields: [roll_deg, pitch_deg, yaw_deg, ax, ay, az, gx, gy, gz]
+  checksum_type: none
+  checksum_include_header: false
+  orientation_source: euler_deg
+  orientation_fields: [roll_deg, pitch_deg, yaw_deg]
+  angular_velocity_fields: [gx, gy, gz]
+  linear_acceleration_fields: [ax, ay, az]
+  angular_velocity_unit: radps
+  linear_acceleration_unit: mps2
+  orientation_covariance_diagonal: [0.02, 0.02, 0.04]
+  angular_velocity_covariance_diagonal: [0.01, 0.01, 0.01]
+  linear_acceleration_covariance_diagonal: [0.04, 0.04, 0.04]
+  field_scale: {}
+
+legs:
+  lf:
+    hip_yaw_deg: 45.0
+    motor_ids: [11, 1, 2]
+  rf:
+    hip_yaw_deg: -45.0
+    motor_ids: [12, 3, 4]
+  lr:
+    hip_yaw_deg: 135.0
+    motor_ids: [14, 7, 8]
+  rr:
+    hip_yaw_deg: -135.0
+    motor_ids: [13, 5, 6]
+
+gait_controller:
+  nominal_x: 120.0
+  nominal_y: 0.0
+  nominal_universal_joint_center_z: -179.0
+  # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
+  nominal_z: -299.2
+  link_coxa: 44.75
+  link_femur: 74.0
+  link_tibia: 150.0
+  link_a3: 41.5
+  link_d6: -13.5
+  link_d7: -106.7
+  base_radius: 203.06
+  gear_ratio_joint2: 1.0
+  gear_ratio_joint3: 4.421
+  joint_limit_deg:
+    j1: [-90.0, 90.0]
+    j2: [-10.0, 190.0]
+    j3: [-100.0, 100.0]
+  joint_zero_deg:
+    j1: 0.0
+    j2: 90.0
+    j3: 0.0
+  startup_pose_mode: capture_current_as_home
+  single_turn_ids: [11, 12, 13, 14]
+  position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
+  motor_home_ticks:
+    "1": 2126
+    "2": 448
+    "3": 1528
+    "4": 5119
+    "5": 3921
+    "6": 117
+    "7": 3045
+    "8": 1486
+    "11": 2014
+    "12": 1903
+    "13": 2041
+    "14": 1022
+  motor_dir:
+    "1": 1
+    "2": 1
+    "3": -1
+    "4": -1
+    "5": 1
+    "6": 1
+    "7": -1
+    "8": -1
+    "11": -1
+    "12": -1
+    "13": -1
+    "14": -1
+
+left_board:
+  device_name: /dev/ttyUSB_l
+  baudrate: 1000000
+  motor_ids: [11, 1, 2, 14, 7, 8]
+  multi_turn_ids: [2, 8]
+
+right_board:
+  device_name: /dev/ttyUSB_r
+  baudrate: 1000000
+  motor_ids: [12, 3, 4, 13, 5, 6]
+  multi_turn_ids: [4, 6]

@@ -1,0 +1,6 @@
+std_msgs/Header header
+uint8 leg_index
+uint8 mode
+float32 target_rpm
+float32 normal_force_limit
+float32 required_adhesion_force

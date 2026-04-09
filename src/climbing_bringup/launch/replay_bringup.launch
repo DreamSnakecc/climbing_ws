@@ -1,0 +1,7 @@
+<launch>
+  <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
+  <node pkg="climbing_state_estimator" type="state_estimator.py" name="state_estimator" output="screen" />
+  <node pkg="climbing_control_core" type="body_planner.py" name="body_planner" output="screen" />
+  <node pkg="climbing_control_core" type="stance_force_optimizer.py" name="stance_force_optimizer" output="screen" />
+  <node pkg="climbing_control_core" type="swing_leg_controller.py" name="swing_leg_controller" output="screen" />
+</launch>

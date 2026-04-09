@@ -1,0 +1,4 @@
+float32 target_rpm
+---
+bool accepted
+string message

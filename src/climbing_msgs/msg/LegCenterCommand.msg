@@ -1,0 +1,7 @@
+std_msgs/Header header
+string leg_name
+geometry_msgs/Point center
+geometry_msgs/Vector3 center_velocity
+float32 skirt_compression_target
+bool support_leg
+float32 desired_normal_force_limit

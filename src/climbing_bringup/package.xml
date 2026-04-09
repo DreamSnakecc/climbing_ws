@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>climbing_bringup</name>
+  <version>0.0.1</version>
+  <description>Launch files for the climbing quadruped workspace.</description>
+
+  <maintainer email="user@example.com">user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>climbing_control_core</depend>
+  <depend>climbing_description</depend>
+  <depend>climbing_hw_bridge</depend>
+  <depend>climbing_state_estimator</depend>
+</package>

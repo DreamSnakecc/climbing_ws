@@ -1,0 +1,6 @@
+build/
+devel/
+log/
+.vscode/
+*.pyc
+__pycache__/
