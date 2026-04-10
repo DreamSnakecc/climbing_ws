@@ -92,7 +92,7 @@ class StateLogger(object):
         self.session_name = rospy.get_param('~session_name', 'climbing_session')
         self.snapshot_rate_hz = float(rospy.get_param('~snapshot_rate_hz', 10.0))
         self.flush_every_n = int(rospy.get_param('~flush_every_n_records', 10))
-        self.leg_names = rospy.get_param('~leg_names', ['lf', 'rf', 'lr', 'rr'])
+        self.leg_names = rospy.get_param('~leg_names', ['lf', 'rf', 'rr', 'lr'])
         self.compact_mode = bool(rospy.get_param('~compact_mode', True))
         self.record_events = bool(rospy.get_param('~record_events', True))
         self.record_snapshots = bool(rospy.get_param('~record_snapshots', True))

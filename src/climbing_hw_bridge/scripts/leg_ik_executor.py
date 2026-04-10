@@ -64,7 +64,7 @@ class LegIkExecutor(object):
             "rr": {"motor_ids": [13, 5, 6], "hip_yaw_deg": -135.0},
         }
         leg_cfg = get_cfg("legs", default_leg_cfg)
-        self.leg_order = ["lf", "rf", "lr", "rr"]
+        self.leg_order = ["lf", "rf", "rr", "lr"]
         self.legs = {}
         self.motor_index = []
         for name in self.leg_order:

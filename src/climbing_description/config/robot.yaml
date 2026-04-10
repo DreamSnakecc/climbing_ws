@@ -1,6 +1,6 @@
 robot:
   mass_kg: 8.5
-  support_legs: [lf, rf, lr, rr]
+  support_legs: [lf, rf, rr, lr]
   # Control uses the universal-joint center as the non-adhesive quadruped-style support point.
   active_endpoint: universal_joint_center
   suction_cavity_height_mm: 20.0
@@ -39,7 +39,7 @@ mission_supervisor:
   attach_rpm: 30000.0
   climb_rpm: 30000.0
   pause_rpm: 30000.0
-  fault_rpm: 34000.0
+  fault_rpm: 35000.0
   release_rpm: 0.0
   swing_release_rpm: 0.0
   touchdown_rpm: 34000.0
@@ -51,7 +51,7 @@ mission_supervisor:
   adhesion_rpm_max_scale: 1.35
   # Swing-leg attachment timing is now state-driven: wall touch -> preload -> fan attach -> stable attachment.
   leg_count: 4
-  leg_names: [lf, rf, lr, rr]
+  leg_names: [lf, rf, rr, lr]
 
 fan_controller:
   port: /dev/ttyUSB_fan
@@ -61,7 +61,7 @@ fan_controller:
   telemetry_protocol: stm32_rpm_current_frame
   leg_count: 4
   command_leg_order: [lf, rf, rr, lr]
-  msg_leg_order: [lf, rf, lr, rr]
+  msg_leg_order: [lf, rf, rr, lr]
   rpm_leg_order: [lf, rf, rr, lr]
   telemetry_rate_hz: 50.0
   stm32_frame_header: [0xFF, 0xDD]
@@ -154,7 +154,7 @@ state_logger:
   snapshot_topics: [/state/estimated, /control/body_reference, /control/swing_leg_target, /control/mission_state, /control/mission_active, /jetson/fan_serial_bridge/adhesion_command, /jetson/fan_serial_bridge/fan_currents, /jetson/fan_serial_bridge/leg_rpm, /jetson/dynamixel_bridge/joint_state, /jetson/dynamixel_bridge/joint_currents, /jetson/imu_serial_bridge/imu, /sensing/mocap_pose, /jetson/local_safety_supervisor/safe_mode]
   record_stance_wrench_events: true
   record_stance_wrench_snapshots: true
-  leg_names: [lf, rf, lr, rr]
+  leg_names: [lf, rf, rr, lr]
   parameter_roots: [/robot, /wall, /gait_controller, /body_planner, /state_estimator, /stance_optimizer, /swing_leg_controller, /mission_supervisor, /state_logger]
 
 swing_leg_controller:

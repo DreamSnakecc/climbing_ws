@@ -92,7 +92,7 @@ class StanceForceOptimizer(object):
         self.adhesion_safety_factor = float(get_cfg("adhesion_safety_factor", rospy.get_param("/wall/adhesion_safety_factor", 1.15)))
         self.max_normal_force = float(get_cfg("max_normal_force", rospy.get_param("/wall/max_normal_force_n", 150.0)))
         self.min_normal_force = float(get_cfg("min_normal_force_n", get_cfg("min_normal_force", 5.0)))
-        self.leg_names = get_cfg("leg_names", ["lf", "rf", "lr", "rr"])
+        self.leg_names = get_cfg("leg_names", ["lf", "rf", "rr", "lr"])
         self.contact_point_source = str(get_cfg("contact_point_source", rospy.get_param("/robot/active_endpoint", "universal_joint_center"))).lower()
         self.regularization = float(get_cfg("regularization", 1e-3))
         self.gradient_step_size = float(get_cfg("gradient_step_size", 0.02))

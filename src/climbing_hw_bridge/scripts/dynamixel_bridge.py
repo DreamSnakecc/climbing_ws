@@ -101,7 +101,7 @@ class DynamixelBridge(object):
     def _build_motor_joint_index(self):
         legs = rospy.get_param("/legs", {})
         mapping = {}
-        for leg_name in ["lf", "rf", "lr", "rr"]:
+        for leg_name in ["lf", "rf", "rr", "lr"]:
             motor_ids = [int(value) for value in legs.get(leg_name, {}).get("motor_ids", [])]
             for joint_index, motor_id in enumerate(motor_ids):
                 mapping[motor_id] = {"leg_name": leg_name, "joint_index": joint_index}

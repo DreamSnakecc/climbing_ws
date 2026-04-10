@@ -169,7 +169,7 @@ class SwingLegController(object):
         def get_cfg(name, default):
             return rospy.get_param("~" + name, rospy.get_param("/swing_leg_controller/" + name, default))
 
-        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "lr", "rr"])]
+        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
         self.rate_hz = float(get_cfg("publish_rate_hz", 50.0))
         self.swing_duration_s = max(float(get_cfg("swing_duration_s", 0.65)), 0.1)
         self.clearance_m = float(get_cfg("clearance_m", 0.035))

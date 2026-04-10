@@ -32,7 +32,7 @@ class FanSerialBridge(object):
         self.current_frame_header = self._byte_buffer(self._parse_byte_list(get_cfg("current_frame_header", [0x03, 0x04])))
         self.current_payload_format = self.float_endianness + str(get_cfg("current_payload_format", "4f"))
         self.command_leg_order = [str(name) for name in get_cfg("command_leg_order", ["lf", "rf", "rr", "lr"])]
-        self.msg_leg_order = [str(name) for name in get_cfg("msg_leg_order", ["lf", "rf", "lr", "rr"])]
+        self.msg_leg_order = [str(name) for name in get_cfg("msg_leg_order", ["lf", "rf", "rr", "lr"])]
         self.rpm_leg_order = [str(name) for name in get_cfg("rpm_leg_order", list(self.msg_leg_order))]
         self.current_leg_order = [str(name) for name in get_cfg("current_leg_order", list(self.msg_leg_order))]
         self.rpm_scale = float(get_cfg("rpm_scale", 1.0))

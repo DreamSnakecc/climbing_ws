@@ -52,7 +52,7 @@ class BodyPlanner(object):
             return rospy.get_param("~" + name, rospy.get_param("/body_planner/" + name, default))
 
         self.rate_hz = float(get_cfg("publish_rate_hz", 50.0))
-        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "lr", "rr"])]
+        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
         self.gait = str(get_cfg("gait", rospy.get_param("/gait_controller/gait", "crawl"))).lower()
         self.gait_frequency_hz = float(get_cfg("gait_frequency_hz", rospy.get_param("/gait_controller/gait_frequency", 0.25)))
         self.crawl_swing_ratio = float(get_cfg("crawl_swing_ratio", rospy.get_param("/gait_controller/crawl_swing_ratio", 0.25)))

@@ -117,7 +117,7 @@ class StateEstimator(object):
         def get_cfg(name, default):
             return rospy.get_param("~" + name, rospy.get_param("/state_estimator/" + name, default))
 
-        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "lr", "rr"])]
+        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
         self.rate_hz = float(get_cfg("publish_rate_hz", 50.0))
         self.mocap_timeout_s = float(get_cfg("mocap_timeout_s", 0.25))
         self.use_external_pose_estimate = bool(get_cfg("use_external_pose_estimate", False))

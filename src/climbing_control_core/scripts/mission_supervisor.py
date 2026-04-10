@@ -44,7 +44,7 @@ class MissionSupervisor(object):
         self.adhesion_rpm_min_scale = float(get_cfg("adhesion_rpm_min_scale", 0.85))
         self.adhesion_rpm_max_scale = max(float(get_cfg("adhesion_rpm_max_scale", 1.35)), self.adhesion_rpm_min_scale)
         self.leg_count = int(get_cfg("leg_count", 4))
-        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "lr", "rr"])]
+        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
 
         self.state = self.STATE_INIT
         self.state_since = rospy.Time.now()
