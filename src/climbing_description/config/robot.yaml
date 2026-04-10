@@ -39,7 +39,7 @@ mission_supervisor:
   attach_rpm: 30000.0
   climb_rpm: 30000.0
   pause_rpm: 30000.0
-  fault_rpm: 35000.0
+  fault_rpm: 34000.0
   release_rpm: 0.0
   swing_release_rpm: 0.0
   touchdown_rpm: 34000.0

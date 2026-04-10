@@ -23,6 +23,8 @@ class DynamixelBridge(object):
 
         self.motor_ids = [int(value) for value in rospy.get_param("~ordered_motor_ids", [])]
         self.command_topic = rospy.get_param("~command_topic", "/jetson/joint_position_ticks_cmd")
+        self.enable_auto_mode_switching = bool(rospy.get_param("~enable_auto_mode_switching", True))
+        self.enable_auto_current_control = bool(rospy.get_param("~enable_auto_current_control", True))
         self.telemetry_rate_hz = float(get_cfg("telemetry_rate_hz", 20.0))
         self.current_command_rate_hz = float(get_cfg("current_command_rate_hz", 50.0))
         self.position_service_name = str(get_cfg("position_service", "/get_position"))
@@ -327,6 +329,8 @@ class DynamixelBridge(object):
             self.current_operating_mode[int(motor_id)] = int(requested_mode)
 
     def swing_target_callback(self, msg):
+        if not self.enable_auto_mode_switching:
+            return
         if msg.leg_name not in self.leg_support_mode:
             return
         support_mode = bool(msg.support_leg)
@@ -335,6 +339,8 @@ class DynamixelBridge(object):
             self._set_leg_mode(msg.leg_name, support_mode)
 
     def stance_wrench_callback(self, msg, leg_name):
+        if not self.enable_auto_current_control:
+            return
         if leg_name not in self.leg_wrench:
             return
         self.leg_wrench[leg_name]["active"] = bool(msg.active)
@@ -420,6 +426,8 @@ class DynamixelBridge(object):
         self.current_pub.publish(current_msg)
 
     def publish_current_commands(self, _event):
+        if not self.enable_auto_current_control:
+            return
         for leg_name, support_mode in self.leg_support_mode.items():
             if not support_mode:
                 continue

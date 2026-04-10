@@ -25,6 +25,7 @@ class LegIkExecutor(object):
 
         self.command_topic = rospy.get_param("~command_topic", "/jetson/joint_position_ticks_cmd")
         self.command_pub = rospy.Publisher(self.command_topic, JointState, queue_size=20)
+        self.enable_auto_position_commands = bool(rospy.get_param("~enable_auto_position_commands", True))
         self.rate_hz = float(rospy.get_param("~rate_hz", rospy.get_param("/jetson/command_rate_hz", 100.0)))
         self.input_mode = rospy.get_param("~input_mode", "absolute_center_m")  # or "delta_from_nominal_m"
 
@@ -181,6 +182,8 @@ class LegIkExecutor(object):
         self.last_ticks = self.compute_all_ticks()
 
     def publish_ticks(self, _event):
+        if not self.enable_auto_position_commands:
+            return
         ticks_msg = JointState()
         ticks_msg.header.stamp = rospy.Time.now()
         ticks_msg.name = [str(motor_id) for motor_id in self.motor_index]

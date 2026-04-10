@@ -1,0 +1,7 @@
+<launch>
+  <include file="$(find climbing_bringup)/launch/jetson_bringup.launch">
+    <arg name="enable_auto_position_commands" value="false" />
+    <arg name="enable_auto_mode_switching" value="false" />
+    <arg name="enable_auto_current_control" value="false" />
+  </include>
+</launch>

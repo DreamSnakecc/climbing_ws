@@ -20,6 +20,7 @@ class MissionSupervisor(object):
 
         self.rate_hz = float(get_cfg("publish_rate_hz", 20.0))
         self.auto_start = bool(get_cfg("auto_start", True))
+        self.enable_auto_adhesion_commands = bool(get_cfg("enable_auto_adhesion_commands", True))
         self.auto_resume = bool(get_cfg("auto_resume", False))
         self.init_duration_s = max(float(get_cfg("init_duration_s", 1.0)), 0.0)
         self.stick_timeout_s = max(float(get_cfg("stick_timeout_s", 3.0)), 0.1)
@@ -231,6 +232,8 @@ class MissionSupervisor(object):
         return 0, self.swing_release_rpm
 
     def _publish_adhesion_command(self):
+        if not self.enable_auto_adhesion_commands:
+            return
         stamp = rospy.Time.now()
         for leg_name in self.leg_names:
             leg_index = self.leg_index_map[leg_name]

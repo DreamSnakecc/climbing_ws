@@ -1,0 +1,9 @@
+<launch>
+  <arg name="enable_state_logger" default="false" />
+
+  <include file="$(find climbing_bringup)/launch/pc_bringup.launch">
+    <arg name="enable_state_logger" value="$(arg enable_state_logger)" />
+    <arg name="mission_auto_start" value="false" />
+    <arg name="enable_auto_adhesion_commands" value="false" />
+  </include>
+</launch>
