@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 
 import math
+import os
 
 import rospy
 from geometry_msgs.msg import Point
 from sensor_msgs.msg import JointState
 
 from climbing_msgs.msg import LegCenterCommand
+from dynamixel_control.srv import GetPosition
 
 
 class LegKinematics(object):
@@ -24,10 +26,12 @@ class LegIkExecutor(object):
             return rospy.get_param("~" + name, rospy.get_param("/gait_controller/" + name, default))
 
         self.command_topic = rospy.get_param("~command_topic", "/jetson/joint_position_ticks_cmd")
+        self.robot_config_path = rospy.get_param("~robot_config_path", "")
         self.command_pub = rospy.Publisher(self.command_topic, JointState, queue_size=20)
         self.enable_auto_position_commands = bool(rospy.get_param("~enable_auto_position_commands", True))
         self.rate_hz = float(rospy.get_param("~rate_hz", rospy.get_param("/jetson/command_rate_hz", 100.0)))
         self.input_mode = rospy.get_param("~input_mode", "absolute_center_m")  # or "delta_from_nominal_m"
+        self.startup_pose_mode = str(get_cfg("startup_pose_mode", "use_motor_home_ticks"))
 
         self.nominal_x = float(get_cfg("nominal_x", 120.0))
         self.nominal_y = float(get_cfg("nominal_y", 0.0))
@@ -72,6 +76,12 @@ class LegIkExecutor(object):
             self.legs[name] = leg
             self.motor_index.extend(leg.motor_ids)
 
+        self.board_configs = self._load_board_configs()
+        self.position_clients = {}
+        self._init_position_service_clients()
+        self.nominal_output_deg = self._nominal_output_deg_vector()
+        self._initialize_startup_pose_mode()
+
         self.targets_m = {name: Point(0.0, 0.0, self.nominal_universal_joint_center_z / 1000.0) for name in self.leg_order}
         self.last_ticks = self.compute_all_ticks()
 
@@ -82,6 +92,116 @@ class LegIkExecutor(object):
     @staticmethod
     def _clamp(value, lo, hi):
         return max(lo, min(hi, value))
+
+    def _load_board_configs(self):
+        board_configs = {}
+        for board_name in ["left_board", "right_board"]:
+            board_param = rospy.get_param("/" + board_name, None)
+            if isinstance(board_param, dict):
+                board_configs[board_name] = {"motor_ids": [int(value) for value in board_param.get("motor_ids", [])]}
+        return board_configs
+
+    def _qualify_service(self, board_name, service_basename):
+        namespace = rospy.get_namespace().rstrip("/")
+        base_name = service_basename.strip("/")
+        if namespace:
+            return namespace + "/" + board_name + "/" + base_name
+        return "/" + board_name + "/" + base_name
+
+    def _init_position_service_clients(self):
+        for board_name in sorted(self.board_configs.keys()):
+            service_name = self._qualify_service(board_name, "get_position")
+            rospy.wait_for_service(service_name)
+            self.position_clients[board_name] = rospy.ServiceProxy(service_name, GetPosition)
+
+    def _board_name_for_motor(self, motor_id):
+        for board_name, board_cfg in self.board_configs.items():
+            if int(motor_id) in board_cfg.get("motor_ids", []):
+                return board_name
+        return None
+
+    def _read_motor_position(self, motor_id):
+        board_name = self._board_name_for_motor(motor_id)
+        if board_name is None:
+            return None
+        try:
+            return int(self.position_clients[board_name](int(motor_id)).position)
+        except rospy.ServiceException as exc:
+            rospy.logwarn("leg_ik_executor failed to read startup position for ID %d: %s", motor_id, exc)
+            return None
+
+    def _nominal_output_deg_vector(self):
+        q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(
+            self.nominal_x,
+            self.nominal_y,
+            self.nominal_universal_joint_center_z,
+        )
+        return [
+            q1_deg + float(self.joint_zero_deg["j1"]),
+            q2_deg + float(self.joint_zero_deg["j2"]),
+            q3_deg + float(self.joint_zero_deg["j3"]),
+        ]
+
+    def _capture_motor_home_from_current_pose(self):
+        captured_home = {}
+        for motor_id in self.motor_index:
+            raw_position = self._read_motor_position(motor_id)
+            if raw_position is None:
+                return None
+            if self._is_position_mode(motor_id):
+                raw_position %= 4096
+            captured_home[str(int(motor_id))] = int(raw_position)
+        return captured_home
+
+    def _persist_motor_home_ticks(self):
+        rospy.set_param("/gait_controller/motor_home_ticks", self.motor_home)
+        if not self.robot_config_path:
+            rospy.logwarn("leg_ik_executor has no robot_config_path; captured motor_home_ticks were not written to disk")
+            return
+        if not os.path.isfile(self.robot_config_path):
+            rospy.logwarn("leg_ik_executor could not find robot config file: %s", self.robot_config_path)
+            return
+
+        with open(self.robot_config_path, "r") as stream:
+            lines = stream.readlines()
+
+        start_index = None
+        end_index = None
+        for index, line in enumerate(lines):
+            if line.strip() == "motor_home_ticks:":
+                start_index = index
+                continue
+            if start_index is not None and line.startswith("  ") and not line.startswith("    "):
+                end_index = index
+                break
+        if start_index is None:
+            rospy.logwarn("leg_ik_executor could not locate motor_home_ticks block in %s", self.robot_config_path)
+            return
+        if end_index is None:
+            end_index = len(lines)
+
+        replacement = ["  motor_home_ticks:\n"]
+        for motor_id in sorted([int(key) for key in self.motor_home.keys()]):
+            replacement.append("    \"%d\": %d\n" % (motor_id, int(self.motor_home[str(motor_id)])))
+        lines[start_index:end_index] = replacement
+
+        with open(self.robot_config_path, "w") as stream:
+            stream.writelines(lines)
+        rospy.loginfo("leg_ik_executor updated motor_home_ticks in %s", self.robot_config_path)
+
+    def _initialize_startup_pose_mode(self):
+        if self.startup_pose_mode == "capture_current_as_home":
+            captured_home = self._capture_motor_home_from_current_pose()
+            if captured_home is None:
+                rospy.logwarn("leg_ik_executor could not capture startup motor positions; falling back to configured motor_home_ticks")
+                return
+            self.motor_home = captured_home
+            self._persist_motor_home_ticks()
+            rospy.loginfo("leg_ik_executor captured current motor positions as motor_home_ticks")
+            return
+        if self.startup_pose_mode != "use_motor_home_ticks":
+            rospy.logwarn("Unknown startup_pose_mode '%s'; defaulting to use_motor_home_ticks", self.startup_pose_mode)
+            self.startup_pose_mode = "use_motor_home_ticks"
 
     def _base_delta_to_leg_delta(self, dx_base_mm, dy_base_mm, leg):
         cos_yaw = math.cos(leg.hip_yaw)
@@ -134,13 +254,14 @@ class LegIkExecutor(object):
         home = float(self.motor_home.get(key, 0.0))
         direction = float(self.motor_dir.get(key, 1.0))
         ratio = self._joint_gear_ratio(joint_index)
+        nominal_output_deg = float(self.nominal_output_deg[joint_index])
 
         if int(motor_id) in self.direct_drive_ids:
             ratio = 1.0
         if self._is_position_mode(motor_id):
             home = home % 4096.0
 
-        ticks = home + direction * (output_deg * ratio) * unit
+        ticks = home + direction * ((output_deg - nominal_output_deg) * ratio) * unit
         return self._normalize_target_for_mode(motor_id, ticks)
 
     def _target_to_leg_deltas_mm(self, point_m):

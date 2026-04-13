@@ -46,21 +46,30 @@ class DynamixelBridge(object):
 
         self.gear_ratio_joint2 = float(get_gait_cfg("gear_ratio_joint2", 1.0))
         self.gear_ratio_joint3 = float(get_gait_cfg("gear_ratio_joint3", 4.421))
-        self.joint_zero_deg = get_gait_cfg("joint_zero_deg", {"j1": 0.0, "j2": 90.0, "j3": 0.0})
-        self.motor_home = get_gait_cfg("motor_home_ticks", {})
-        self.motor_dir = get_gait_cfg("motor_dir", {})
-        self.position_mode_ids = set([int(value) for value in get_gait_cfg("position_mode_ids", [])])
-        self.direct_drive_ids = set([int(value) for value in get_gait_cfg("single_turn_ids", [])])
+        self.nominal_x = float(get_gait_cfg("nominal_x", 120.0))
+        self.nominal_y = float(get_gait_cfg("nominal_y", 0.0))
+        self.legacy_nominal_z = float(get_gait_cfg("nominal_z", -299.2))
+        self.link_coxa = float(get_gait_cfg("link_coxa", 44.75))
         self.l_femur = float(get_gait_cfg("link_femur", 74.0)) / 1000.0
         self.l_tibia = float(get_gait_cfg("link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(get_gait_cfg("link_a3", 41.5)) / 1000.0
         self.l_d6 = float(get_gait_cfg("link_d6", -13.5)) / 1000.0
         self.l_d7 = float(get_gait_cfg("link_d7", -106.7)) / 1000.0
+        self.joint_zero_deg = get_gait_cfg("joint_zero_deg", {"j1": 0.0, "j2": 90.0, "j3": 0.0})
+        self.nominal_universal_joint_center_z = float(
+            get_gait_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z + abs(self.l_d6 * 1000.0 + self.l_d7 * 1000.0))
+        )
+        self.startup_pose_mode = str(get_gait_cfg("startup_pose_mode", "use_motor_home_ticks"))
+        self.motor_home = get_gait_cfg("motor_home_ticks", {})
+        self.motor_dir = get_gait_cfg("motor_dir", {})
+        self.position_mode_ids = set([int(value) for value in get_gait_cfg("position_mode_ids", [])])
+        self.direct_drive_ids = set([int(value) for value in get_gait_cfg("single_turn_ids", [])])
 
         self.unit_ticks_per_degree = 4096.0 / 360.0
         self.motor_to_joint = self._build_motor_joint_index()
         self.leg_to_motors = self._build_leg_to_motor_map()
         self.leg_hip_yaw = self._build_leg_yaw_map()
+        self.nominal_output_deg_by_motor = self._compute_nominal_output_deg_by_motor()
 
         self.last_command_ticks = {motor_id: 0 for motor_id in self.motor_ids}
         self.last_position_rad = {motor_id: 0.0 for motor_id in self.motor_ids}
@@ -83,6 +92,7 @@ class DynamixelBridge(object):
         self.position_clients = {}
         self.current_clients = {}
         self._init_service_clients()
+        self._initialize_startup_pose_mode()
 
         rospy.Subscriber(self.command_topic, JointState, self.command_callback, queue_size=20)
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self.swing_target_callback, queue_size=50)
@@ -170,7 +180,63 @@ class DynamixelBridge(object):
     def _joint_zero_deg_for_index(self, joint_index):
         return float(self.joint_zero_deg.get("j%d" % (joint_index + 1), 0.0))
 
-    def _signed_tick_delta(self, motor_id, raw_ticks):
+    @staticmethod
+    def _clamp(value, lo, hi):
+        return max(lo, min(hi, value))
+
+    def _ik_transform_matrix_solve_deg(self, x_mm, y_mm, z_mm):
+        q1 = math.atan2(y_mm, x_mm)
+        r_total = math.hypot(x_mm, y_mm)
+        r_prime = max(r_total - self.l_femur * 1000.0, 1.0)
+
+        l1 = self.l_tibia * 1000.0
+        l2 = self.l_a3 * 1000.0
+        d_sq = r_prime ** 2 + z_mm ** 2
+        cos_theta3 = (d_sq - l1 ** 2 - l2 ** 2) / (2.0 * l1 * l2)
+        cos_theta3 = self._clamp(cos_theta3, -1.0, 1.0)
+        theta3 = math.atan2(-math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2)), cos_theta3)
+        q2 = math.atan2(z_mm, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
+        return [math.degrees(q1), math.degrees(q2), math.degrees(theta3)]
+
+    def _compute_nominal_output_deg_by_motor(self):
+        nominal_joint_deg = self._ik_transform_matrix_solve_deg(
+            self.nominal_x,
+            self.nominal_y,
+            self.nominal_universal_joint_center_z,
+        )
+        nominal_output_deg = [nominal_joint_deg[index] + self._joint_zero_deg_for_index(index) for index in [0, 1, 2]]
+        mapping = {}
+        for leg_name, motor_ids in self.leg_to_motors.items():
+            for joint_index, motor_id in enumerate(motor_ids):
+                mapping[int(motor_id)] = float(nominal_output_deg[joint_index])
+        return mapping
+
+    def _capture_motor_home_from_current_pose(self):
+        captured_home = {}
+        for motor_id in self.motor_ids:
+            raw_position = self._read_motor_position(motor_id)
+            if raw_position is None:
+                return None
+            if int(motor_id) in self.position_mode_ids:
+                raw_position %= 4096
+            captured_home[str(int(motor_id))] = int(raw_position)
+        return captured_home
+
+    def _initialize_startup_pose_mode(self):
+        if self.startup_pose_mode == "capture_current_as_home":
+            captured_home = self._capture_motor_home_from_current_pose()
+            if captured_home is None:
+                rospy.logwarn("dynamixel_bridge could not capture startup motor positions; using configured motor_home_ticks")
+                return
+            self.motor_home = captured_home
+            rospy.set_param("/gait_controller/motor_home_ticks", self.motor_home)
+            rospy.loginfo("dynamixel_bridge captured current motor positions as motor_home_ticks")
+            return
+        if self.startup_pose_mode != "use_motor_home_ticks":
+            rospy.logwarn("Unknown startup_pose_mode '%s'; defaulting to use_motor_home_ticks", self.startup_pose_mode)
+            self.startup_pose_mode = "use_motor_home_ticks"
+
+    def _output_deg_from_ticks(self, motor_id, raw_ticks):
         home = float(self.motor_home.get(str(int(motor_id)), 0.0))
         direction = float(self.motor_dir.get(str(int(motor_id)), 1.0))
         if abs(direction) < 1e-6:
@@ -182,15 +248,21 @@ class DynamixelBridge(object):
                 delta_ticks -= 4096.0
             while delta_ticks < -2048.0:
                 delta_ticks += 4096.0
-        return delta_ticks / direction
+        joint_meta = self.motor_to_joint.get(int(motor_id))
+        if joint_meta is None:
+            return 0.0
+        ratio = self._joint_ratio(int(motor_id), int(joint_meta["joint_index"]))
+        if abs(ratio) < 1e-9:
+            ratio = 1.0
+        nominal_output_deg = float(self.nominal_output_deg_by_motor.get(int(motor_id), 0.0))
+        return nominal_output_deg + delta_ticks / (direction * self.unit_ticks_per_degree * ratio)
 
     def _ticks_to_joint_rad(self, motor_id, raw_ticks):
         joint_meta = self.motor_to_joint.get(int(motor_id))
         if joint_meta is None:
             return 0.0
         joint_index = int(joint_meta["joint_index"])
-        ratio = self._joint_ratio(int(motor_id), joint_index)
-        cmd_deg = self._signed_tick_delta(int(motor_id), raw_ticks) / (self.unit_ticks_per_degree * ratio)
+        cmd_deg = self._output_deg_from_ticks(int(motor_id), raw_ticks)
         joint_deg = cmd_deg - self._joint_zero_deg_for_index(joint_index)
         return math.radians(joint_deg)
 
