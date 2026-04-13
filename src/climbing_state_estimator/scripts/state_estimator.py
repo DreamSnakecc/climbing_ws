@@ -144,15 +144,19 @@ class StateEstimator(object):
         self.contact_offset_sign = float(get_cfg("contact_offset_sign", 1.0))
         self.compression_ready_ratio = float(get_cfg("compression_ready_ratio", 0.8))
         self.normal_force_to_compression_gain_m_per_n = float(get_cfg("normal_force_to_compression_gain_m_per_n", 8.0e-5))
-        self.adhesion_force_to_compression_gain_m_per_n = float(get_cfg("adhesion_force_to_compression_gain_m_per_n", 0.0))
-        self.adhesion_force_to_compression_bias_m = float(get_cfg("adhesion_force_to_compression_bias_m", 0.0))
-        self.contact_confidence_threshold = float(get_cfg("contact_confidence_threshold", 0.45))
         self.stable_contact_confidence_threshold = float(get_cfg("stable_contact_confidence_threshold", 0.75))
         self.recent_contact_position_alpha = float(get_cfg("recent_contact_position_alpha", 0.2))
+        self.adhesion_force_reference_n = [float(value) for value in get_cfg("adhesion_force_reference_n", [65.0, 83.0, 107.0, 145.0])]
+        self.adhesion_skirt_compression_mm = [float(value) for value in get_cfg("adhesion_skirt_compression_mm", [6.5, 7.2, 8.3, 9.2])]
         self.fan_min_active_rpm = float(get_cfg("fan_min_active_rpm", 300.0))
-        self.fan_current_reference_rpm = max(float(get_cfg("fan_current_reference_rpm", 3200.0)), 1e-3)
-        self.fan_current_free_spin_a = max(float(get_cfg("fan_current_free_spin_a", 0.08)), 0.0)
-        self.fan_current_stable_a = max(float(get_cfg("fan_current_stable_a", 0.45)), self.fan_current_free_spin_a + 1e-3)
+        self.fan_adhesion_reference_rpm = [float(value) for value in get_cfg("fan_adhesion_reference_rpm", [30000.0, 40000.0])]
+        self.fan_attached_current_min_a = [float(value) for value in get_cfg("fan_attached_current_min_a", [1.2, 1.8])]
+        self.fan_attached_current_max_a = [float(value) for value in get_cfg("fan_attached_current_max_a", [2.0, 2.4])]
+        self.fan_detached_current_min_a = [float(value) for value in get_cfg("fan_detached_current_min_a", [5.0, 7.0])]
+        self.fan_detached_current_max_a = [float(value) for value in get_cfg("fan_detached_current_max_a", [5.4, 9.0])]
+        self.fan_adhesion_confidence_threshold = float(
+            get_cfg("fan_adhesion_confidence_threshold", self.stable_contact_confidence_threshold)
+        )
         self.gravity_world = [float(value) for value in get_cfg("gravity_world", [0.0, 0.0, -9.81])]
         self.ekf_initial_covariance = max(float(get_cfg("ekf_initial_covariance", 0.25)), 1e-6)
         self.ekf_body_position_process_std_m = max(float(get_cfg("ekf_body_position_process_std_m", 0.02)), 1e-6)
@@ -387,17 +391,91 @@ class StateEstimator(object):
             return float(self.last_fan_currents[leg_index])
         return 0.0
 
-    def _fan_current_confidence(self, leg_name, leg_index):
+    @staticmethod
+    def _interpolate_reference_curve(target_rpm, rpm_points, value_points):
+        if not rpm_points or not value_points:
+            return 0.0
+        if len(rpm_points) != len(value_points):
+            count = min(len(rpm_points), len(value_points))
+            rpm_points = rpm_points[:count]
+            value_points = value_points[:count]
+        if len(rpm_points) == 1:
+            return float(value_points[0])
+
+        if target_rpm <= rpm_points[0]:
+            left_index = 0
+            right_index = 1
+        elif target_rpm >= rpm_points[-1]:
+            left_index = len(rpm_points) - 2
+            right_index = len(rpm_points) - 1
+        else:
+            left_index = 0
+            right_index = 1
+            for index in range(1, len(rpm_points)):
+                if target_rpm <= rpm_points[index]:
+                    left_index = index - 1
+                    right_index = index
+                    break
+
+        left_rpm = float(rpm_points[left_index])
+        right_rpm = float(rpm_points[right_index])
+        left_value = float(value_points[left_index])
+        right_value = float(value_points[right_index])
+        if abs(right_rpm - left_rpm) <= 1e-6:
+            return left_value
+        ratio = (float(target_rpm) - left_rpm) / (right_rpm - left_rpm)
+        return left_value + ratio * (right_value - left_value)
+
+    def _fan_adhesion_confidence(self, leg_name, leg_index):
         target_rpm = abs(float(self.last_fan_target_rpm.get(leg_name, 0.0)))
         if target_rpm < self.fan_min_active_rpm:
             return 0.0
-        scale = target_rpm / self.fan_current_reference_rpm
-        free_spin_threshold = self.fan_current_free_spin_a * scale
-        stable_threshold = self.fan_current_stable_a * scale
+
         current_value = self._leg_fan_current(leg_index)
-        if stable_threshold <= free_spin_threshold + 1e-6:
-            return 1.0 if current_value >= stable_threshold else 0.0
-        return clamp((current_value - free_spin_threshold) / (stable_threshold - free_spin_threshold), 0.0, 1.0)
+        attached_min = self._interpolate_reference_curve(
+            target_rpm,
+            self.fan_adhesion_reference_rpm,
+            self.fan_attached_current_min_a,
+        )
+        attached_max = self._interpolate_reference_curve(
+            target_rpm,
+            self.fan_adhesion_reference_rpm,
+            self.fan_attached_current_max_a,
+        )
+        detached_min = self._interpolate_reference_curve(
+            target_rpm,
+            self.fan_adhesion_reference_rpm,
+            self.fan_detached_current_min_a,
+        )
+        detached_max = self._interpolate_reference_curve(
+            target_rpm,
+            self.fan_adhesion_reference_rpm,
+            self.fan_detached_current_max_a,
+        )
+
+        attached_center = 0.5 * (attached_min + attached_max)
+        detached_center = 0.5 * (detached_min + detached_max)
+        boundary = 0.5 * (attached_max + detached_min)
+
+        if current_value <= attached_max:
+            span = max(attached_max - attached_min, 0.2)
+            return clamp(1.0 - max(0.0, current_value - attached_center) / span, 0.0, 1.0)
+        if current_value >= detached_min:
+            span = max(detached_max - detached_min, 0.2)
+            return clamp((detached_center - current_value) / span, 0.0, 1.0)
+
+        transition_span = max(detached_min - attached_max, 1e-3)
+        return clamp((boundary - current_value) / transition_span + 0.5, 0.0, 1.0)
+
+    def _compression_from_required_adhesion_force(self, required_force_n):
+        if required_force_n <= 0.0:
+            return 0.0
+        compression_mm = self._interpolate_reference_curve(
+            float(required_force_n),
+            self.adhesion_force_reference_n,
+            self.adhesion_skirt_compression_mm,
+        )
+        return clamp(compression_mm / 1000.0, 0.0, self.max_skirt_compression_m)
 
     def _body_orientation_list(self):
         quaternion = quaternion_to_list(self.last_imu.orientation)
@@ -519,28 +597,34 @@ class StateEstimator(object):
             return clamp(raw_target, 0.0, self.max_skirt_compression_m)
         return clamp(raw_target / 1000.0, 0.0, self.max_skirt_compression_m)
 
-    def _compression_from_adhesion_force_placeholder(self, required_adhesion_force_n):
-        # Placeholder for the future experimentally fitted suction-force/compression map.
-        return clamp(
-            self.adhesion_force_to_compression_bias_m + self.adhesion_force_to_compression_gain_m_per_n * max(required_adhesion_force_n, 0.0),
-            0.0,
-            self.max_skirt_compression_m,
-        )
-
-    def _estimate_skirt_compression(self, leg_name, normal_cmd, planned_support, measured_contact):
+    def _required_skirt_compression_m(self, leg_name):
         target_compression = self._target_skirt_compression_m(leg_name)
-        adhesion_force_compression = self._compression_from_adhesion_force_placeholder(
+        adhesion_force_compression = self._compression_from_required_adhesion_force(
             float(self.stance_commands[leg_name].get("required_adhesion_force", 0.0))
         )
-        if not (planned_support or measured_contact):
-            return max(target_compression, adhesion_force_compression)
-        load_based = clamp(normal_cmd * self.normal_force_to_compression_gain_m_per_n, 0.0, self.max_skirt_compression_m)
-        return clamp(max(target_compression, load_based, adhesion_force_compression), 0.0, self.max_skirt_compression_m)
+        required_compression = max(target_compression, adhesion_force_compression)
+        if required_compression <= 1e-6:
+            return self.nominal_skirt_compression_m
+        return clamp(required_compression, 0.0, self.max_skirt_compression_m)
 
-    def _compression_ready(self, compression_estimate_m):
-        if self.nominal_skirt_compression_m <= 1e-6:
+    def _estimate_skirt_compression(self, leg_name, normal_cmd, planned_support, measured_contact):
+        target_compression = self._required_skirt_compression_m(leg_name)
+        if not (planned_support or measured_contact):
+            return target_compression
+        load_based = clamp(normal_cmd * self.normal_force_to_compression_gain_m_per_n, 0.0, self.max_skirt_compression_m)
+        return clamp(max(target_compression, load_based), 0.0, self.max_skirt_compression_m)
+
+    def _compression_ready(self, leg_name, compression_estimate_m):
+        required_compression = self._required_skirt_compression_m(leg_name)
+        if required_compression <= 1e-6:
             return True
-        return compression_estimate_m >= self.compression_ready_ratio * self.nominal_skirt_compression_m
+        return compression_estimate_m >= self.compression_ready_ratio * required_compression
+
+    def _compression_progress(self, leg_name, compression_estimate_m):
+        required_compression = self._required_skirt_compression_m(leg_name)
+        if required_compression <= 1e-6:
+            return 1.0
+        return clamp(compression_estimate_m / required_compression, 0.0, 1.0)
 
     def _estimate_foot_center_positions(self, universal_joint_center_positions, skirt_compression_estimates):
         contact_positions = []
@@ -818,12 +902,7 @@ class StateEstimator(object):
             force_vector = list(stance_cmd["force"])
             normal_cmd, tangential_cmd = self._split_force_components(force_vector)
             force_limit = self._leg_normal_force_limit(leg_name)
-            fan_confidence = self._fan_current_confidence(leg_name, leg_index)
-            measured_current_confidence = clamp(
-                current_sum / max(self.current_contact_threshold_a * max(current_count, 1), 1e-6),
-                0.0,
-                1.0,
-            ) if current_count > 0 else 0.0
+            adhesion_confidence = self._fan_adhesion_confidence(leg_name, leg_index)
             measured_torque_confidence = clamp(
                 torque_sum / max(self.torque_contact_threshold_nm * max(torque_count, 1), 1e-6),
                 0.0,
@@ -832,52 +911,32 @@ class StateEstimator(object):
 
             planned_support = bool(requested_support)
             compression_estimate_m = self._estimate_skirt_compression(leg_name, normal_cmd, planned_support, measured_contact)
-            compression_ready = self._compression_ready(compression_estimate_m)
-            compression_confidence = clamp(
-                compression_estimate_m / max(self.nominal_skirt_compression_m, 1e-6),
-                0.0,
-                1.0,
-            ) if self.nominal_skirt_compression_m > 1e-6 else 1.0
-            force_confidence = clamp(normal_cmd / max(self.support_force_threshold_n, 1e-6), 0.0, 1.0)
+            normal_support = normal_cmd >= self.support_force_threshold_n
+            compression_ready = measured_contact or self._compression_ready(leg_name, compression_estimate_m)
+            compression_progress = self._compression_progress(leg_name, compression_estimate_m)
             swing_phase = self._leg_swing_phase(leg_name, planned_support)
-            early_contact = (
-                (not planned_support)
-                and (swing_phase >= self.early_contact_phase_threshold)
-                and measured_contact
-                and compression_ready
-            )
-            wall_touch = (not planned_support) and (
-                measured_contact
-                or early_contact
-                or (measured_torque_confidence >= 0.35)
-                or (compression_confidence >= 0.20)
-            )
+            early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
+            wall_touch = (not planned_support) and measured_contact
             preload_ready = wall_touch and compression_ready
-            seal_value = clamp(
-                0.35 * compression_confidence
-                + 0.35 * fan_confidence
-                + 0.20 * measured_torque_confidence
-                + 0.10 * measured_current_confidence,
-                0.0,
-                1.0,
+            seal_value = max(float(adhesion_confidence), float(compression_progress))
+            attachment_ready = preload_ready and adhesion_confidence >= self.fan_adhesion_confidence_threshold
+            confidence_value = max(
+                1.0 if measured_contact else 0.0,
+                1.0 if attachment_ready else 0.0,
+                0.8 if preload_ready else 0.0,
+                0.6 if early_contact else 0.0,
+                clamp(normal_cmd / max(self.support_force_threshold_n, 1e-6), 0.0, 1.0) if planned_support else 0.0,
+                adhesion_confidence,
+                compression_progress,
             )
-            attachment_ready = preload_ready and (
-                fan_confidence >= self.stable_contact_confidence_threshold
-                or seal_value >= self.stable_contact_confidence_threshold
-            )
-            confidence_value = clamp(
-                0.20 * (1.0 if planned_support else 0.0)
-                + 0.30 * max(measured_current_confidence, measured_torque_confidence)
-                + 0.20 * compression_confidence
-                + 0.15 * force_confidence
-                + 0.15 * fan_confidence,
-                0.0,
-                1.0,
-            )
-            actual_contact = ((planned_support and confidence_value >= self.contact_confidence_threshold) or early_contact or (measured_contact and compression_ready))
+
+            if planned_support:
+                actual_contact = measured_contact or normal_support or attachment_ready
+            else:
+                actual_contact = early_contact or preload_ready or attachment_ready
 
             support_value = actual_contact
-            adhesion_value = support_value and attachment_ready and (force_limit >= self.adhesion_force_threshold_n)
+            adhesion_value = attachment_ready and support_value and force_limit >= self.adhesion_force_threshold_n
 
             denom = max(self.wall_mu * max(normal_cmd, 1e-3), 1e-3)
             slip_ratio = tangential_cmd / denom

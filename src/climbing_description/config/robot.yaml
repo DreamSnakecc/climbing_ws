@@ -113,16 +113,19 @@ state_estimator:
   early_contact_phase_threshold: 0.5
   compression_ready_ratio: 0.8
   normal_force_to_compression_gain_m_per_n: 8.0e-5
-  # Placeholder for the future experimentally fitted suction-force/skirt-compression map.
-  adhesion_force_to_compression_gain_m_per_n: 0.0
-  adhesion_force_to_compression_bias_m: 0.0
-  contact_confidence_threshold: 0.45
+  adhesion_force_reference_n: [65.0, 83.0, 107.0, 145.0]
+  adhesion_skirt_compression_mm: [6.5, 7.2, 8.3, 9.2]
   stable_contact_confidence_threshold: 0.75
   recent_contact_position_alpha: 0.2
   fan_min_active_rpm: 300.0
-  fan_current_reference_rpm: 3200.0
-  fan_current_free_spin_a: 0.08
-  fan_current_stable_a: 0.45
+  # Adhesion is judged primarily from fan current under a commanded RPM.
+  # Attached: lower current; detached: higher current.
+  fan_adhesion_reference_rpm: [30000.0, 40000.0]
+  fan_attached_current_min_a: [1.2, 1.8]
+  fan_attached_current_max_a: [2.0, 2.4]
+  fan_detached_current_min_a: [5.0, 7.0]
+  fan_detached_current_max_a: [5.4, 9.0]
+  fan_adhesion_confidence_threshold: 0.75
   ekf_initial_covariance: 0.25
   ekf_body_position_process_std_m: 0.02
   ekf_body_velocity_process_std_mps: 0.15
