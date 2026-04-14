@@ -919,8 +919,9 @@ class StateEstimator(object):
             early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
             wall_touch = (not planned_support) and measured_contact
             preload_ready = wall_touch and compression_ready
-            seal_value = max(float(adhesion_confidence), float(compression_progress))
-            attachment_ready = preload_ready and adhesion_confidence >= self.fan_adhesion_confidence_threshold
+            # Adhesion judgement is based only on fan current under commanded RPM.
+            seal_value = float(adhesion_confidence)
+            attachment_ready = adhesion_confidence >= self.fan_adhesion_confidence_threshold
             confidence_value = max(
                 1.0 if measured_contact else 0.0,
                 1.0 if attachment_ready else 0.0,
@@ -937,7 +938,7 @@ class StateEstimator(object):
                 actual_contact = early_contact or preload_ready or attachment_ready
 
             support_value = actual_contact
-            adhesion_value = attachment_ready and support_value and force_limit >= self.adhesion_force_threshold_n
+            adhesion_value = bool(attachment_ready)
 
             denom = max(self.wall_mu * max(normal_cmd, 1e-3), 1e-3)
             slip_ratio = tangential_cmd / denom
