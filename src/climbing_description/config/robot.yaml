@@ -121,10 +121,10 @@ state_estimator:
   # Adhesion is judged primarily from fan current under a commanded RPM.
   # Attached: lower current; detached: higher current.
   fan_adhesion_reference_rpm: [30000.0, 40000.0]
-  fan_attached_current_min_a: [1.2, 1.8]
-  fan_attached_current_max_a: [2.0, 2.4]
+  fan_attached_current_min_a: [1.2, 2.5]
+  fan_attached_current_max_a: [1.5, 3.0]
   fan_detached_current_min_a: [5.0, 7.0]
-  fan_detached_current_max_a: [5.4, 9.0]
+  fan_detached_current_max_a: [5.0, 9.0]
   fan_adhesion_confidence_threshold: 0.75
   ekf_initial_covariance: 0.25
   ekf_body_position_process_std_m: 0.02

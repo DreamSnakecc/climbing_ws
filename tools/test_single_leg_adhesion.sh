@@ -7,14 +7,14 @@ ROS_SETUP="${ROS_SETUP:-}"
 SKIP_LAUNCH=0
 ENABLE_OBSERVER=0
 MANUAL_MODE=0
-PRELOAD_OFFSET_M="${PRELOAD_OFFSET_M:-0.005}"
+PRELOAD_OFFSET_M="${PRELOAD_OFFSET_M:-0.012}"
 PRELOAD_SKIRT_TARGET="${PRELOAD_SKIRT_TARGET:-0.85}"
 NORMAL_FORCE_LIMIT="${NORMAL_FORCE_LIMIT:-25.0}"
 REQUIRED_ADHESION_FORCE="${REQUIRED_ADHESION_FORCE:-100.0}"
 RPM_LOW="${RPM_LOW:-30000.0}"
 RPM_HIGH="${RPM_HIGH:-40000.0}"
-LIFT_OFFSET_M="${LIFT_OFFSET_M:-0.010}"
-FORWARD_OFFSET_M="${FORWARD_OFFSET_M:-0.008}"
+LIFT_OFFSET_M="${LIFT_OFFSET_M:-0.025}"
+FORWARD_OFFSET_M="${FORWARD_OFFSET_M:-0.020}"
 NOMINAL_HOLD_S="${NOMINAL_HOLD_S:-1.0}"
 LIFT_SETTLE_S="${LIFT_SETTLE_S:-1.0}"
 FORWARD_SETTLE_S="${FORWARD_SETTLE_S:-1.0}"
@@ -63,14 +63,14 @@ Options:
         --manual       Keep the old step-by-step interactive prompts instead of auto-running.
 
 Environment overrides:
-    LIFT_OFFSET_M            Default: 0.010
-    FORWARD_OFFSET_M         Default: 0.008
-  PRELOAD_OFFSET_M         Default: 0.005
-  PRELOAD_SKIRT_TARGET     Default: 0.85
-  NORMAL_FORCE_LIMIT       Default: 25.0
-  REQUIRED_ADHESION_FORCE  Default: 100.0
-  RPM_LOW                  Default: 30000.0
-  RPM_HIGH                 Default: 40000.0
+        LIFT_OFFSET_M            Default: 0.025
+        FORWARD_OFFSET_M         Default: 0.020
+        PRELOAD_OFFSET_M         Default: 0.012
+        PRELOAD_SKIRT_TARGET     Default: 0.85
+        NORMAL_FORCE_LIMIT       Default: 25.0
+        REQUIRED_ADHESION_FORCE  Default: 100.0
+        RPM_LOW                  Default: 30000.0
+        RPM_HIGH                 Default: 40000.0
     NOMINAL_HOLD_S           Default: 1.0
     LIFT_SETTLE_S            Default: 1.0
     FORWARD_SETTLE_S         Default: 1.0
