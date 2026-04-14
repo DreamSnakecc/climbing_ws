@@ -236,8 +236,6 @@ class StateLogger(object):
                 'plan_support_mask': list(msg.plan_support_mask),
                 'measured_contact_mask': list(msg.measured_contact_mask),
                 'wall_touch_mask': list(msg.wall_touch_mask),
-                'compression_ready_mask': list(msg.compression_ready_mask),
-                'preload_ready_mask': list(msg.preload_ready_mask),
                 'early_contact_mask': list(msg.early_contact_mask),
                 'contact_mask': list(msg.contact_mask),
                 'support_mask': list(msg.support_mask),

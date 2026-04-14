@@ -189,9 +189,8 @@ swing_leg_controller:
   detach_slide_duration_s: 0.12
   tangential_align_duration_s: 0.28
   preload_duration_s: 0.16
-  fan_attach_command_duration_s: 0.05
   compliant_settle_timeout_s: 0.40
-  preload_extra_normal_m: 0.004
+  preload_extra_normal_m: 0.003
   fan_attach_sink_m: 0.008
   tangential_alignment_tolerance_m: 0.008
   normal_alignment_tolerance_m: 0.004
@@ -199,14 +198,22 @@ swing_leg_controller:
   preload_skirt_compression_target: 0.85
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 25.0
-  fan_attach_current_threshold_a: 0.10
-  fan_attach_current_full_scale_a: 0.35
   detach_velocity_limit_mps: [0.05, 0.05, 0.05]
   tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
   preload_velocity_limit_mps: [0.04, 0.04, 0.03]
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
-  compliant_tangential_gain: 8.0
-  compliant_normal_gain: 10.0
+  # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
+  compliant_normal_velocity_limit_mps: 0.035
+  compliant_normal_offset_limit_m: 0.008
+  compliant_admittance_mass: 0.35
+  compliant_admittance_damping: 18.0
+  compliant_admittance_stiffness: 120.0
+  compliant_force_filter_alpha: 0.35
+  compliant_force_deadband_n: 1.0
+  compliant_force_limit_n: 80.0
+  compliant_force_sign: 1.0
+  contact_hold_min_s: 0.04
+  jacobian_delta_rad: 0.001
 
 jetson:
   command_rate_hz: 100.0

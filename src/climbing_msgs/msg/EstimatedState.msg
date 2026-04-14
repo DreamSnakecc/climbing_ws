@@ -13,8 +13,6 @@ float32[4] fan_current
 bool[4] plan_support_mask
 bool[4] measured_contact_mask
 bool[4] wall_touch_mask
-bool[4] compression_ready_mask
-bool[4] preload_ready_mask
 bool[4] early_contact_mask
 bool[4] contact_mask
 bool[4] support_mask

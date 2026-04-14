@@ -2,6 +2,8 @@
 
 import math
 
+import numpy as np
+
 import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
@@ -159,7 +161,6 @@ class SwingLegController(object):
     PHASE_DETACH_SLIDE = "DETACH_SLIDE"
     PHASE_TANGENTIAL_ALIGN = "TANGENTIAL_ALIGN"
     PHASE_PRELOAD_COMPRESS = "PRELOAD_COMPRESS"
-    PHASE_FAN_ATTACH = "FAN_ATTACH"
     PHASE_COMPLIANT_SETTLE = "COMPLIANT_SETTLE"
     PHASE_ATTACHED_HOLD = "ATTACHED_HOLD"
 
@@ -196,7 +197,6 @@ class SwingLegController(object):
         self.detach_slide_duration_s = max(float(get_cfg("detach_slide_duration_s", 0.12)), 0.02)
         self.tangential_align_duration_s = max(float(get_cfg("tangential_align_duration_s", 0.28)), 0.05)
         self.preload_duration_s = max(float(get_cfg("preload_duration_s", 0.16)), 0.05)
-        self.fan_attach_command_duration_s = max(float(get_cfg("fan_attach_command_duration_s", 0.05)), 0.0)
         self.compliant_settle_timeout_s = max(float(get_cfg("compliant_settle_timeout_s", 0.40)), 0.05)
         self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.004)), 0.0)
         self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
@@ -206,16 +206,35 @@ class SwingLegController(object):
         self.preload_skirt_compression_target = float(get_cfg("preload_skirt_compression_target", 0.85))
         self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)
         self.attach_normal_force_limit_n = max(float(get_cfg("attach_normal_force_limit_n", 25.0)), 0.0)
-        self.fan_attach_current_threshold_a = max(float(get_cfg("fan_attach_current_threshold_a", 0.10)), 0.0)
-        self.fan_attach_current_full_scale_a = max(float(get_cfg("fan_attach_current_full_scale_a", 0.35)), self.fan_attach_current_threshold_a + 1e-3)
         self.detach_velocity_limit = [float(value) for value in get_cfg("detach_velocity_limit_mps", [0.05, 0.05, 0.05])]
         self.tangential_velocity_limit = [float(value) for value in get_cfg("tangential_velocity_limit_mps", [0.12, 0.12, 0.03])]
         self.preload_velocity_limit = [float(value) for value in get_cfg("preload_velocity_limit_mps", [0.04, 0.04, 0.03])]
         self.compliant_velocity_limit = [float(value) for value in get_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])]
-        self.compliant_tangential_gain = max(float(get_cfg("compliant_tangential_gain", 8.0)), 0.0)
-        self.compliant_normal_gain = max(float(get_cfg("compliant_normal_gain", 10.0)), 0.0)
+        self.compliant_normal_velocity_limit_mps = max(
+            float(get_cfg("compliant_normal_velocity_limit_mps", max(self.compliant_velocity_limit))),
+            0.0,
+        )
+        self.compliant_normal_offset_limit_m = max(
+            float(get_cfg("compliant_normal_offset_limit_m", self.fan_attach_sink_m)),
+            0.0,
+        )
+        self.compliant_admittance_mass = max(float(get_cfg("compliant_admittance_mass", 0.35)), 1e-3)
+        self.compliant_admittance_damping = max(float(get_cfg("compliant_admittance_damping", 18.0)), 0.0)
+        self.compliant_admittance_stiffness = max(float(get_cfg("compliant_admittance_stiffness", 120.0)), 0.0)
+        self.compliant_force_filter_alpha = clamp(float(get_cfg("compliant_force_filter_alpha", 0.35)), 0.0, 1.0)
+        self.compliant_force_deadband_n = max(float(get_cfg("compliant_force_deadband_n", 1.0)), 0.0)
+        self.compliant_force_limit_n = max(float(get_cfg("compliant_force_limit_n", 80.0)), self.compliant_force_deadband_n)
+        self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
+        self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
+        self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
+        self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
+        self.nominal_y_m = float(rospy.get_param("/gait_controller/nominal_y", 0.0)) / 1000.0
+        self.l_coxa_m = float(rospy.get_param("/gait_controller/link_coxa", 44.75)) / 1000.0
+        self.l_femur_m = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
+        self.l_tibia_m = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
+        self.l_a3_m = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
         self.universal_joint_rigid_offset_m = abs(
             float(rospy.get_param("/gait_controller/link_d6", -13.5)) + float(rospy.get_param("/gait_controller/link_d7", -106.7))
         ) / 1000.0
@@ -227,6 +246,15 @@ class SwingLegController(object):
         ) / 1000.0
         self.base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
         self.leg_yaw_rad = self._build_leg_yaw_map()
+        self.leg_to_motors = self._build_leg_motor_map()
+        default_joint_order = []
+        for leg_name in self.leg_names:
+            default_joint_order.extend(self.leg_to_motors.get(leg_name, []))
+        joint_order = rospy.get_param(
+            "/jetson/dynamixel_bridge/ordered_motor_ids",
+            rospy.get_param("/dynamixel_bridge/ordered_motor_ids", default_joint_order),
+        )
+        self.joint_name_to_index = {str(int(motor_id)): index for index, motor_id in enumerate(joint_order)}
         self.wall_normal_body = normalize_vector(
             [float(value) for value in get_cfg("wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0]))],
             [0.0, 0.0, 1.0],
@@ -254,6 +282,12 @@ class SwingLegController(object):
                 "tangential_target": list(nominal),
                 "preload_target": list(nominal),
                 "attach_target": list(nominal),
+                "compliant_joint_torque_bias": [0.0, 0.0, 0.0],
+                "compliant_force_estimate": 0.0,
+                "compliant_normal_offset": 0.0,
+                "compliant_normal_velocity": 0.0,
+                "contact_active_since": None,
+                "last_joint_vector": [0.0, 0.0, 0.0],
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -267,6 +301,13 @@ class SwingLegController(object):
             yaw_deg = float(leg_cfg.get(leg_name, {}).get("hip_yaw_deg", 0.0))
             yaw_map[leg_name] = math.radians(yaw_deg)
         return yaw_map
+
+    def _build_leg_motor_map(self):
+        leg_cfg = rospy.get_param("/legs", {})
+        return {
+            str(leg_name): [int(value) for value in cfg.get("motor_ids", [])]
+            for leg_name, cfg in leg_cfg.items()
+        }
 
     def body_reference_callback(self, msg):
         self.body_reference = msg
@@ -421,6 +462,161 @@ class SwingLegController(object):
             0.0,
         ]
 
+    def _base_delta_to_leg_delta(self, leg_name, dx_base, dy_base):
+        hip_yaw = self.leg_yaw_rad.get(leg_name, 0.0)
+        cos_yaw = math.cos(hip_yaw)
+        sin_yaw = math.sin(hip_yaw)
+        return [
+            cos_yaw * dx_base + sin_yaw * dy_base,
+            -sin_yaw * dx_base + cos_yaw * dy_base,
+        ]
+
+    def _leg_force_to_body_force(self, leg_name, leg_force):
+        hip_yaw = self.leg_yaw_rad.get(leg_name, 0.0)
+        cos_yaw = math.cos(hip_yaw)
+        sin_yaw = math.sin(hip_yaw)
+        return [
+            cos_yaw * leg_force[0] - sin_yaw * leg_force[1],
+            sin_yaw * leg_force[0] + cos_yaw * leg_force[1],
+            leg_force[2],
+        ]
+
+    @staticmethod
+    def _solution_cost(candidate_rad, reference_rad):
+        return sum([(float(candidate_rad[index]) - float(reference_rad[index])) ** 2 for index in [0, 1, 2]])
+
+    def _ik_candidates_rad(self, x_m, y_m, z_m):
+        x_prime = float(x_m) - self.l_coxa_m
+        q1 = math.atan2(float(y_m), x_prime)
+        radial_total = math.hypot(x_prime, float(y_m))
+        radial_prime = max(radial_total - self.l_femur_m, 1e-6)
+
+        d_sq = radial_prime ** 2 + float(z_m) ** 2
+        cos_theta3 = (d_sq - self.l_tibia_m ** 2 - self.l_a3_m ** 2) / (2.0 * self.l_tibia_m * self.l_a3_m)
+        cos_theta3 = clamp(cos_theta3, -1.0, 1.0)
+        sin_theta3_mag = math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2))
+
+        candidates = []
+        for branch_sign in [-1.0, 1.0]:
+            theta3 = math.atan2(branch_sign * sin_theta3_mag, cos_theta3)
+            q2 = math.atan2(float(z_m), radial_prime) - math.atan2(
+                self.l_a3_m * math.sin(theta3),
+                self.l_tibia_m + self.l_a3_m * math.cos(theta3),
+            ) + math.radians(90.0)
+            candidates.append([q1, q2, theta3])
+        return candidates
+
+    def _joint_vector_from_position(self, leg_name, position, reference_rad=None):
+        leg_delta = self._base_delta_to_leg_delta(leg_name, position[0], position[1])
+        target_x = self.nominal_x_m + leg_delta[0]
+        target_y = self.nominal_y_m + leg_delta[1]
+        target_z = position[2]
+        candidates = self._ik_candidates_rad(target_x, target_y, target_z)
+        if reference_rad is None:
+            reference_rad = [0.0, 0.0, 0.0]
+        return min(candidates, key=lambda candidate: self._solution_cost(candidate, reference_rad))
+
+    def _forward_kinematics_leg(self, joint_vector):
+        q1 = float(joint_vector[0])
+        q2 = float(joint_vector[1])
+        q3 = float(joint_vector[2])
+        alpha = q2 - math.radians(90.0)
+        radial_prime = self.l_tibia_m * math.cos(alpha) + self.l_a3_m * math.cos(alpha + q3)
+        p_z = self.l_tibia_m * math.sin(alpha) + self.l_a3_m * math.sin(alpha + q3)
+        radial_total = self.l_femur_m + radial_prime
+        return [
+            self.l_coxa_m + radial_total * math.cos(q1),
+            radial_total * math.sin(q1),
+            p_z,
+        ]
+
+    def _leg_jacobian(self, joint_vector):
+        base_position = self._forward_kinematics_leg(joint_vector)
+        jacobian = [[0.0, 0.0, 0.0] for _ in range(3)]
+        for column in [0, 1, 2]:
+            perturbed = list(joint_vector)
+            perturbed[column] += self.jacobian_delta_rad
+            next_position = self._forward_kinematics_leg(perturbed)
+            for row in [0, 1, 2]:
+                jacobian[row][column] = (next_position[row] - base_position[row]) / max(self.jacobian_delta_rad, 1e-9)
+        return jacobian
+
+    def _leg_joint_torque_vector(self, leg_name):
+        motor_ids = self.leg_to_motors.get(leg_name, [])
+        joint_torques = list(self.estimated_state.joint_torques_est)
+        if len(motor_ids) != 3 or len(joint_torques) == 0:
+            return None
+        torque_vector = []
+        for motor_id in motor_ids:
+            joint_index = self.joint_name_to_index.get(str(int(motor_id)))
+            if joint_index is None or joint_index >= len(joint_torques):
+                return None
+            torque_vector.append(float(joint_torques[joint_index]))
+        return torque_vector
+
+    def _capture_compliant_torque_bias(self, leg_name, state):
+        torque_vector = self._leg_joint_torque_vector(leg_name)
+        state["compliant_joint_torque_bias"] = list(torque_vector) if torque_vector is not None else [0.0, 0.0, 0.0]
+        state["compliant_force_estimate"] = 0.0
+        state["compliant_normal_offset"] = 0.0
+        state["compliant_normal_velocity"] = 0.0
+
+    def _estimate_leg_normal_force(self, leg_name, state):
+        torque_vector = self._leg_joint_torque_vector(leg_name)
+        if torque_vector is None:
+            return 0.0
+        joint_vector = self._joint_vector_from_position(leg_name, state["position"], state.get("last_joint_vector"))
+        state["last_joint_vector"] = list(joint_vector)
+        jacobian = self._leg_jacobian(joint_vector)
+        try:
+            leg_force = np.linalg.lstsq(
+                np.array(jacobian, dtype=float).T,
+                np.array(vector_sub(torque_vector, state["compliant_joint_torque_bias"]), dtype=float),
+                rcond=None,
+            )[0]
+        except np.linalg.LinAlgError:
+            return 0.0
+        body_force = self._leg_force_to_body_force(leg_name, leg_force.tolist())
+        signed_normal_force = self.compliant_force_sign * vector_dot(body_force, self.wall_normal_body)
+        return clamp(signed_normal_force, -self.compliant_force_limit_n, self.compliant_force_limit_n)
+
+    def _update_normal_admittance(self, state, measured_force_n, dt):
+        filtered_force = (1.0 - self.compliant_force_filter_alpha) * float(state["compliant_force_estimate"]) + self.compliant_force_filter_alpha * float(measured_force_n)
+        state["compliant_force_estimate"] = filtered_force
+        effective_force = max(0.0, filtered_force - self.compliant_force_deadband_n)
+        effective_force = min(effective_force, self.compliant_force_limit_n)
+
+        acceleration = (
+            effective_force
+            - self.compliant_admittance_damping * float(state["compliant_normal_velocity"])
+            - self.compliant_admittance_stiffness * float(state["compliant_normal_offset"])
+        ) / self.compliant_admittance_mass
+        next_velocity = float(state["compliant_normal_velocity"]) + acceleration * dt
+        next_velocity = clamp(next_velocity, -self.compliant_normal_velocity_limit_mps, self.compliant_normal_velocity_limit_mps)
+        next_offset = float(state["compliant_normal_offset"]) + next_velocity * dt
+        next_offset = clamp(next_offset, 0.0, self.compliant_normal_offset_limit_m)
+        if next_offset <= 0.0 and next_velocity < 0.0:
+            next_velocity = 0.0
+
+        state["compliant_normal_velocity"] = next_velocity
+        state["compliant_normal_offset"] = next_offset
+        return next_offset, next_velocity
+
+    def _freeze_compliant_state(self, state, frozen_position):
+        frozen_target = self._clamp_position(frozen_position)
+        state["attach_target"] = list(frozen_target)
+        state["position"] = list(frozen_target)
+        state["velocity"] = [0.0, 0.0, 0.0]
+        state["compliant_normal_velocity"] = 0.0
+
+    def _contact_hold_satisfied(self, state, contact_active, now_sec):
+        if contact_active:
+            if state["contact_active_since"] is None:
+                state["contact_active_since"] = now_sec
+            return (now_sec - float(state["contact_active_since"])) >= self.contact_hold_min_s
+        state["contact_active_since"] = None
+        return False
+
     def _target_delta(self, leg_name, leg_index):
         desired_twist = self._desired_twist_body()
         estimated_twist = [0.0, 0.0, 0.0]
@@ -483,6 +679,12 @@ class SwingLegController(object):
         state["tangential_target"] = self._clamp_position(tangential_target)
         state["preload_target"] = self._clamp_position(preload_target)
         state["attach_target"] = self._clamp_position(attach_target)
+        state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
+        state["compliant_force_estimate"] = 0.0
+        state["compliant_normal_offset"] = 0.0
+        state["compliant_normal_velocity"] = 0.0
+        state["contact_active_since"] = None
+        state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
         self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
         self.swing_phase_start[leg_name] = stamp_sec
@@ -500,6 +702,11 @@ class SwingLegController(object):
         state["tangential_target"] = list(support_target)
         state["preload_target"] = list(support_target)
         state["attach_target"] = list(support_target)
+        state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
+        state["compliant_force_estimate"] = 0.0
+        state["compliant_normal_offset"] = 0.0
+        state["compliant_normal_velocity"] = 0.0
+        state["contact_active_since"] = None
         state["phase"] = self.PHASE_SUPPORT
         state["phase_started_at"] = None
         return self._build_message(
@@ -563,16 +770,11 @@ class SwingLegController(object):
         state = self.swing_states[leg_name]
         phase = state["phase"]
         phase_elapsed = self._phase_elapsed(state, now_sec)
-        compression_ready = self._leg_mask_value(self.estimated_state.compression_ready_mask, leg_index, False)
-        preload_ready = self._leg_mask_value(self.estimated_state.preload_ready_mask, leg_index, compression_ready)
         wall_touch = self._leg_mask_value(self.estimated_state.wall_touch_mask, leg_index, False)
         attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
         adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
         measured_contact = self._leg_mask_value(self.estimated_state.measured_contact_mask, leg_index, False)
         early_contact = self._leg_mask_value(self.estimated_state.early_contact_mask, leg_index, False)
-        fan_current = self._leg_fan_current(leg_index)
-        seal_confidence = self._leg_float_value(self.estimated_state.seal_confidence, leg_index, 0.0)
-        torque_contact_confidence = self._leg_float_value(self.estimated_state.leg_torque_contact_confidence, leg_index, 0.0)
 
         if phase == self.PHASE_DETACH_SLIDE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["light_contact_target"], self.detach_velocity_limit, dt)
@@ -583,52 +785,36 @@ class SwingLegController(object):
             support_leg = False
         elif phase == self.PHASE_TANGENTIAL_ALIGN:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["tangential_target"], self.tangential_velocity_limit, dt)
-            if self._tangential_error_norm(state["tangential_target"], cmd_position) <= self.tangential_alignment_tolerance_m or phase_elapsed >= self.tangential_align_duration_s or wall_touch:
+            if self._tangential_error_norm(state["tangential_target"], cmd_position) <= self.tangential_alignment_tolerance_m or phase_elapsed >= self.tangential_align_duration_s:
                 self._set_phase(state, self.PHASE_PRELOAD_COMPRESS, now_sec)
             skirt_target = self.light_contact_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_PRELOAD_COMPRESS:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["preload_target"], self.preload_velocity_limit, dt)
-            if preload_ready or abs(self._normal_error(state["preload_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
-                self._set_phase(state, self.PHASE_FAN_ATTACH, now_sec)
+            if abs(self._normal_error(state["preload_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
+                self._capture_compliant_torque_bias(leg_name, state)
+                self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = self.preload_normal_force_limit_n
             support_leg = False
-        elif phase == self.PHASE_FAN_ATTACH:
-            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["preload_target"], self.preload_velocity_limit, dt)
-            if phase_elapsed >= self.fan_attach_command_duration_s:
-                self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
-            skirt_target = self.preload_skirt_compression_target
-            normal_force_limit = self.attach_normal_force_limit_n
-            support_leg = False
         elif phase == self.PHASE_COMPLIANT_SETTLE:
-            current_tangent = self._tangential_component(state["position"])
-            target_tangent = self._tangential_component(state["attach_target"])
-            tangential_error = vector_sub(target_tangent, current_tangent)
-            tangential_velocity = vector_scale(tangential_error, self.compliant_tangential_gain * max(0.15, 1.0 - torque_contact_confidence))
-
-            sink_ratio = clamp(
-                (fan_current - self.fan_attach_current_threshold_a)
-                / max(self.fan_attach_current_full_scale_a - self.fan_attach_current_threshold_a, 1e-3),
-                0.0,
-                1.0,
-            )
-            sink_ratio = max(sink_ratio, seal_confidence, 0.5 * torque_contact_confidence)
-            target_normal_scalar = vector_dot(state["preload_target"], self.wall_normal_body) + sink_ratio * self.fan_attach_sink_m
-            current_normal_scalar = vector_dot(state["position"], self.wall_normal_body)
-            normal_gain = self.compliant_normal_gain * (1.0 + 0.5 * torque_contact_confidence)
-            normal_velocity_scalar = normal_gain * (target_normal_scalar - current_normal_scalar)
-            desired_velocity = vector_add(tangential_velocity, vector_scale(self.wall_normal_body, normal_velocity_scalar))
-            cmd_velocity = []
-            cmd_position = []
-            for axis in [0, 1, 2]:
-                velocity = clamp(desired_velocity[axis], -self.compliant_velocity_limit[axis], self.compliant_velocity_limit[axis])
-                cmd_velocity.append(velocity)
-                cmd_position.append(state["position"][axis] + velocity * dt)
-            cmd_position = self._clamp_position(cmd_position)
+            contact_active = measured_contact or wall_touch
+            if self._contact_hold_satisfied(state, contact_active, now_sec):
+                measured_force_n = self._estimate_leg_normal_force(leg_name, state)
+                normal_offset, normal_velocity = self._update_normal_admittance(state, measured_force_n, dt)
+                target_normal_scalar = vector_dot(state["preload_target"], self.wall_normal_body) + normal_offset
+                cmd_position = self._clamp_position(self._compose_tangent_and_normal(state["attach_target"], target_normal_scalar))
+                cmd_velocity = vector_scale(self.wall_normal_body, normal_velocity)
+            else:
+                cmd_position = list(state["preload_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
+                state["compliant_normal_velocity"] = 0.0
             if attachment_ready or adhesion_ready:
+                self._freeze_compliant_state(state, cmd_position)
                 self._set_phase(state, self.PHASE_ATTACHED_HOLD, now_sec)
+                cmd_position = list(state["attach_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = self.attach_normal_force_limit_n
             support_leg = False
@@ -648,6 +834,7 @@ class SwingLegController(object):
 
         if phase == self.PHASE_COMPLIANT_SETTLE and phase_elapsed >= self.compliant_settle_timeout_s and not (attachment_ready or adhesion_ready):
             cmd_velocity = [0.0, 0.0, 0.0]
+            state["compliant_normal_velocity"] = 0.0
 
         if (measured_contact or early_contact or wall_touch) and phase in [self.PHASE_TANGENTIAL_ALIGN, self.PHASE_PRELOAD_COMPRESS]:
             skirt_target = max(skirt_target, self.light_contact_skirt_compression_target)

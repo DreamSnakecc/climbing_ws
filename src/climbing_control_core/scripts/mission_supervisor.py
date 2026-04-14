@@ -40,6 +40,16 @@ class MissionSupervisor(object):
         self.pre_attach_time_s = max(float(get_cfg("pre_attach_time_s", 0.12)), 0.0)
         self.swing_duration_s = max(float(get_cfg("swing_duration_s", rospy.get_param("/swing_leg_controller/swing_duration_s", 0.65))), 0.1)
         self.default_normal_force_limit = float(get_cfg("default_normal_force_limit", rospy.get_param("/wall/max_normal_force_n", 150.0)))
+        self.preload_normal_force_limit_n = float(
+            get_cfg("preload_normal_force_limit_n", rospy.get_param("/swing_leg_controller/preload_normal_force_limit_n", 15.0))
+        )
+        self.attach_normal_force_limit_n = float(
+            get_cfg("attach_normal_force_limit_n", rospy.get_param("/swing_leg_controller/attach_normal_force_limit_n", 25.0))
+        )
+        self.contact_hold_min_s = max(
+            float(get_cfg("contact_hold_min_s", rospy.get_param("/swing_leg_controller/contact_hold_min_s", 0.04))),
+            0.0,
+        )
         self.adhesion_force_reference_n = max(float(get_cfg("adhesion_force_reference_n", 35.0)), 1e-3)
         self.adhesion_rpm_min_scale = float(get_cfg("adhesion_rpm_min_scale", 0.85))
         self.adhesion_rpm_max_scale = max(float(get_cfg("adhesion_rpm_max_scale", 1.35)), self.adhesion_rpm_min_scale)
@@ -57,6 +67,7 @@ class MissionSupervisor(object):
         self.reset_fault_requested = False
         self.leg_support_state = {leg_name: True for leg_name in self.leg_names}
         self.leg_support_transition_time = {leg_name: rospy.Time.now() for leg_name in self.leg_names}
+        self.leg_contact_active_since = {leg_name: None for leg_name in self.leg_names}
         self.leg_last_normal_force_limit = {leg_name: self.default_normal_force_limit for leg_name in self.leg_names}
         self.leg_required_adhesion_force = {leg_name: self.adhesion_force_reference_n for leg_name in self.leg_names}
         self.leg_last_skirt_compression_target = {leg_name: 0.0 for leg_name in self.leg_names}
@@ -165,6 +176,15 @@ class MissionSupervisor(object):
     def _leg_support_elapsed(self, leg_name):
         return (rospy.Time.now() - self.leg_support_transition_time[leg_name]).to_sec()
 
+    def _contact_hold_satisfied(self, leg_name, contact_active):
+        now = rospy.Time.now()
+        if contact_active:
+            if self.leg_contact_active_since[leg_name] is None:
+                self.leg_contact_active_since[leg_name] = now
+            return (now - self.leg_contact_active_since[leg_name]).to_sec() >= self.contact_hold_min_s
+        self.leg_contact_active_since[leg_name] = None
+        return False
+
     def _scale_rpm_by_required_adhesion(self, base_rpm, leg_name):
         if base_rpm <= 0.0:
             return 0.0
@@ -207,8 +227,6 @@ class MissionSupervisor(object):
                 return 2, self._scale_rpm_by_required_adhesion(self.touchdown_rpm, leg_name)
             return 1, self._scale_rpm_by_required_adhesion(self.climb_rpm, leg_name)
 
-        compression_ready = self._estimated_leg_mask("compression_ready_mask", leg_name, False)
-        preload_ready = self._estimated_leg_mask("preload_ready_mask", leg_name, compression_ready)
         attachment_ready = self._estimated_leg_mask("attachment_ready_mask", leg_name, False)
         adhesion_ready = self._estimated_leg_mask("adhesion_mask", leg_name, attachment_ready)
         measured_contact = self._estimated_leg_mask("measured_contact_mask", leg_name, False)
@@ -216,15 +234,18 @@ class MissionSupervisor(object):
         wall_touch = self._estimated_leg_mask("wall_touch_mask", leg_name, measured_contact or early_contact)
         skirt_target = max(float(self.leg_last_skirt_compression_target.get(leg_name, 0.0)), 0.0)
         fan_current = self._estimated_leg_fan_current(leg_name)
+        post_preload = float(self.leg_last_normal_force_limit.get(leg_name, 0.0)) >= (self.attach_normal_force_limit_n - 1e-3)
+        contact_active = measured_contact or wall_touch
+        contact_stable = self._contact_hold_satisfied(leg_name, contact_active and post_preload)
 
         if attachment_ready or adhesion_ready:
             return 1, self._scale_rpm_by_required_adhesion(self.climb_rpm, leg_name)
-        if preload_ready:
+        if contact_stable:
             return 2, self._scale_rpm_by_required_adhesion(self.touchdown_rpm, leg_name)
-        if wall_touch and skirt_target > 0.5:
-            return 1, self._scale_rpm_by_required_adhesion(self.attach_rpm, leg_name)
         if fan_current > 0.05:
             return 1, self._scale_rpm_by_required_adhesion(self.attach_rpm, leg_name)
+        if not post_preload and skirt_target > 0.5 and elapsed >= max(self.pre_attach_time_s, 0.0):
+            return 0, self.swing_release_rpm
 
         pre_attach_start = max(self.swing_duration_s - self.pre_attach_time_s, 0.0)
         if elapsed >= pre_attach_start:

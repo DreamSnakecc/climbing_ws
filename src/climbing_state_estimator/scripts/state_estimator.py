@@ -869,8 +869,6 @@ class StateEstimator(object):
         plan_support_mask = []
         measured_contact_mask = []
         wall_touch_mask = []
-        compression_ready_mask = []
-        preload_ready_mask = []
         early_contact_mask = []
         contact_mask = []
         support_mask = []
@@ -913,19 +911,17 @@ class StateEstimator(object):
             planned_support = bool(requested_support)
             compression_estimate_m = self._estimate_skirt_compression(leg_name, normal_cmd, planned_support, measured_contact)
             normal_support = normal_cmd >= self.support_force_threshold_n
-            compression_ready = measured_contact or self._compression_ready(leg_name, compression_estimate_m)
             compression_progress = self._compression_progress(leg_name, compression_estimate_m)
             swing_phase = self._leg_swing_phase(leg_name, planned_support)
             early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
             wall_touch = (not planned_support) and measured_contact
-            preload_ready = wall_touch and compression_ready
             # Adhesion judgement is based only on fan current under commanded RPM.
             seal_value = float(adhesion_confidence)
             attachment_ready = adhesion_confidence >= self.fan_adhesion_confidence_threshold
             confidence_value = max(
                 1.0 if measured_contact else 0.0,
                 1.0 if attachment_ready else 0.0,
-                0.8 if preload_ready else 0.0,
+                0.8 if wall_touch else 0.0,
                 0.6 if early_contact else 0.0,
                 clamp(normal_cmd / max(self.support_force_threshold_n, 1e-6), 0.0, 1.0) if planned_support else 0.0,
                 adhesion_confidence,
@@ -935,7 +931,7 @@ class StateEstimator(object):
             if planned_support:
                 actual_contact = measured_contact or normal_support or attachment_ready
             else:
-                actual_contact = early_contact or preload_ready or attachment_ready
+                actual_contact = early_contact or wall_touch or attachment_ready
 
             support_value = actual_contact
             adhesion_value = bool(attachment_ready)
@@ -948,8 +944,6 @@ class StateEstimator(object):
             plan_support_mask.append(bool(planned_support))
             measured_contact_mask.append(bool(measured_contact))
             wall_touch_mask.append(bool(wall_touch))
-            compression_ready_mask.append(bool(compression_ready))
-            preload_ready_mask.append(bool(preload_ready))
             early_contact_mask.append(bool(early_contact))
             contact_mask.append(bool(actual_contact))
             support_mask.append(bool(support_value))
@@ -967,8 +961,6 @@ class StateEstimator(object):
             plan_support_mask,
             measured_contact_mask,
             wall_touch_mask,
-            compression_ready_mask,
-            preload_ready_mask,
             early_contact_mask,
             contact_mask,
             support_mask,
@@ -1022,8 +1014,6 @@ class StateEstimator(object):
             plan_support_mask,
             measured_contact_mask,
             wall_touch_mask,
-            compression_ready_mask,
-            preload_ready_mask,
             early_contact_mask,
             contact_mask,
             support_mask,
@@ -1059,8 +1049,6 @@ class StateEstimator(object):
         msg.plan_support_mask = plan_support_mask
         msg.measured_contact_mask = measured_contact_mask
         msg.wall_touch_mask = wall_touch_mask
-        msg.compression_ready_mask = compression_ready_mask
-        msg.preload_ready_mask = preload_ready_mask
         msg.early_contact_mask = early_contact_mask
         msg.contact_mask = contact_mask
         msg.support_mask = support_mask
