@@ -38,7 +38,8 @@ Options:
     --step-m       Per-step translation magnitude in meters. Default: 0.008.
 
 This script tests a single leg by publishing a sequence of manual
-/control/swing_leg_target commands.
+/control/swing_leg_target commands in delta-from-nominal mode.
+All x/y/z values are body-frame offsets relative to the nominal pose.
 EOF
 }
 
@@ -201,6 +202,7 @@ if [[ "$SKIP_LAUNCH" -eq 0 ]]; then
         enable_auto_position_commands:=true \
         enable_auto_mode_switching:=false \
         enable_auto_current_control:=false \
+        leg_ik_input_mode:=delta_from_nominal_m \
         >/tmp/test_single_leg_jetson.log 2>&1 &
     JETSON_PID=$!
 
@@ -221,22 +223,6 @@ if [[ "$WITH_PC" -eq 1 ]]; then
     wait_for_node "/swing_leg_controller"
 fi
 
-NOMINAL_Z_M=$(python3 - <<'PY'
-import subprocess
-
-try:
-    output = subprocess.check_output(
-        ["rosparam", "get", "/gait_controller/nominal_universal_joint_center_z"],
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ).strip()
-    value_mm = float(output)
-except Exception:
-    value_mm = -179.0
-print(value_mm / 1000.0)
-PY
-)
-
 STEP_VALUE=$(python3 - <<PY
 print(float("$STEP_M"))
 PY
@@ -244,7 +230,7 @@ PY
 
 echo
 echo "Single-leg test ready for ${LEG_NAME}."
-echo "Nominal ${LEG_NAME} center z: ${NOMINAL_Z_M} m"
+echo "Leg IK input mode: delta_from_nominal_m"
 echo "Step magnitude: ${STEP_VALUE} m"
 if [[ "$ENABLE_OBSERVER" -eq 1 ]]; then
     echo "Starting observer mode..."
@@ -259,34 +245,28 @@ if [[ "$WITH_PC" -eq 1 ]]; then
 fi
 
 pause_step "Press Enter to publish the nominal ${LEG_NAME} hold target..."
-publish_leg_target "0.0" "0.0" "${NOMINAL_Z_M}" "${LEG_NAME^^} nominal hold"
+publish_leg_target "0.0" "0.0" "0.0" "${LEG_NAME^^} nominal hold"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame +x..."
-publish_leg_target "${STEP_VALUE}" "0.0" "${NOMINAL_Z_M}" "${LEG_NAME^^} body-frame +x"
+publish_leg_target "${STEP_VALUE}" "0.0" "0.0" "${LEG_NAME^^} body-frame +x"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame -x..."
-publish_leg_target "-${STEP_VALUE}" "0.0" "${NOMINAL_Z_M}" "${LEG_NAME^^} body-frame -x"
+publish_leg_target "-${STEP_VALUE}" "0.0" "0.0" "${LEG_NAME^^} body-frame -x"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame +y..."
-publish_leg_target "0.0" "${STEP_VALUE}" "${NOMINAL_Z_M}" "${LEG_NAME^^} body-frame +y"
+publish_leg_target "0.0" "${STEP_VALUE}" "0.0" "${LEG_NAME^^} body-frame +y"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame -y..."
-publish_leg_target "0.0" "-${STEP_VALUE}" "${NOMINAL_Z_M}" "${LEG_NAME^^} body-frame -y"
+publish_leg_target "0.0" "-${STEP_VALUE}" "0.0" "${LEG_NAME^^} body-frame -y"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame z+..."
-publish_leg_target "0.0" "0.0" "$(python3 - <<PY
-print(float("${NOMINAL_Z_M}") + float("${STEP_VALUE}"))
-PY
-)" "${LEG_NAME^^} body-frame z+"
+publish_leg_target "0.0" "0.0" "${STEP_VALUE}" "${LEG_NAME^^} body-frame z+"
 
 pause_step "Press Enter to move ${LEG_NAME} in body-frame z-..."
-publish_leg_target "0.0" "0.0" "$(python3 - <<PY
-print(float("${NOMINAL_Z_M}") - float("${STEP_VALUE}"))
-PY
-)" "${LEG_NAME^^} body-frame z-"
+publish_leg_target "0.0" "0.0" "-${STEP_VALUE}" "${LEG_NAME^^} body-frame z-"
 
 pause_step "Press Enter to send ${LEG_NAME} back to nominal hold and finish..."
-publish_leg_target "0.0" "0.0" "${NOMINAL_Z_M}" "${LEG_NAME^^} return to nominal"
+publish_leg_target "0.0" "0.0" "0.0" "${LEG_NAME^^} return to nominal"
 
 echo
 echo "Test sequence finished. Press Ctrl+C to stop the launched nodes, or keep them running for further observation."

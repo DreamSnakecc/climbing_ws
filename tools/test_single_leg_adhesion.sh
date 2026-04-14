@@ -56,6 +56,9 @@ Environment overrides:
 
 This script tests a single leg adhesion flow:
   nominal hold -> preload -> low-rpm attach -> high-rpm attach -> release -> return.
+
+Commands are published in delta-from-nominal mode, so x/y/z are body-frame offsets
+relative to the nominal universal-joint-center pose.
 EOF
 }
 
@@ -229,6 +232,7 @@ if [[ "$SKIP_LAUNCH" -eq 0 ]]; then
         enable_auto_position_commands:=true \
         enable_auto_mode_switching:=false \
         enable_auto_current_control:=false \
+        leg_ik_input_mode:=delta_from_nominal_m \
         >/tmp/test_single_leg_adhesion_jetson.log 2>&1 &
     JETSON_PID=$!
 
@@ -244,31 +248,10 @@ wait_for_node "/jetson/fan_serial_bridge"
 wait_for_node "/jetson/dynamixel_bridge"
 wait_for_node "/state_estimator"
 
-NOMINAL_Z_M=$(python3 - <<'PY'
-import subprocess
-
-try:
-    output = subprocess.check_output(
-        ["rosparam", "get", "/gait_controller/nominal_universal_joint_center_z"],
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ).strip()
-    value_mm = float(output)
-except Exception:
-    value_mm = -179.0
-print(value_mm / 1000.0)
-PY
-)
-
-PRELOAD_Z_M=$(python3 - <<PY
-print(float("${NOMINAL_Z_M}") - float("${PRELOAD_OFFSET_M}"))
-PY
-)
-
 echo
 echo "Single-leg adhesion test ready for ${LEG_NAME}."
-echo "Nominal ${LEG_NAME} center z: ${NOMINAL_Z_M} m"
-echo "Preload ${LEG_NAME} center z: ${PRELOAD_Z_M} m"
+echo "Leg IK input mode: delta_from_nominal_m"
+echo "Preload normal offset: ${PRELOAD_OFFSET_M} m"
 echo "Low/High target rpm: ${RPM_LOW} / ${RPM_HIGH}"
 if [[ "$ENABLE_OBSERVER" -eq 1 ]]; then
     echo "Starting observer mode..."
@@ -282,10 +265,10 @@ echo "  rostopic echo /state/estimated | grep -E \"wall_touch_mask|preload_ready
 echo "  rostopic echo /control/swing_leg_target"
 
 pause_step "Press Enter to send ${LEG_NAME} to nominal hold..."
-publish_leg_target "0.0" "0.0" "${NOMINAL_Z_M}" "0.0" "10.0" "${LEG_NAME^^} nominal hold"
+publish_leg_target "0.0" "0.0" "0.0" "0.0" "10.0" "${LEG_NAME^^} nominal hold"
 
 pause_step "Press Enter to move ${LEG_NAME} into preload pose..."
-publish_leg_target "0.0" "0.0" "${PRELOAD_Z_M}" "${PRELOAD_SKIRT_TARGET}" "${NORMAL_FORCE_LIMIT}" "${LEG_NAME^^} preload pose"
+publish_leg_target "0.0" "0.0" "-${PRELOAD_OFFSET_M}" "${PRELOAD_SKIRT_TARGET}" "${NORMAL_FORCE_LIMIT}" "${LEG_NAME^^} preload pose"
 
 pause_step "Press Enter to command low-rpm adhesion for ${LEG_NAME}..."
 publish_leg_adhesion "${RPM_LOW}" "1" "${LEG_NAME^^} adhesion command at low rpm"
@@ -297,7 +280,7 @@ pause_step "Observe current and masks, then press Enter to release the fan..."
 publish_leg_adhesion "0.0" "0" "${LEG_NAME^^} adhesion release"
 
 pause_step "Press Enter to return ${LEG_NAME} to nominal hold..."
-publish_leg_target "0.0" "0.0" "${NOMINAL_Z_M}" "0.0" "10.0" "${LEG_NAME^^} return to nominal"
+publish_leg_target "0.0" "0.0" "0.0" "0.0" "10.0" "${LEG_NAME^^} return to nominal"
 
 echo
 echo "Adhesion test sequence finished. Press Ctrl+C to stop the launched nodes, or keep them running for further observation."

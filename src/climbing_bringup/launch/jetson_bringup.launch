@@ -2,6 +2,7 @@
   <arg name="enable_auto_position_commands" default="true" />
   <arg name="enable_auto_mode_switching" default="true" />
   <arg name="enable_auto_current_control" default="true" />
+  <arg name="leg_ik_input_mode" default="absolute_center_m" />
 
   <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
 
@@ -26,6 +27,7 @@
     <node pkg="climbing_hw_bridge" type="fan_serial_bridge.py" name="fan_serial_bridge" output="screen" />
     <node pkg="climbing_hw_bridge" type="leg_ik_executor.py" name="leg_ik_executor" output="screen">
       <param name="enable_auto_position_commands" value="$(arg enable_auto_position_commands)" />
+      <param name="input_mode" value="$(arg leg_ik_input_mode)" />
       <param name="robot_config_path" value="$(find climbing_description)/config/robot.yaml" />
     </node>
     <node pkg="climbing_hw_bridge" type="local_safety_supervisor.py" name="local_safety_supervisor" output="screen" />
