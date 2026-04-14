@@ -33,7 +33,7 @@ class LegIkExecutor(object):
         self.input_mode = rospy.get_param("~input_mode", "absolute_center_m")  # or "delta_from_nominal_m"
         self.startup_pose_mode = str(get_cfg("startup_pose_mode", "use_motor_home_ticks"))
 
-        self.nominal_x = float(get_cfg("nominal_x", 120.0))
+        self.nominal_x = float(get_cfg("nominal_x", 118.75))
         self.nominal_y = float(get_cfg("nominal_y", 0.0))
         self.legacy_nominal_z = float(get_cfg("nominal_z", -299.2))
 
@@ -79,7 +79,13 @@ class LegIkExecutor(object):
         self.board_configs = self._load_board_configs()
         self.position_clients = {}
         self._init_position_service_clients()
-        self.nominal_output_deg = self._nominal_output_deg_vector()
+        self.nominal_joint_deg = self._nominal_joint_deg_vector()
+        self.nominal_output_deg = [
+            self.nominal_joint_deg[0] + float(self.joint_zero_deg["j1"]),
+            self.nominal_joint_deg[1] + float(self.joint_zero_deg["j2"]),
+            self.nominal_joint_deg[2] + float(self.joint_zero_deg["j3"]),
+        ]
+        self.last_joint_deg_by_leg = {name: list(self.nominal_joint_deg) for name in self.leg_order}
         self._initialize_startup_pose_mode()
 
         self.targets_m = {name: Point(0.0, 0.0, self.nominal_universal_joint_center_z / 1000.0) for name in self.leg_order}
@@ -130,17 +136,13 @@ class LegIkExecutor(object):
             rospy.logwarn("leg_ik_executor failed to read startup position for ID %d: %s", motor_id, exc)
             return None
 
-    def _nominal_output_deg_vector(self):
+    def _nominal_joint_deg_vector(self):
         q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(
             self.nominal_x,
             self.nominal_y,
             self.nominal_universal_joint_center_z,
         )
-        return [
-            q1_deg + float(self.joint_zero_deg["j1"]),
-            q2_deg + float(self.joint_zero_deg["j2"]),
-            q3_deg + float(self.joint_zero_deg["j3"]),
-        ]
+        return [q1_deg, q2_deg, q3_deg]
 
     def _capture_motor_home_from_current_pose(self):
         captured_home = {}
@@ -210,11 +212,22 @@ class LegIkExecutor(object):
         dy_leg = -sin_yaw * dx_base_mm + cos_yaw * dy_base_mm
         return dx_leg, dy_leg
 
-    def _ik_transform_matrix_solve(self, x_mm, y_mm, z_mm):
-        p_z = z_mm
+    def _clamp_joint_solution_deg(self, joint_solution_deg):
+        return [
+            self._clamp(float(joint_solution_deg[0]), self.joint_limit_deg["j1"][0], self.joint_limit_deg["j1"][1]),
+            self._clamp(float(joint_solution_deg[1]), self.joint_limit_deg["j2"][0], self.joint_limit_deg["j2"][1]),
+            self._clamp(float(joint_solution_deg[2]), self.joint_limit_deg["j3"][0], self.joint_limit_deg["j3"][1]),
+        ]
 
-        q1 = math.atan2(y_mm, x_mm)
-        r_total = math.hypot(x_mm, y_mm)
+    def _ik_solution_cost(self, candidate_deg, reference_deg):
+        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in [0, 1, 2])
+
+    def _ik_candidates_deg(self, x_mm, y_mm, z_mm):
+        x_prime = float(x_mm) - self.l_coxa
+        p_z = float(z_mm)
+
+        q1 = math.atan2(float(y_mm), x_prime)
+        r_total = math.hypot(x_prime, float(y_mm))
         r_prime = max(r_total - self.l_femur, 1.0)
 
         l1 = self.l_tibia
@@ -222,15 +235,20 @@ class LegIkExecutor(object):
         d_sq = r_prime ** 2 + p_z ** 2
         cos_theta3 = (d_sq - l1 ** 2 - l2 ** 2) / (2.0 * l1 * l2)
         cos_theta3 = self._clamp(cos_theta3, -1.0, 1.0)
-        theta3 = math.atan2(-math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2)), cos_theta3)
+        sin_theta3_mag = math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2))
 
-        q3 = theta3
-        q2 = math.atan2(p_z, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
+        candidates = []
+        for branch_sign in [-1.0, 1.0]:
+            theta3 = math.atan2(branch_sign * sin_theta3_mag, cos_theta3)
+            q2 = math.atan2(p_z, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
+            candidates.append([math.degrees(q1), math.degrees(q2), math.degrees(theta3)])
+        return candidates
 
-        q1_deg = self._clamp(math.degrees(q1), self.joint_limit_deg["j1"][0], self.joint_limit_deg["j1"][1])
-        q2_deg = self._clamp(math.degrees(q2), self.joint_limit_deg["j2"][0], self.joint_limit_deg["j2"][1])
-        q3_deg = self._clamp(math.degrees(q3), self.joint_limit_deg["j3"][0], self.joint_limit_deg["j3"][1])
-        return q1_deg, q2_deg, q3_deg
+    def _ik_transform_matrix_solve(self, x_mm, y_mm, z_mm, reference_deg=None):
+        candidates = [self._clamp_joint_solution_deg(candidate) for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm)]
+        if reference_deg is None:
+            reference_deg = [0.0, 0.0, 0.0]
+        return tuple(min(candidates, key=lambda candidate: self._ik_solution_cost(candidate, reference_deg)))
 
     def _joint_gear_ratio(self, joint_index):
         if joint_index == 1:
@@ -277,7 +295,9 @@ class LegIkExecutor(object):
         tx_mm = self.nominal_x + dx_leg_mm
         ty_mm = self.nominal_y + dy_leg_mm
         tz_mm = self.nominal_universal_joint_center_z + dz_delta_base_mm
-        q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm)
+        reference_deg = self.last_joint_deg_by_leg.get(leg_name, self.nominal_joint_deg)
+        q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg)
+        self.last_joint_deg_by_leg[leg_name] = [q1_deg, q2_deg, q3_deg]
 
         cmd_deg = [
             q1_deg + float(self.joint_zero_deg["j1"]),

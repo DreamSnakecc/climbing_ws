@@ -46,10 +46,10 @@ class DynamixelBridge(object):
 
         self.gear_ratio_joint2 = float(get_gait_cfg("gear_ratio_joint2", 1.0))
         self.gear_ratio_joint3 = float(get_gait_cfg("gear_ratio_joint3", 4.421))
-        self.nominal_x = float(get_gait_cfg("nominal_x", 120.0))
+        self.nominal_x = float(get_gait_cfg("nominal_x", 118.75))
         self.nominal_y = float(get_gait_cfg("nominal_y", 0.0))
         self.legacy_nominal_z = float(get_gait_cfg("nominal_z", -299.2))
-        self.link_coxa = float(get_gait_cfg("link_coxa", 44.75))
+        self.l_coxa = float(get_gait_cfg("link_coxa", 44.75)) / 1000.0
         self.l_femur = float(get_gait_cfg("link_femur", 74.0)) / 1000.0
         self.l_tibia = float(get_gait_cfg("link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(get_gait_cfg("link_a3", 41.5)) / 1000.0
@@ -184,19 +184,33 @@ class DynamixelBridge(object):
     def _clamp(value, lo, hi):
         return max(lo, min(hi, value))
 
-    def _ik_transform_matrix_solve_deg(self, x_mm, y_mm, z_mm):
-        q1 = math.atan2(y_mm, x_mm)
-        r_total = math.hypot(x_mm, y_mm)
+    @staticmethod
+    def _solution_cost(candidate_deg, reference_deg):
+        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in [0, 1, 2])
+
+    def _ik_candidates_deg(self, x_mm, y_mm, z_mm):
+        x_prime = float(x_mm) - self.l_coxa * 1000.0
+        q1 = math.atan2(float(y_mm), x_prime)
+        r_total = math.hypot(x_prime, float(y_mm))
         r_prime = max(r_total - self.l_femur * 1000.0, 1.0)
 
         l1 = self.l_tibia * 1000.0
         l2 = self.l_a3 * 1000.0
-        d_sq = r_prime ** 2 + z_mm ** 2
+        d_sq = r_prime ** 2 + float(z_mm) ** 2
         cos_theta3 = (d_sq - l1 ** 2 - l2 ** 2) / (2.0 * l1 * l2)
         cos_theta3 = self._clamp(cos_theta3, -1.0, 1.0)
-        theta3 = math.atan2(-math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2)), cos_theta3)
-        q2 = math.atan2(z_mm, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
-        return [math.degrees(q1), math.degrees(q2), math.degrees(theta3)]
+        sin_theta3_mag = math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2))
+
+        candidates = []
+        for branch_sign in [-1.0, 1.0]:
+            theta3 = math.atan2(branch_sign * sin_theta3_mag, cos_theta3)
+            q2 = math.atan2(float(z_mm), r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
+            candidates.append([math.degrees(q1), math.degrees(q2), math.degrees(theta3)])
+        return candidates
+
+    def _ik_transform_matrix_solve_deg(self, x_mm, y_mm, z_mm):
+        candidates = self._ik_candidates_deg(x_mm, y_mm, z_mm)
+        return min(candidates, key=lambda candidate: self._solution_cost(candidate, [0.0, 0.0, 0.0]))
 
     def _compute_nominal_output_deg_by_motor(self):
         nominal_joint_deg = self._ik_transform_matrix_solve_deg(
@@ -359,7 +373,7 @@ class DynamixelBridge(object):
         radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3)
         p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3)
         radial_total = self.l_femur + radial_prime
-        return [radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
+        return [self.l_coxa + radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
 
     def _leg_joint_vector(self, leg_name):
         motor_ids = self.leg_to_motors.get(leg_name, [])

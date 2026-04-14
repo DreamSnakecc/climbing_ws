@@ -173,9 +173,10 @@ class StateEstimator(object):
         self.ekf_reset_position_jump_m = max(float(get_cfg("ekf_reset_position_jump_m", 0.75)), 1e-6)
         self.nominal_swing_duration_s = self._nominal_swing_duration()
         self.base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
-        self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 120.0)) / 1000.0
+        self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
         self.nominal_y_m = float(rospy.get_param("/gait_controller/nominal_y", 0.0)) / 1000.0
         self.legacy_nominal_control_point_z_m = float(rospy.get_param("/gait_controller/nominal_z", -299.2)) / 1000.0
+        self.l_coxa = float(rospy.get_param("/gait_controller/link_coxa", 44.75)) / 1000.0
         self.l_femur = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
         self.l_tibia = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
@@ -521,7 +522,7 @@ class StateEstimator(object):
         radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3)
         p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3)
         radial_total = self.l_femur + radial_prime
-        return [radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
+        return [self.l_coxa + radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
 
     def _leg_joint_vector(self, leg_name, joint_index_map):
         joint_vector = []
