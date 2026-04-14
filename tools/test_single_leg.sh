@@ -157,6 +157,7 @@ open_observer() {
 
 start_observers() {
     open_observer "single-leg-joint-state" "source '$ROS_SETUP'; source '$WORKSPACE_DIR/devel/setup.bash'; rostopic echo /jetson/dynamixel_bridge/joint_state"
+    open_observer "single-leg-joint-ticks" "source '$ROS_SETUP'; source '$WORKSPACE_DIR/devel/setup.bash'; rostopic echo /jetson/joint_position_ticks_cmd"
     open_observer "single-leg-swing-target" "source '$ROS_SETUP'; source '$WORKSPACE_DIR/devel/setup.bash'; rostopic echo /control/swing_leg_target"
     if [[ "$WITH_PC" -eq 1 ]]; then
         open_observer "single-leg-estimated-state" "source '$ROS_SETUP'; source '$WORKSPACE_DIR/devel/setup.bash'; rostopic echo /state/estimated | grep -E 'wall_touch_mask|preload_ready_mask|attachment_ready_mask|adhesion_mask'"
@@ -239,6 +240,7 @@ fi
 echo
 echo "Suggested observers:"
 echo "  rostopic echo /jetson/dynamixel_bridge/joint_state"
+echo "  rostopic echo /jetson/joint_position_ticks_cmd"
 echo "  rostopic echo /control/swing_leg_target"
 if [[ "$WITH_PC" -eq 1 ]]; then
     echo "  rostopic echo /state/estimated | grep -E \"wall_touch_mask|preload_ready_mask|attachment_ready_mask|adhesion_mask\""

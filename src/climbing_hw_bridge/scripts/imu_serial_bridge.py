@@ -200,7 +200,7 @@ class ImuSerialBridge(object):
         self.last_message = None
         self.last_open_attempt = rospy.Time(0)
 
-        self.pub = rospy.Publisher("~/imu", Imu, queue_size=50)
+        self.pub = rospy.Publisher("~imu", Imu, queue_size=50)
         self.timer = rospy.Timer(rospy.Duration(1.0 / max(self.publish_rate_hz, 1.0)), self.update)
 
         if self.use_mock_data:

@@ -68,11 +68,11 @@ class FanSerialBridge(object):
                 max_supported_legs,
             )
 
-        self.echo_pub = rospy.Publisher("~/last_command", Float32, queue_size=10)
-        self.leg_rpm_pub = rospy.Publisher("~/leg_rpm", Float32MultiArray, queue_size=10)
-        self.current_pub = rospy.Publisher("~/fan_currents", Float32MultiArray, queue_size=10)
-        rospy.Subscriber("~/adhesion_command", AdhesionCommand, self.adhesion_callback, queue_size=20)
-        rospy.Service("~/set_fan_speed_once", SetFanSpeed, self.handle_set_fan_speed)
+        self.echo_pub = rospy.Publisher("~last_command", Float32, queue_size=10)
+        self.leg_rpm_pub = rospy.Publisher("~leg_rpm", Float32MultiArray, queue_size=10)
+        self.current_pub = rospy.Publisher("~fan_currents", Float32MultiArray, queue_size=10)
+        rospy.Subscriber("~adhesion_command", AdhesionCommand, self.adhesion_callback, queue_size=20)
+        rospy.Service("~set_fan_speed_once", SetFanSpeed, self.handle_set_fan_speed)
 
         if serial is None:
             rospy.logwarn("pyserial is not installed; fan_serial_bridge will not access serial hardware")

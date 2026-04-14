@@ -9,8 +9,8 @@ class LocalSafetySupervisor(object):
         rospy.init_node("local_safety_supervisor", anonymous=False)
         self.timeout_sec = float(rospy.get_param("~control_timeout_sec", 1.0))
         self.last_heartbeat = rospy.Time(0)
-        self.safe_pub = rospy.Publisher("~/safe_mode", Bool, queue_size=5, latch=True)
-        rospy.Subscriber("~/heartbeat", Bool, self.heartbeat_callback, queue_size=20)
+        self.safe_pub = rospy.Publisher("~safe_mode", Bool, queue_size=5, latch=True)
+        rospy.Subscriber("~heartbeat", Bool, self.heartbeat_callback, queue_size=20)
         rospy.Timer(rospy.Duration(0.1), self.check_timeout)
 
     def heartbeat_callback(self, _msg):
