@@ -324,11 +324,11 @@ legs:
     motor_ids: [13, 5, 6]
 
 gait_controller:
-  nominal_x: 120.0
+  nominal_x: 74.0
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -179.0
+  nominal_universal_joint_center_z: -191.5
   # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
-  nominal_z: -299.2
+  nominal_z: -321.7   # This is the nominal foot bottom center height, used only for legacy support point calculations. The universal-joint-center nominal height is more relevant for control and state estimation.
   link_coxa: 44.75
   link_femur: 74.0
   link_tibia: 150.0
@@ -340,28 +340,28 @@ gait_controller:
   gear_ratio_joint3: 4.421
   joint_limit_deg:
     j1: [-90.0, 90.0]
-    j2: [-10.0, 190.0]
+    j2: [-10.0, 150.0]
     j3: [-100.0, 100.0]
   joint_zero_deg:
     j1: 0.0
     j2: 90.0
     j3: 0.0
-  startup_pose_mode: capture_current_as_home
+  startup_pose_mode: capture_current_as_home  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
-    "1": 2126
-    "2": 448
-    "3": 1528
-    "4": 5119
-    "5": 3921
-    "6": 117
-    "7": 3045
-    "8": 1486
-    "11": 2014
-    "12": 1903
-    "13": 2041
-    "14": 1022
+    "1": 1159
+    "2": 1534
+    "3": 2516
+    "4": 698
+    "5": 2873
+    "6": 3312
+    "7": 2561
+    "8": 638
+    "11": 2007
+    "12": 1926
+    "13": 2037
+    "14": 1044
   motor_dir:
     "1": 1
     "2": 1
