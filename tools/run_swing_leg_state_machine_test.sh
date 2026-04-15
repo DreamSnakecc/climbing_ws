@@ -7,11 +7,12 @@ ROS_SETUP="${ROS_SETUP:-}"
 ROLE="pc"
 LEG_NAME="${LEG_NAME:-rr}"
 DURATION_S="${DURATION_S:-20}"
-RATE_HZ="${RATE_HZ:-10}"
+RATE_HZ="${RATE_HZ:-30}"
 PRINT_PERIOD_S="${PRINT_PERIOD_S:-0.5}"
 OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/test_logs}"
 TRIGGER_SWING=0
 SWING_DURATION_S="${SWING_DURATION_S:-2.0}"
+TRIGGER_NORMAL_TRAVEL_M="${TRIGGER_NORMAL_TRAVEL_M:-0.045}"
 LAUNCH_LOCAL_STACK=0
 ISOLATE_FROM_AUTO_CONTROL=0
 FORCE_LIMIT_TOLERANCE_N="${FORCE_LIMIT_TOLERANCE_N:-0.5}"
@@ -54,11 +55,12 @@ Options:
     --role pc|jetson              Local machine role. Default: pc.
     --leg rr                      Target leg: lf, rf, rr, lr. Default: rr.
     --duration-s 20               Observer duration for PC role. Use <=0 to run until Ctrl+C.
-    --rate-hz 10                  Observer/logging rate for PC role.
+    --rate-hz 30                  Observer/logging rate for PC role.
     --print-period-s 0.5          Minimum console print interval for PC role.
     --output-dir DIR              Log output directory for PC role.
-    --trigger-swing               For PC role only: publish /control/body_reference to force one swing cycle.
+    --trigger-swing               For PC role only: publish /control/body_reference to force one pure wall-normal attachment test cycle.
     --swing-duration-s 2.0        Triggered swing duration when --trigger-swing is used.
+    --trigger-normal-travel-m 0.045 Requested leg travel along the wall normal during the trigger test.
     --force-limit-tolerance-n 0.5 Phase inference tolerance passed to the Python observer.
     --startup-grace-s 3.0        Delay before the observer warns that /control/swing_leg_target has no messages.
     --launch-local-stack          Also launch the local bringup before running the test command.
@@ -105,6 +107,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --swing-duration-s)
             SWING_DURATION_S="$2"
+            shift 2
+            ;;
+        --trigger-normal-travel-m)
+            TRIGGER_NORMAL_TRAVEL_M="$2"
             shift 2
             ;;
         --force-limit-tolerance-n)
@@ -227,6 +233,7 @@ run_pc_role() {
         --print-period-s "$PRINT_PERIOD_S"
         --output-dir "$OUTPUT_DIR"
         --swing-duration-s "$SWING_DURATION_S"
+        --trigger-normal-travel-m "$TRIGGER_NORMAL_TRAVEL_M"
         --force-limit-tolerance-n "$FORCE_LIMIT_TOLERANCE_N"
         --startup-grace-s "$STARTUP_GRACE_S"
     )

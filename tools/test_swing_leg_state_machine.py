@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import os
 import sys
 
@@ -16,6 +17,59 @@ from std_msgs.msg import Bool, String
 
 def clamp(value, lower_bound, upper_bound):
     return max(lower_bound, min(upper_bound, value))
+
+
+def vector_dot(lhs, rhs):
+    return sum([float(lhs[index]) * float(rhs[index]) for index in range(min(len(lhs), len(rhs)))])
+
+
+def vector_add(lhs, rhs):
+    return [float(lhs[index]) + float(rhs[index]) for index in range(min(len(lhs), len(rhs)))]
+
+
+def vector_scale(vector, scale):
+    return [float(value) * float(scale) for value in vector]
+
+
+def vector_norm(vector):
+    return math.sqrt(sum([float(value) * float(value) for value in vector]))
+
+
+def normalize_vector(vector, fallback):
+    norm = vector_norm(vector)
+    if norm <= 1e-9:
+        return list(fallback)
+    return [float(value) / norm for value in vector]
+
+
+def quaternion_conjugate(quaternion):
+    return [-float(quaternion[0]), -float(quaternion[1]), -float(quaternion[2]), float(quaternion[3])]
+
+
+def quaternion_multiply(lhs, rhs):
+    x1, y1, z1, w1 = [float(value) for value in lhs]
+    x2, y2, z2, w2 = [float(value) for value in rhs]
+    return [
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+    ]
+
+
+def rotate_vector_by_quaternion(vector, quaternion):
+    pure = [float(vector[0]), float(vector[1]), float(vector[2]), 0.0]
+    rotated = quaternion_multiply(quaternion_multiply(quaternion, pure), quaternion_conjugate(quaternion))
+    return rotated[:3]
+
+
+def quaternion_from_pose(pose_msg):
+    return [
+        float(pose_msg.orientation.x),
+        float(pose_msg.orientation.y),
+        float(pose_msg.orientation.z),
+        float(pose_msg.orientation.w),
+    ]
 
 
 class SwingLegStateMachineTester(object):
@@ -40,6 +94,34 @@ class SwingLegStateMachineTester(object):
         self.preload_skirt_target = float(rospy.get_param("/swing_leg_controller/preload_skirt_compression_target", 0.85))
         self.light_contact_skirt_target = float(rospy.get_param("/swing_leg_controller/light_contact_skirt_compression_target", 0.20))
         self.force_limit_tolerance_n = max(float(args.force_limit_tolerance_n), 1e-3)
+        self.body_position_gain = [float(value) for value in rospy.get_param("/swing_leg_controller/body_position_gain", [0.70, 0.70, 0.35])]
+        self.max_position_offset = [float(value) for value in rospy.get_param("/swing_leg_controller/max_position_offset_m", [0.045, 0.035, 0.05])]
+        self.wall_normal_body = normalize_vector(
+            [float(value) for value in rospy.get_param("/swing_leg_controller/wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0]))],
+            [0.0, 0.0, 1.0],
+        )
+        legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
+        universal_joint_rigid_offset_m = abs(
+            float(rospy.get_param("/gait_controller/link_d6", -13.5)) + float(rospy.get_param("/gait_controller/link_d7", -106.7))
+        ) / 1000.0
+        self.nominal_z_m = float(
+            rospy.get_param(
+                "/gait_controller/nominal_universal_joint_center_z",
+                legacy_nominal_z_mm + universal_joint_rigid_offset_m * 1000.0,
+            )
+        ) / 1000.0
+        self.nominal_foot_center = [0.0, 0.0, self.nominal_z_m]
+        self.nominal_normal_scalar = vector_dot(self.nominal_foot_center, self.wall_normal_body)
+        self.max_trigger_normal_travel_m = sum([
+            abs(float(self.wall_normal_body[index])) * float(self.max_position_offset[index])
+            for index in range(min(len(self.wall_normal_body), len(self.max_position_offset)))
+        ])
+        self.requested_trigger_normal_travel_m = clamp(
+            float(args.trigger_normal_travel_m),
+            0.0,
+            max(self.max_trigger_normal_travel_m, 1e-3),
+        )
+        self.trigger_normal_scale = self._compute_trigger_normal_scale()
 
         self.output_dir = os.path.abspath(os.path.expanduser(args.output_dir))
         os.makedirs(self.output_dir, exist_ok=True)
@@ -61,6 +143,12 @@ class SwingLegStateMachineTester(object):
         self.last_missing_target_diagnostic_time = None
         self.contact_active_since = None
         self.trigger_started_at = None
+        self.trigger_reference_seed = None
+        self.preload_reference_normal_scalar = None
+        self.first_contact_hold_time = None
+        self.first_compliant_response_time = None
+        self.peak_compliant_extra_normal_offset_m = 0.0
+        self.peak_target_normal_from_nominal_m = 0.0
 
         self.body_reference_pub = None
         if self.args.trigger_swing:
@@ -107,18 +195,50 @@ class SwingLegStateMachineTester(object):
         mask[self.leg_index] = bool(support)
         return mask
 
+    def _compute_trigger_normal_scale(self):
+        weighted_gain = 0.0
+        for index in range(min(len(self.wall_normal_body), len(self.body_position_gain))):
+            weighted_gain += float(self.body_position_gain[index]) * float(self.wall_normal_body[index]) * float(self.wall_normal_body[index])
+        return max(weighted_gain, 1e-3)
+
+    def _seed_trigger_reference(self):
+        if self.last_estimated_state is not None:
+            pose = copy.deepcopy(self.last_estimated_state.pose)
+        elif self.last_body_reference is not None:
+            pose = copy.deepcopy(self.last_body_reference.pose)
+        else:
+            pose = Pose()
+            pose.orientation.w = 1.0
+
+        if self.last_body_reference is not None:
+            gait_mode = int(self.last_body_reference.gait_mode)
+        else:
+            gait_mode = 0
+
+        twist = Twist()
+        return {
+            "pose": pose,
+            "gait_mode": gait_mode,
+            "orientation": quaternion_from_pose(pose),
+        }
+
     def _make_trigger_body_reference(self, support_leg):
         msg = BodyReference()
         msg.header.stamp = rospy.Time.now()
-        if self.last_body_reference is not None:
-            msg.pose = copy.deepcopy(self.last_body_reference.pose)
-            msg.twist = copy.deepcopy(self.last_body_reference.twist)
-            msg.gait_mode = int(self.last_body_reference.gait_mode)
-        else:
-            msg.pose = Pose()
-            msg.pose.orientation.w = 1.0
-            msg.twist = Twist()
-            msg.gait_mode = 0
+        if self.trigger_reference_seed is None:
+            self.trigger_reference_seed = self._seed_trigger_reference()
+
+        msg.pose = copy.deepcopy(self.trigger_reference_seed["pose"])
+        msg.twist = Twist()
+        msg.gait_mode = int(self.trigger_reference_seed["gait_mode"])
+
+        if not support_leg:
+            body_error_body = vector_scale(self.wall_normal_body, self.requested_trigger_normal_travel_m / self.trigger_normal_scale)
+            body_error_world = rotate_vector_by_quaternion(body_error_body, self.trigger_reference_seed["orientation"])
+            msg.pose.position.x += float(body_error_world[0])
+            msg.pose.position.y += float(body_error_world[1])
+            msg.pose.position.z += float(body_error_world[2])
+
         msg.support_mask = self._support_mask_for_leg(support_leg)
         return msg
 
@@ -213,6 +333,52 @@ class SwingLegStateMachineTester(object):
             return "DETACH_OR_TANGENTIAL"
         return "SWING_FREE"
 
+    def _target_normal_metrics(self, phase, swing, contact_hold_satisfied, now):
+        if swing is None:
+            return {}
+
+        target_center = [float(swing.center.x), float(swing.center.y), float(swing.center.z)]
+        target_velocity = [float(swing.center_velocity.x), float(swing.center_velocity.y), float(swing.center_velocity.z)]
+        target_normal_scalar = vector_dot(target_center, self.wall_normal_body)
+        target_normal_velocity = vector_dot(target_velocity, self.wall_normal_body)
+        target_normal_from_nominal = target_normal_scalar - self.nominal_normal_scalar
+        self.peak_target_normal_from_nominal_m = max(self.peak_target_normal_from_nominal_m, target_normal_from_nominal)
+
+        if phase in ["PRELOAD_COMPRESS", "COMPLIANT_SETTLE"] and not contact_hold_satisfied:
+            self.preload_reference_normal_scalar = target_normal_scalar
+
+        if contact_hold_satisfied and self.first_contact_hold_time is None:
+            self.first_contact_hold_time = float(now.to_sec())
+
+        compliant_extra_normal_offset = 0.0
+        compliant_response_detected = False
+        compliant_response_latency_s = None
+        preload_reference_from_nominal = None
+        if self.preload_reference_normal_scalar is not None:
+            preload_reference_from_nominal = self.preload_reference_normal_scalar - self.nominal_normal_scalar
+            compliant_extra_normal_offset = target_normal_scalar - self.preload_reference_normal_scalar
+            if compliant_extra_normal_offset > 0.0:
+                self.peak_compliant_extra_normal_offset_m = max(self.peak_compliant_extra_normal_offset_m, compliant_extra_normal_offset)
+            if contact_hold_satisfied and compliant_extra_normal_offset > 1e-4:
+                compliant_response_detected = True
+                if self.first_compliant_response_time is None:
+                    self.first_compliant_response_time = float(now.to_sec())
+
+        if self.first_contact_hold_time is not None and self.first_compliant_response_time is not None:
+            compliant_response_latency_s = self.first_compliant_response_time - self.first_contact_hold_time
+
+        return {
+            "target_normal_position_m": round(target_normal_scalar, 5),
+            "target_normal_velocity_mps": round(target_normal_velocity, 5),
+            "target_normal_from_nominal_m": round(target_normal_from_nominal, 5),
+            "preload_reference_normal_from_nominal_m": None if preload_reference_from_nominal is None else round(preload_reference_from_nominal, 5),
+            "compliant_extra_normal_offset_m": round(compliant_extra_normal_offset, 5),
+            "compliant_response_detected": bool(compliant_response_detected),
+            "compliant_response_latency_s": None if compliant_response_latency_s is None else round(compliant_response_latency_s, 4),
+            "peak_target_normal_from_nominal_m": round(self.peak_target_normal_from_nominal_m, 5),
+            "peak_compliant_extra_normal_offset_m": round(self.peak_compliant_extra_normal_offset_m, 5),
+        }
+
     def _leg_joint_feedback(self):
         if self.last_joint_state is None:
             return None
@@ -260,6 +426,7 @@ class SwingLegStateMachineTester(object):
             "inferred_phase": phase,
             "contact_hold_elapsed_s": round(contact_hold_elapsed, 4),
             "contact_hold_satisfied": contact_hold_elapsed >= self.contact_hold_min_s,
+            "trigger_normal_travel_request_m": round(self.requested_trigger_normal_travel_m, 5),
         }
 
         if self.last_body_reference is not None and self.leg_index < len(self.last_body_reference.support_mask):
@@ -283,6 +450,7 @@ class SwingLegStateMachineTester(object):
                     "target_normal_force_limit_n": round(float(swing.desired_normal_force_limit), 4),
                 }
             )
+            data.update(self._target_normal_metrics(phase, swing, data["contact_hold_satisfied"], now))
 
         if est is not None:
             data.update(
@@ -329,7 +497,7 @@ class SwingLegStateMachineTester(object):
         print(
             "[{stamp:8.3f}] phase={phase:18s} support={support} measured={measured} wall={wall} hold={hold:5.2f}s "
             "attach={attach} adhesion={adhesion} fan={fan:8.2f}A rpm={rpm:8.1f} force_lim={force:6.2f} "
-            "center=({x:+.3f},{y:+.3f},{z:+.3f}) torque={torque:6.2f}Nm seal={seal:4.2f}".format(
+            "center=({x:+.3f},{y:+.3f},{z:+.3f}) normal={normal:+.3f} extra={extra:+.3f} torque={torque:6.2f}Nm seal={seal:4.2f}".format(
                 stamp=data["stamp"],
                 phase=data.get("inferred_phase", "UNKNOWN"),
                 support=str(data.get("target_support_leg", False)),
@@ -344,11 +512,28 @@ class SwingLegStateMachineTester(object):
                 x=center.get("x", 0.0),
                 y=center.get("y", 0.0),
                 z=center.get("z", 0.0),
+                normal=data.get("target_normal_from_nominal_m", 0.0),
+                extra=data.get("compliant_extra_normal_offset_m", 0.0),
                 torque=data.get("leg_torque_sum_nm", 0.0),
                 seal=data.get("seal_confidence", 0.0),
             )
         )
         sys.stdout.flush()
+
+    def _print_summary(self):
+        print("\nSummary:")
+        print("  log_path=%s" % self.log_path)
+        print("  requested_trigger_normal_travel_m=%.4f" % self.requested_trigger_normal_travel_m)
+        print("  peak_target_normal_from_nominal_m=%.4f" % self.peak_target_normal_from_nominal_m)
+        print("  peak_compliant_extra_normal_offset_m=%.4f" % self.peak_compliant_extra_normal_offset_m)
+        if self.first_contact_hold_time is not None:
+            print("  first_contact_hold_time_s=%.4f" % self.first_contact_hold_time)
+        else:
+            print("  first_contact_hold_time_s=not_reached")
+        if self.first_compliant_response_time is not None and self.first_contact_hold_time is not None:
+            print("  compliant_response_latency_s=%.4f" % (self.first_compliant_response_time - self.first_contact_hold_time))
+        else:
+            print("  compliant_response_latency_s=not_detected")
 
     def spin(self):
         rate = rospy.Rate(max(self.args.rate_hz, 1.0))
@@ -379,6 +564,7 @@ class SwingLegStateMachineTester(object):
 
         print("\nLog saved to %s" % self.log_path)
         print("Seen phases: %s" % ", ".join(self.phase_seen if self.phase_seen else ["none"]))
+    self._print_summary()
 
 
 def build_arg_parser():
@@ -387,19 +573,25 @@ def build_arg_parser():
     )
     parser.add_argument("--leg", default="rr", help="Leg to observe: lf, rf, rr, lr. Default: rr")
     parser.add_argument("--duration-s", type=float, default=20.0, help="Monitoring duration in seconds. Use <=0 to run until Ctrl+C.")
-    parser.add_argument("--rate-hz", type=float, default=10.0, help="Loop rate for logging and optional trigger publishing.")
+    parser.add_argument("--rate-hz", type=float, default=30.0, help="Loop rate for logging and optional trigger publishing.")
     parser.add_argument("--print-period-s", type=float, default=0.5, help="Minimum print interval while monitoring.")
     parser.add_argument("--output-dir", default="~/climbing_ws/test_logs", help="Directory for JSONL logs.")
     parser.add_argument(
         "--trigger-swing",
         action="store_true",
-        help="Publish /control/body_reference to force the selected leg into swing. Use only when body_planner is disabled or not publishing.",
+        help="Publish /control/body_reference to force the selected leg into a pure wall-normal swing-and-attach test. Use only when body_planner is disabled or not publishing.",
     )
     parser.add_argument(
         "--swing-duration-s",
         type=float,
         default=2.0,
         help="When --trigger-swing is enabled, keep the selected leg in swing for this long before restoring support.",
+    )
+    parser.add_argument(
+        "--trigger-normal-travel-m",
+        type=float,
+        default=0.045,
+        help="Requested leg travel along wall normal during the isolated trigger test. It is clamped by swing_leg_controller max_position_offset.",
     )
     parser.add_argument(
         "--force-limit-tolerance-n",
