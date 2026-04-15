@@ -288,6 +288,7 @@ class SwingLegController(object):
                 "compliant_normal_velocity": 0.0,
                 "contact_active_since": None,
                 "last_joint_vector": [0.0, 0.0, 0.0],
+                "test_override_value": None,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -636,6 +637,38 @@ class SwingLegController(object):
         max_normal_travel = max(self.max_position_offset)
         return clamp(override_normal_travel, -max_normal_travel, max_normal_travel)
 
+    def _apply_test_trigger_override(self, leg_name, state):
+        override_normal_travel = self._test_trigger_normal_override(leg_name)
+        if override_normal_travel is None:
+            state["test_override_value"] = None
+            return None
+
+        target = self._clamp_position(
+            vector_add(
+                [0.0, 0.0, self.nominal_z_m],
+                vector_scale(self.wall_normal_body, override_normal_travel),
+            )
+        )
+        target_normal = vector_dot(target, self.wall_normal_body)
+        preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
+        attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m)
+
+        state["target"] = list(target)
+        state["tangential_target"] = list(target)
+        state["preload_target"] = self._clamp_position(preload_target)
+        state["attach_target"] = self._clamp_position(attach_target)
+        state["test_override_value"] = override_normal_travel
+
+        rospy.loginfo_throttle(
+            1.0,
+            "swing_leg_controller test override active for %s: normal_travel=%.4f target_z=%.4f preload_z=%.4f",
+            leg_name,
+            override_normal_travel,
+            state["target"][2],
+            state["preload_target"][2],
+        )
+        return override_normal_travel
+
     def _target_delta(self, leg_name, leg_index):
         desired_twist = self._desired_twist_body()
         estimated_twist = [0.0, 0.0, 0.0]
@@ -796,6 +829,7 @@ class SwingLegController(object):
 
     def _guided_swing_command(self, leg_name, leg_index, now_sec, dt):
         state = self.swing_states[leg_name]
+        self._apply_test_trigger_override(leg_name, state)
         phase = state["phase"]
         phase_elapsed = self._phase_elapsed(state, now_sec)
         wall_touch = self._leg_mask_value(self.estimated_state.wall_touch_mask, leg_index, False)
