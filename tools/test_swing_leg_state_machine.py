@@ -140,6 +140,11 @@ class SwingLegStateMachineTester(object):
             0.0,
             max(self.max_trigger_normal_travel_m, 1e-3),
         )
+        self.requested_trigger_press_normal_travel_m = clamp(
+            float(args.trigger_press_normal_travel_m),
+            -max(self.max_trigger_normal_travel_m, 1e-3),
+            max(self.max_trigger_normal_travel_m, 1e-3),
+        )
         self.trigger_normal_scale = self._compute_trigger_normal_scale()
 
         self.output_dir = os.path.abspath(os.path.expanduser(args.output_dir))
@@ -266,6 +271,7 @@ class SwingLegStateMachineTester(object):
     def _configure_test_override_params(self):
         rospy.set_param("/swing_leg_controller/test_trigger_leg_name", str(self.leg_name))
         rospy.set_param("/swing_leg_controller/test_trigger_normal_travel_m", float(self.requested_trigger_normal_travel_m))
+        rospy.set_param("/swing_leg_controller/test_trigger_press_normal_travel_m", float(self.requested_trigger_press_normal_travel_m))
         self.override_params_active = True
 
     def _clear_test_override_params(self):
@@ -275,6 +281,7 @@ class SwingLegStateMachineTester(object):
         for param_name in [
             "/swing_leg_controller/test_trigger_leg_name",
             "/swing_leg_controller/test_trigger_normal_travel_m",
+            "/swing_leg_controller/test_trigger_press_normal_travel_m",
         ]:
             if rospy.has_param(param_name):
                 rospy.delete_param(param_name)
@@ -358,11 +365,24 @@ class SwingLegStateMachineTester(object):
         support_leg = bool(self.last_swing_target.support_leg)
         normal_force_limit = float(self.last_swing_target.desired_normal_force_limit)
         skirt_target = float(self.last_swing_target.skirt_compression_target)
+        target_normal_from_nominal = vector_dot(
+            [
+                float(self.last_swing_target.center.x),
+                float(self.last_swing_target.center.y),
+                float(self.last_swing_target.center.z),
+            ],
+            self.wall_normal_body,
+        ) - self.nominal_normal_scalar
 
         if support_leg:
             if abs(normal_force_limit - self.attach_normal_force_limit_n) <= self.force_limit_tolerance_n and skirt_target >= self.preload_skirt_target:
                 return "ATTACHED_HOLD"
             return "SUPPORT"
+        if self.args.trigger_swing and abs(normal_force_limit) <= self.force_limit_tolerance_n:
+            staged_midpoint = 0.5 * (self.requested_trigger_normal_travel_m + self.requested_trigger_press_normal_travel_m)
+            if target_normal_from_nominal >= staged_midpoint:
+                return "TEST_LIFT_CLEARANCE"
+            return "TEST_PRESS_CONTACT"
         if abs(normal_force_limit - self.attach_normal_force_limit_n) <= self.force_limit_tolerance_n:
             return "COMPLIANT_SETTLE"
         if abs(normal_force_limit - self.preload_normal_force_limit_n) <= self.force_limit_tolerance_n:
@@ -531,6 +551,7 @@ class SwingLegStateMachineTester(object):
             "contact_hold_elapsed_s": round(contact_hold_elapsed, 4),
             "contact_hold_satisfied": contact_hold_elapsed >= self.contact_hold_min_s,
             "trigger_normal_travel_request_m": round(self.requested_trigger_normal_travel_m, 5),
+            "trigger_press_normal_travel_request_m": round(self.requested_trigger_press_normal_travel_m, 5),
         }
 
         if self.last_body_reference is not None and self.leg_index < len(self.last_body_reference.support_mask):
@@ -633,7 +654,8 @@ class SwingLegStateMachineTester(object):
     def _print_summary(self):
         print("\nSummary:")
         print("  log_path=%s" % self.log_path)
-        print("  requested_trigger_normal_travel_m=%.4f" % self.requested_trigger_normal_travel_m)
+        print("  requested_trigger_lift_normal_travel_m=%.4f" % self.requested_trigger_normal_travel_m)
+        print("  requested_trigger_press_normal_travel_m=%.4f" % self.requested_trigger_press_normal_travel_m)
         print("  peak_target_normal_from_nominal_m=%.4f" % self.peak_target_normal_from_nominal_m)
         print("  peak_compliant_extra_normal_offset_m=%.4f" % self.peak_compliant_extra_normal_offset_m)
         if self.first_contact_hold_time is not None:
@@ -703,8 +725,14 @@ def build_arg_parser():
     parser.add_argument(
         "--trigger-normal-travel-m",
         type=float,
-        default=0.045,
-        help="Requested leg travel along wall normal during the isolated trigger test. It is clamped by swing_leg_controller max_position_offset.",
+        default=0.035,
+        help="Requested lift travel along wall normal during the staged trigger test. It is clamped by swing_leg_controller max_position_offset.",
+    )
+    parser.add_argument(
+        "--trigger-press-normal-travel-m",
+        type=float,
+        default=-0.003,
+        help="Requested press target relative to nominal along wall normal after the lift phase.",
     )
     parser.add_argument(
         "--force-limit-tolerance-n",

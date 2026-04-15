@@ -158,6 +158,8 @@ def cross(lhs, rhs):
 
 class SwingLegController(object):
     PHASE_SUPPORT = "SUPPORT"
+    PHASE_TEST_LIFT_CLEARANCE = "TEST_LIFT_CLEARANCE"
+    PHASE_TEST_PRESS_CONTACT = "TEST_PRESS_CONTACT"
     PHASE_DETACH_SLIDE = "DETACH_SLIDE"
     PHASE_TANGENTIAL_ALIGN = "TANGENTIAL_ALIGN"
     PHASE_PRELOAD_COMPRESS = "PRELOAD_COMPRESS"
@@ -210,6 +212,8 @@ class SwingLegController(object):
         self.tangential_velocity_limit = [float(value) for value in get_cfg("tangential_velocity_limit_mps", [0.12, 0.12, 0.03])]
         self.preload_velocity_limit = [float(value) for value in get_cfg("preload_velocity_limit_mps", [0.04, 0.04, 0.03])]
         self.compliant_velocity_limit = [float(value) for value in get_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])]
+        self.test_lift_velocity_limit = [float(value) for value in get_cfg("test_lift_velocity_limit_mps", [0.08, 0.08, 0.08])]
+        self.test_press_velocity_limit = [float(value) for value in get_cfg("test_press_velocity_limit_mps", [0.04, 0.04, 0.04])]
         self.compliant_normal_velocity_limit_mps = max(
             float(get_cfg("compliant_normal_velocity_limit_mps", max(self.compliant_velocity_limit))),
             0.0,
@@ -278,6 +282,8 @@ class SwingLegController(object):
                 "support": True,
                 "phase": self.PHASE_SUPPORT,
                 "phase_started_at": None,
+                "lift_target": list(nominal),
+                "press_target": list(nominal),
                 "light_contact_target": list(nominal),
                 "tangential_target": list(nominal),
                 "preload_target": list(nominal),
@@ -289,6 +295,8 @@ class SwingLegController(object):
                 "contact_active_since": None,
                 "last_joint_vector": [0.0, 0.0, 0.0],
                 "test_override_value": None,
+                "test_press_value": None,
+                "test_experiment_active": False,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -637,37 +645,59 @@ class SwingLegController(object):
         max_normal_travel = max(self.max_position_offset)
         return clamp(override_normal_travel, -max_normal_travel, max_normal_travel)
 
-    def _apply_test_trigger_override(self, leg_name, state):
-        override_normal_travel = self._test_trigger_normal_override(leg_name)
-        if override_normal_travel is None:
-            state["test_override_value"] = None
-            return None
-
-        target = self._clamp_position(
-            vector_add(
-                [0.0, 0.0, self.nominal_z_m],
-                vector_scale(self.wall_normal_body, override_normal_travel),
+    def _test_trigger_press_override(self):
+        press_normal_travel = float(
+            rospy.get_param(
+                "/swing_leg_controller/test_trigger_press_normal_travel_m",
+                rospy.get_param("~test_trigger_press_normal_travel_m", -0.003),
             )
         )
-        target_normal = vector_dot(target, self.wall_normal_body)
-        preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
-        attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m)
+        max_normal_travel = max(self.max_position_offset)
+        return clamp(press_normal_travel, -max_normal_travel, max_normal_travel)
 
-        state["target"] = list(target)
-        state["tangential_target"] = list(target)
-        state["preload_target"] = self._clamp_position(preload_target)
-        state["attach_target"] = self._clamp_position(attach_target)
-        state["test_override_value"] = override_normal_travel
+    def _apply_test_trigger_override(self, leg_name, state):
+        lift_normal_travel = self._test_trigger_normal_override(leg_name)
+        if lift_normal_travel is None:
+            state["test_override_value"] = None
+            state["test_press_value"] = None
+            state["test_experiment_active"] = False
+            return None
+
+        press_normal_travel = self._test_trigger_press_override()
+        lift_target = self._clamp_position(
+            vector_add(
+                [0.0, 0.0, self.nominal_z_m],
+                vector_scale(self.wall_normal_body, lift_normal_travel),
+            )
+        )
+        press_target = self._clamp_position(
+            vector_add(
+                [0.0, 0.0, self.nominal_z_m],
+                vector_scale(self.wall_normal_body, press_normal_travel),
+            )
+        )
+
+        state["lift_target"] = list(lift_target)
+        state["press_target"] = list(press_target)
+        if state.get("phase") != self.PHASE_ATTACHED_HOLD:
+            state["target"] = list(lift_target)
+            state["tangential_target"] = list(lift_target)
+            state["preload_target"] = list(press_target)
+            state["attach_target"] = list(press_target)
+        state["test_override_value"] = lift_normal_travel
+        state["test_press_value"] = press_normal_travel
+        state["test_experiment_active"] = True
 
         rospy.loginfo_throttle(
             1.0,
-            "swing_leg_controller test override active for %s: normal_travel=%.4f target_z=%.4f preload_z=%.4f",
+            "swing_leg_controller staged test active for %s: lift_normal=%.4f press_normal=%.4f lift_z=%.4f press_z=%.4f",
             leg_name,
-            override_normal_travel,
-            state["target"][2],
+            lift_normal_travel,
+            press_normal_travel,
+            state["lift_target"][2],
             state["preload_target"][2],
         )
-        return override_normal_travel
+        return lift_normal_travel
 
     def _target_delta(self, leg_name, leg_index):
         desired_twist = self._desired_twist_body()
@@ -717,15 +747,11 @@ class SwingLegController(object):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
         override_normal_travel = self._test_trigger_normal_override(leg_name)
+        self._apply_test_trigger_override(leg_name, state)
         if override_normal_travel is None:
             target = [target_delta[0], target_delta[1], self.nominal_z_m + target_delta[2]]
         else:
-            target = self._clamp_position(
-                vector_add(
-                    [0.0, 0.0, self.nominal_z_m],
-                    vector_scale(self.wall_normal_body, override_normal_travel),
-                )
-            )
+            target = list(state["lift_target"])
         start = list(state["position"])
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
@@ -740,6 +766,11 @@ class SwingLegController(object):
         state["tangential_target"] = self._clamp_position(tangential_target)
         state["preload_target"] = self._clamp_position(preload_target)
         state["attach_target"] = self._clamp_position(attach_target)
+        if override_normal_travel is not None:
+            state["target"] = list(state["lift_target"])
+            state["tangential_target"] = list(state["lift_target"])
+            state["preload_target"] = list(state["press_target"])
+            state["attach_target"] = list(state["press_target"])
         state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
         state["compliant_force_estimate"] = 0.0
         state["compliant_normal_offset"] = 0.0
@@ -747,7 +778,11 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
-        self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
+        if override_normal_travel is None:
+            state["test_experiment_active"] = False
+            self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
+        else:
+            self._set_phase(state, self.PHASE_TEST_LIFT_CLEARANCE, stamp_sec)
         self.swing_phase_start[leg_name] = stamp_sec
 
     def _support_command(self, leg_name, leg_index):
@@ -759,6 +794,8 @@ class SwingLegController(object):
         state["position"] = list(support_target)
         state["start"] = list(support_target)
         state["target"] = list(support_target)
+        state["lift_target"] = list(support_target)
+        state["press_target"] = list(support_target)
         state["light_contact_target"] = list(support_target)
         state["tangential_target"] = list(support_target)
         state["preload_target"] = list(support_target)
@@ -770,6 +807,9 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         state["phase"] = self.PHASE_SUPPORT
         state["phase_started_at"] = None
+        state["test_override_value"] = None
+        state["test_press_value"] = None
+        state["test_experiment_active"] = False
         return self._build_message(
             leg_name,
             support_target,
@@ -838,7 +878,22 @@ class SwingLegController(object):
         measured_contact = self._leg_mask_value(self.estimated_state.measured_contact_mask, leg_index, False)
         early_contact = self._leg_mask_value(self.estimated_state.early_contact_mask, leg_index, False)
 
-        if phase == self.PHASE_DETACH_SLIDE:
+        if phase == self.PHASE_TEST_LIFT_CLEARANCE:
+            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["lift_target"], self.test_lift_velocity_limit, dt)
+            if abs(self._normal_error(state["lift_target"], cmd_position)) <= self.normal_alignment_tolerance_m:
+                self._set_phase(state, self.PHASE_TEST_PRESS_CONTACT, now_sec)
+            skirt_target = self.swing_skirt_compression_target
+            normal_force_limit = 0.0
+            support_leg = False
+        elif phase == self.PHASE_TEST_PRESS_CONTACT:
+            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["press_target"], self.test_press_velocity_limit, dt)
+            if abs(self._normal_error(state["press_target"], cmd_position)) <= self.normal_alignment_tolerance_m:
+                self._capture_compliant_torque_bias(leg_name, state)
+                self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
+            skirt_target = self.preload_skirt_compression_target
+            normal_force_limit = 0.0
+            support_leg = False
+        elif phase == self.PHASE_DETACH_SLIDE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["light_contact_target"], self.detach_velocity_limit, dt)
             if abs(self._normal_error(state["light_contact_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.detach_slide_duration_s:
                 self._set_phase(state, self.PHASE_TANGENTIAL_ALIGN, now_sec)
@@ -898,7 +953,7 @@ class SwingLegController(object):
             cmd_velocity = [0.0, 0.0, 0.0]
             state["compliant_normal_velocity"] = 0.0
 
-        if (measured_contact or early_contact or wall_touch) and phase in [self.PHASE_TANGENTIAL_ALIGN, self.PHASE_PRELOAD_COMPRESS]:
+        if (measured_contact or early_contact or wall_touch) and phase in [self.PHASE_TANGENTIAL_ALIGN, self.PHASE_PRELOAD_COMPRESS, self.PHASE_TEST_PRESS_CONTACT]:
             skirt_target = max(skirt_target, self.light_contact_skirt_compression_target)
 
         state["position"] = list(cmd_position)
