@@ -14,6 +14,7 @@ TRIGGER_SWING=0
 SWING_DURATION_S="${SWING_DURATION_S:-2.0}"
 LAUNCH_LOCAL_STACK=0
 FORCE_LIMIT_TOLERANCE_N="${FORCE_LIMIT_TOLERANCE_N:-0.5}"
+STARTUP_GRACE_S="${STARTUP_GRACE_S:-3.0}"
 
 normalize_role() {
     case "$1" in
@@ -58,6 +59,7 @@ Options:
     --trigger-swing               For PC role only: publish /control/body_reference to force one swing cycle.
     --swing-duration-s 2.0        Triggered swing duration when --trigger-swing is used.
     --force-limit-tolerance-n 0.5 Phase inference tolerance passed to the Python observer.
+    --startup-grace-s 3.0        Delay before the observer warns that /control/swing_leg_target has no messages.
     --launch-local-stack          Also launch the local bringup before running the test command.
     -h, --help                    Show this help.
 
@@ -104,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force-limit-tolerance-n)
             FORCE_LIMIT_TOLERANCE_N="$2"
+            shift 2
+            ;;
+        --startup-grace-s)
+            STARTUP_GRACE_S="$2"
             shift 2
             ;;
         --launch-local-stack)
@@ -160,6 +166,13 @@ run_pc_role() {
         LOCAL_BRINGUP_PID=$!
         trap 'kill ${LOCAL_BRINGUP_PID:-0} >/dev/null 2>&1 || true' EXIT INT TERM
         sleep 3
+        if ! kill -0 "$LOCAL_BRINGUP_PID" >/dev/null 2>&1; then
+            echo "pc_static_bringup.launch exited early. Recent log:" >&2
+            tail -n 40 /tmp/swing_state_machine_pc_bringup.log >&2 || true
+            exit 1
+        fi
+    else
+        echo "Expecting an already running ROS graph that publishes /state/estimated and /control/swing_leg_target."
     fi
 
     local cmd=(
@@ -171,6 +184,7 @@ run_pc_role() {
         --output-dir "$OUTPUT_DIR"
         --swing-duration-s "$SWING_DURATION_S"
         --force-limit-tolerance-n "$FORCE_LIMIT_TOLERANCE_N"
+        --startup-grace-s "$STARTUP_GRACE_S"
     )
     if [[ "$TRIGGER_SWING" -eq 1 ]]; then
         cmd+=(--trigger-swing)

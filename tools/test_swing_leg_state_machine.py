@@ -6,6 +6,7 @@ import json
 import os
 import sys
 
+import rosgraph
 import rospy
 from climbing_msgs.msg import AdhesionCommand, BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Pose, Twist
@@ -50,6 +51,7 @@ class SwingLegStateMachineTester(object):
         self.phase_seen = []
         self.last_printed_phase = None
         self.last_print_time = rospy.Time(0)
+        self.last_missing_target_diagnostic_time = None
         self.contact_active_since = None
         self.trigger_started_at = None
 
@@ -134,6 +136,51 @@ class SwingLegStateMachineTester(object):
             return max((now - self.contact_active_since).to_sec(), 0.0)
         self.contact_active_since = None
         return 0.0
+
+    def _topic_publishers(self, topic_name):
+        try:
+            master = rosgraph.Master(rospy.get_name())
+            publishers, _, _ = master.getSystemState()
+        except Exception:
+            return []
+
+        for published_topic, node_names in publishers:
+            if published_topic == topic_name:
+                return sorted(node_names)
+        return []
+
+    def _maybe_print_missing_target_diagnostic(self, now):
+        if self.last_swing_target is not None:
+            return
+
+        if now.to_sec() < max(self.args.startup_grace_s, 0.0):
+            return
+
+        if self.last_missing_target_diagnostic_time is not None:
+            elapsed = (now - self.last_missing_target_diagnostic_time).to_sec()
+            if elapsed < max(self.args.diagnostic_repeat_s, 0.0):
+                return
+
+        swing_publishers = self._topic_publishers("/control/swing_leg_target")
+        state_publishers = self._topic_publishers("/state/estimated")
+        body_reference_publishers = self._topic_publishers("/control/body_reference")
+        print(
+            "[{stamp:8.3f}] diagnostic: no /control/swing_leg_target message for leg={leg}. "
+            "publishers swing_target={swing} state={state} body_reference={body}. "
+            "received state={state_seen} body_reference={body_seen} trigger_swing={trigger}.".format(
+                stamp=now.to_sec(),
+                leg=self.leg_name,
+                swing=swing_publishers if swing_publishers else ["none"],
+                state=state_publishers if state_publishers else ["none"],
+                body=body_reference_publishers if body_reference_publishers else ["none"],
+                state_seen=str(self.last_estimated_state is not None),
+                body_seen=str(self.last_body_reference is not None),
+                trigger=str(bool(self.args.trigger_swing)),
+            ),
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+        self.last_missing_target_diagnostic_time = now
 
     def _phase_from_outputs(self):
         if self.last_swing_target is None:
@@ -268,6 +315,7 @@ class SwingLegStateMachineTester(object):
             self._publish_trigger_reference(now)
             data = self._snapshot(now)
             self._write_log(data)
+            self._maybe_print_missing_target_diagnostic(now)
 
             phase = data.get("inferred_phase")
             should_print = phase != self.last_printed_phase
@@ -311,6 +359,18 @@ def build_arg_parser():
         type=float,
         default=0.5,
         help="Tolerance used when inferring phases from desired_normal_force_limit.",
+    )
+    parser.add_argument(
+        "--startup-grace-s",
+        type=float,
+        default=3.0,
+        help="Wait this long before warning that /control/swing_leg_target has no messages.",
+    )
+    parser.add_argument(
+        "--diagnostic-repeat-s",
+        type=float,
+        default=5.0,
+        help="Minimum interval between repeated missing-target diagnostics.",
     )
     return parser
 
