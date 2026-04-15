@@ -85,6 +85,11 @@ def plot_log(records, output_path, title):
     target_x = series_from_records(records, ["target_center", "x"], float("nan"))
     target_y = series_from_records(records, ["target_center", "y"], float("nan"))
     target_z = series_from_records(records, ["target_center", "z"], float("nan"))
+    actual_x = series_from_records(records, ["actual_center_estimate", "x"], float("nan"))
+    actual_y = series_from_records(records, ["actual_center_estimate", "y"], float("nan"))
+    actual_z = series_from_records(records, ["actual_center_estimate", "z"], float("nan"))
+    target_normal = series_from_records(records, ["target_normal_from_nominal_m"], float("nan"))
+    actual_normal = series_from_records(records, ["actual_normal_from_nominal_m"], float("nan"))
     joint_feedback = first_available_joint_feedback(records)
     if joint_feedback is None:
         raise RuntimeError("This log does not contain joint_feedback. Re-run the test with the updated logger.")
@@ -102,22 +107,35 @@ def plot_log(records, output_path, title):
         "SUPPORT": "#e5e7eb",
     }
 
-    figure, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+    figure, axes = plt.subplots(3, 1, figsize=(14, 11), sharex=True)
     figure.suptitle(title)
 
     axes[0].plot(times, target_x, label="target x", color="#2563eb", linewidth=1.8)
     axes[0].plot(times, target_y, label="target y", color="#16a34a", linewidth=1.8)
     axes[0].plot(times, target_z, label="target z", color="#dc2626", linewidth=1.8)
+    if not all(value != value for value in actual_x):
+        axes[0].plot(times, actual_x, label="actual x", color="#1d4ed8", linestyle="--", linewidth=1.3)
+    if not all(value != value for value in actual_y):
+        axes[0].plot(times, actual_y, label="actual y", color="#15803d", linestyle="--", linewidth=1.3)
+    if not all(value != value for value in actual_z):
+        axes[0].plot(times, actual_z, label="actual z", color="#b91c1c", linestyle="--", linewidth=1.3)
     axes[0].set_ylabel("Foot Target Center (m)")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend(loc="upper right")
 
-    for joint_index, motor_id in enumerate(motor_ids):
-        axes[1].plot(times, joint_positions[joint_index], label="motor %s" % motor_id, linewidth=1.8)
-    axes[1].set_ylabel("Joint Position (rad)")
-    axes[1].set_xlabel("Time From Log Start (s)")
+    axes[1].plot(times, target_normal, label="target normal", color="#7c3aed", linewidth=1.8)
+    if not all(value != value for value in actual_normal):
+        axes[1].plot(times, actual_normal, label="actual normal", color="#ea580c", linestyle="--", linewidth=1.5)
+    axes[1].set_ylabel("Normal From Nominal (m)")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend(loc="upper right")
+
+    for joint_index, motor_id in enumerate(motor_ids):
+        axes[2].plot(times, joint_positions[joint_index], label="motor %s" % motor_id, linewidth=1.8)
+    axes[2].set_ylabel("Joint Position (rad)")
+    axes[2].set_xlabel("Time From Log Start (s)")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(loc="upper right")
 
     for axis in axes:
         y_min, y_max = axis.get_ylim()

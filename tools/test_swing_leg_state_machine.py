@@ -87,6 +87,10 @@ class SwingLegStateMachineTester(object):
             raise RuntimeError("Unsupported leg %s. Valid legs: %s" % (args.leg, ", ".join(self.leg_names)))
         self.leg_name = args.leg
         self.leg_index = self.leg_names.index(self.leg_name)
+        self.leg_hip_yaw_rad = {
+            str(leg_name): math.radians(float(cfg.get("hip_yaw_deg", 0.0)))
+            for leg_name, cfg in legs_cfg.items()
+        }
 
         self.preload_normal_force_limit_n = float(rospy.get_param("/swing_leg_controller/preload_normal_force_limit_n", 15.0))
         self.attach_normal_force_limit_n = float(rospy.get_param("/swing_leg_controller/attach_normal_force_limit_n", 25.0))
@@ -96,6 +100,13 @@ class SwingLegStateMachineTester(object):
         self.force_limit_tolerance_n = max(float(args.force_limit_tolerance_n), 1e-3)
         self.body_position_gain = [float(value) for value in rospy.get_param("/swing_leg_controller/body_position_gain", [0.70, 0.70, 0.35])]
         self.max_position_offset = [float(value) for value in rospy.get_param("/swing_leg_controller/max_position_offset_m", [0.045, 0.035, 0.05])]
+        self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
+        self.nominal_y_m = float(rospy.get_param("/gait_controller/nominal_y", 0.0)) / 1000.0
+        self.link_coxa_m = float(rospy.get_param("/gait_controller/link_coxa", 44.75)) / 1000.0
+        self.link_femur_m = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
+        self.link_tibia_m = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
+        self.link_a3_m = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
+        self.base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
         self.wall_normal_body = normalize_vector(
             [float(value) for value in rospy.get_param("/swing_leg_controller/wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0]))],
             [0.0, 0.0, 1.0],
@@ -112,6 +123,14 @@ class SwingLegStateMachineTester(object):
         ) / 1000.0
         self.nominal_foot_center = [0.0, 0.0, self.nominal_z_m]
         self.nominal_normal_scalar = vector_dot(self.nominal_foot_center, self.wall_normal_body)
+        self.nominal_body_center_by_leg = {
+            leg_name: self._body_from_leg_local([
+                self.nominal_x_m,
+                self.nominal_y_m,
+                self.nominal_z_m,
+            ], leg_name)
+            for leg_name in self.leg_names
+        }
         self.max_trigger_normal_travel_m = sum([
             abs(float(self.wall_normal_body[index])) * float(self.max_position_offset[index])
             for index in range(min(len(self.wall_normal_body), len(self.max_position_offset)))
@@ -430,6 +449,72 @@ class SwingLegStateMachineTester(object):
             "effort": [round(value, 5) for value in efforts],
         }
 
+    def _rotate_z(self, vector, yaw_rad):
+        cos_yaw = math.cos(yaw_rad)
+        sin_yaw = math.sin(yaw_rad)
+        return [
+            cos_yaw * float(vector[0]) - sin_yaw * float(vector[1]),
+            sin_yaw * float(vector[0]) + cos_yaw * float(vector[1]),
+            float(vector[2]),
+        ]
+
+    def _forward_kinematics_leg_local(self, joint_vector_rad):
+        q1 = float(joint_vector_rad[0])
+        q2 = float(joint_vector_rad[1])
+        q3 = float(joint_vector_rad[2])
+        alpha = q2 - math.radians(90.0)
+        radial_prime = self.link_tibia_m * math.cos(alpha) + self.link_a3_m * math.cos(alpha + q3)
+        z_value = self.link_tibia_m * math.sin(alpha) + self.link_a3_m * math.sin(alpha + q3)
+        radial_total = self.link_femur_m + radial_prime
+        return [
+            self.link_coxa_m + radial_total * math.cos(q1),
+            radial_total * math.sin(q1),
+            z_value,
+        ]
+
+    def _body_from_leg_local(self, local_center, leg_name):
+        hip_yaw_rad = float(self.leg_hip_yaw_rad.get(leg_name, 0.0))
+        offset = self._rotate_z([self.base_radius_m, 0.0, 0.0], hip_yaw_rad)
+        rotated_local = self._rotate_z(local_center, hip_yaw_rad)
+        return vector_add(offset, rotated_local)
+
+    def _actual_center_metrics(self, joint_feedback, data):
+        joint_vector_rad = joint_feedback.get("position_rad") or []
+        if len(joint_vector_rad) != 3:
+            return {}
+
+        local_center = self._forward_kinematics_leg_local(joint_vector_rad)
+        body_center = self._body_from_leg_local(local_center, self.leg_name)
+        nominal_body_center = self.nominal_body_center_by_leg.get(self.leg_name)
+        if nominal_body_center is None:
+            return {}
+
+        body_delta = [
+            float(body_center[index]) - float(nominal_body_center[index])
+            for index in range(3)
+        ]
+        controller_frame_center = [body_delta[0], body_delta[1], body_center[2]]
+        actual_normal_scalar = vector_dot(controller_frame_center, self.wall_normal_body)
+        metrics = {
+            "actual_center_estimate": {
+                "x": round(body_delta[0], 5),
+                "y": round(body_delta[1], 5),
+                "z": round(body_center[2], 5),
+            },
+            "actual_center_local_estimate": {
+                "x": round(local_center[0], 5),
+                "y": round(local_center[1], 5),
+                "z": round(local_center[2], 5),
+            },
+            "actual_normal_position_m": round(actual_normal_scalar, 5),
+            "actual_normal_from_nominal_m": round(actual_normal_scalar - self.nominal_normal_scalar, 5),
+        }
+
+        target_normal_position = data.get("target_normal_position_m")
+        if target_normal_position is not None:
+            metrics["actual_normal_tracking_error_m"] = round(actual_normal_scalar - float(target_normal_position), 5)
+        return metrics
+
     def _snapshot(self, now):
         phase = self._phase_from_outputs()
         est = self.last_estimated_state
@@ -504,6 +589,7 @@ class SwingLegStateMachineTester(object):
         joint_feedback = self._leg_joint_feedback()
         if joint_feedback is not None:
             data["joint_feedback"] = joint_feedback
+            data.update(self._actual_center_metrics(joint_feedback, data))
 
         return data
 
@@ -516,7 +602,8 @@ class SwingLegStateMachineTester(object):
         print(
             "[{stamp:8.3f}] phase={phase:18s} support={support} measured={measured} wall={wall} hold={hold:5.2f}s "
             "attach={attach} adhesion={adhesion} fan={fan:8.2f}A rpm={rpm:8.1f} force_lim={force:6.2f} "
-            "center=({x:+.3f},{y:+.3f},{z:+.3f}) normal={normal:+.3f} extra={extra:+.3f} torque={torque:6.2f}Nm seal={seal:4.2f}".format(
+            "center=({x:+.3f},{y:+.3f},{z:+.3f}) actual=({ax:+.3f},{ay:+.3f},{az:+.3f}) "
+            "normal={normal:+.3f} actual_normal={actual_normal:+.3f} extra={extra:+.3f} torque={torque:6.2f}Nm seal={seal:4.2f}".format(
                 stamp=data["stamp"],
                 phase=data.get("inferred_phase", "UNKNOWN"),
                 support=str(data.get("target_support_leg", False)),
@@ -531,7 +618,11 @@ class SwingLegStateMachineTester(object):
                 x=center.get("x", 0.0),
                 y=center.get("y", 0.0),
                 z=center.get("z", 0.0),
+                ax=(data.get("actual_center_estimate") or {}).get("x", 0.0),
+                ay=(data.get("actual_center_estimate") or {}).get("y", 0.0),
+                az=(data.get("actual_center_estimate") or {}).get("z", 0.0),
                 normal=data.get("target_normal_from_nominal_m", 0.0),
+                actual_normal=data.get("actual_normal_from_nominal_m", 0.0),
                 extra=data.get("compliant_extra_normal_offset_m", 0.0),
                 torque=data.get("leg_torque_sum_nm", 0.0),
                 seal=data.get("seal_confidence", 0.0),
