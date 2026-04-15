@@ -13,6 +13,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/test_logs}"
 TRIGGER_SWING=0
 SWING_DURATION_S="${SWING_DURATION_S:-2.0}"
 LAUNCH_LOCAL_STACK=0
+ISOLATE_FROM_AUTO_CONTROL=0
 FORCE_LIMIT_TOLERANCE_N="${FORCE_LIMIT_TOLERANCE_N:-0.5}"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-3.0}"
 
@@ -61,12 +62,14 @@ Options:
     --force-limit-tolerance-n 0.5 Phase inference tolerance passed to the Python observer.
     --startup-grace-s 3.0        Delay before the observer warns that /control/swing_leg_target has no messages.
     --launch-local-stack          Also launch the local bringup before running the test command.
+    --isolate-from-auto-control   Use pc_static_bringup, stop body_planner and mission_supervisor, and send zero-RPM fan commands.
     -h, --help                    Show this help.
 
 Examples:
     ./tools/run_swing_leg_state_machine_test.sh --role jetson --launch-local-stack
     ./tools/run_swing_leg_state_machine_test.sh --role pc --leg rr --duration-s 30
     ./tools/run_swing_leg_state_machine_test.sh --role pc --leg rr --trigger-swing --duration-s 15
+    ./tools/run_swing_leg_state_machine_test.sh --role pc --launch-local-stack --isolate-from-auto-control --leg rr --duration-s 15
 EOF
 }
 
@@ -116,6 +119,10 @@ while [[ $# -gt 0 ]]; do
             LAUNCH_LOCAL_STACK=1
             shift
             ;;
+        --isolate-from-auto-control)
+            ISOLATE_FROM_AUTO_CONTROL=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -159,20 +166,57 @@ source_environment() {
     source "$WORKSPACE_DIR/devel/setup.bash"
 }
 
+kill_node_if_present() {
+    local node_name="$1"
+    if rosnode list 2>/dev/null | grep -qx "$node_name"; then
+        echo "Stopping interfering node $node_name ..."
+        rosnode kill "$node_name" >/dev/null 2>&1 || true
+    fi
+}
+
+stop_all_fans() {
+    local leg_index
+    for leg_index in 0 1 2 3; do
+        rostopic pub -1 /jetson/fan_serial_bridge/adhesion_command climbing_msgs/AdhesionCommand \
+            "{header: {stamp: now, frame_id: ''}, leg_index: ${leg_index}, mode: 0, target_rpm: 0.0, normal_force_limit: 0.0, required_adhesion_force: 0.0}" \
+            >/dev/null 2>&1 || true
+    done
+}
+
+apply_isolation_steps() {
+    echo "Applying isolation steps: stopping body_planner and mission_supervisor, then sending zero-RPM fan commands ..."
+    kill_node_if_present "/body_planner"
+    kill_node_if_present "/mission_supervisor"
+    stop_all_fans
+}
+
 run_pc_role() {
+    if [[ "$ISOLATE_FROM_AUTO_CONTROL" -eq 1 && "$TRIGGER_SWING" -eq 0 ]]; then
+        echo "Isolation mode requires a manual swing trigger; enabling --trigger-swing automatically."
+        TRIGGER_SWING=1
+    fi
+
     if [[ "$LAUNCH_LOCAL_STACK" -eq 1 ]]; then
-        echo "Starting local PC static bringup in the background..."
-        roslaunch climbing_bringup pc_static_bringup.launch >/tmp/swing_state_machine_pc_bringup.log 2>&1 &
+        local bringup_launch="pc_static_bringup.launch"
+        if [[ "$ISOLATE_FROM_AUTO_CONTROL" -eq 0 ]]; then
+            bringup_launch="pc_static_bringup.launch"
+        fi
+        echo "Starting local PC bringup (${bringup_launch}) in the background..."
+        roslaunch climbing_bringup "${bringup_launch}" >/tmp/swing_state_machine_pc_bringup.log 2>&1 &
         LOCAL_BRINGUP_PID=$!
         trap 'kill ${LOCAL_BRINGUP_PID:-0} >/dev/null 2>&1 || true' EXIT INT TERM
         sleep 3
         if ! kill -0 "$LOCAL_BRINGUP_PID" >/dev/null 2>&1; then
-            echo "pc_static_bringup.launch exited early. Recent log:" >&2
+            echo "${bringup_launch} exited early. Recent log:" >&2
             tail -n 40 /tmp/swing_state_machine_pc_bringup.log >&2 || true
             exit 1
         fi
     else
         echo "Expecting an already running ROS graph that publishes /state/estimated and /control/swing_leg_target."
+    fi
+
+    if [[ "$ISOLATE_FROM_AUTO_CONTROL" -eq 1 ]]; then
+        apply_isolation_steps
     fi
 
     local cmd=(

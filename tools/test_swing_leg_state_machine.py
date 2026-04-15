@@ -10,6 +10,7 @@ import rosgraph
 import rospy
 from climbing_msgs.msg import AdhesionCommand, BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Pose, Twist
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
 
 
@@ -23,6 +24,11 @@ class SwingLegStateMachineTester(object):
 
         self.args = args
         self.leg_names = [str(name) for name in rospy.get_param("/swing_leg_controller/leg_names", ["lf", "rf", "rr", "lr"])]
+        legs_cfg = rospy.get_param("/legs", {})
+        self.leg_motor_ids = {
+            str(leg_name): [int(value) for value in cfg.get("motor_ids", [])]
+            for leg_name, cfg in legs_cfg.items()
+        }
         if args.leg not in self.leg_names:
             raise RuntimeError("Unsupported leg %s. Valid legs: %s" % (args.leg, ", ".join(self.leg_names)))
         self.leg_name = args.leg
@@ -48,6 +54,7 @@ class SwingLegStateMachineTester(object):
         self.last_adhesion_command = None
         self.last_mission_state = None
         self.last_mission_active = False
+        self.last_joint_state = None
         self.phase_seen = []
         self.last_printed_phase = None
         self.last_print_time = rospy.Time(0)
@@ -65,6 +72,7 @@ class SwingLegStateMachineTester(object):
         rospy.Subscriber("/jetson/fan_serial_bridge/adhesion_command", AdhesionCommand, self.adhesion_command_callback, queue_size=20)
         rospy.Subscriber("/control/mission_state", String, self.mission_state_callback, queue_size=20)
         rospy.Subscriber("/control/mission_active", Bool, self.mission_active_callback, queue_size=20)
+        rospy.Subscriber("/jetson/dynamixel_bridge/joint_state", JointState, self.joint_state_callback, queue_size=20)
 
     def body_reference_callback(self, msg):
         self.last_body_reference = msg
@@ -85,6 +93,9 @@ class SwingLegStateMachineTester(object):
 
     def mission_active_callback(self, msg):
         self.last_mission_active = bool(msg.data)
+
+    def joint_state_callback(self, msg):
+        self.last_joint_state = msg
 
     def _leg_value(self, values, default=None):
         if values is None or self.leg_index >= len(values):
@@ -202,6 +213,38 @@ class SwingLegStateMachineTester(object):
             return "DETACH_OR_TANGENTIAL"
         return "SWING_FREE"
 
+    def _leg_joint_feedback(self):
+        if self.last_joint_state is None:
+            return None
+
+        joint_name_to_index = {str(name): index for index, name in enumerate(self.last_joint_state.name)}
+        motor_ids = self.leg_motor_ids.get(self.leg_name, [])
+        if not motor_ids:
+            return None
+
+        positions = []
+        velocities = []
+        efforts = []
+        reported_motor_ids = []
+        for motor_id in motor_ids:
+            joint_index = joint_name_to_index.get(str(int(motor_id)))
+            if joint_index is None:
+                continue
+            reported_motor_ids.append(int(motor_id))
+            positions.append(float(self.last_joint_state.position[joint_index]) if joint_index < len(self.last_joint_state.position) else 0.0)
+            velocities.append(float(self.last_joint_state.velocity[joint_index]) if joint_index < len(self.last_joint_state.velocity) else 0.0)
+            efforts.append(float(self.last_joint_state.effort[joint_index]) if joint_index < len(self.last_joint_state.effort) else 0.0)
+
+        if not reported_motor_ids:
+            return None
+
+        return {
+            "motor_ids": reported_motor_ids,
+            "position_rad": [round(value, 5) for value in positions],
+            "velocity_rad_s": [round(value, 5) for value in velocities],
+            "effort": [round(value, 5) for value in efforts],
+        }
+
     def _snapshot(self, now):
         phase = self._phase_from_outputs()
         est = self.last_estimated_state
@@ -270,6 +313,10 @@ class SwingLegStateMachineTester(object):
                     "adhesion_command_required_adhesion_force_n": round(float(adhesion.required_adhesion_force), 4),
                 }
             )
+
+        joint_feedback = self._leg_joint_feedback()
+        if joint_feedback is not None:
+            data["joint_feedback"] = joint_feedback
 
         return data
 
