@@ -149,10 +149,12 @@ class SwingLegStateMachineTester(object):
         self.first_compliant_response_time = None
         self.peak_compliant_extra_normal_offset_m = 0.0
         self.peak_target_normal_from_nominal_m = 0.0
+        self.override_params_active = False
 
         self.body_reference_pub = None
         if self.args.trigger_swing:
             self.body_reference_pub = rospy.Publisher("/control/body_reference", BodyReference, queue_size=20)
+            self._configure_test_override_params()
 
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -241,6 +243,23 @@ class SwingLegStateMachineTester(object):
 
         msg.support_mask = self._support_mask_for_leg(support_leg)
         return msg
+
+    def _configure_test_override_params(self):
+        rospy.set_param("/swing_leg_controller/test_trigger_leg_name", str(self.leg_name))
+        rospy.set_param("/swing_leg_controller/test_trigger_normal_travel_m", float(self.requested_trigger_normal_travel_m))
+        self.override_params_active = True
+
+    def _clear_test_override_params(self):
+        if not self.override_params_active:
+            return
+
+        for param_name in [
+            "/swing_leg_controller/test_trigger_leg_name",
+            "/swing_leg_controller/test_trigger_normal_travel_m",
+        ]:
+            if rospy.has_param(param_name):
+                rospy.delete_param(param_name)
+        self.override_params_active = False
 
     def _publish_trigger_reference(self, now):
         if self.body_reference_pub is None:
@@ -539,32 +558,35 @@ class SwingLegStateMachineTester(object):
         rate = rospy.Rate(max(self.args.rate_hz, 1.0))
         end_time = rospy.Time.now() + rospy.Duration.from_sec(self.args.duration_s) if self.args.duration_s > 0.0 else None
 
-        while not rospy.is_shutdown():
-            now = rospy.Time.now()
-            if end_time is not None and now >= end_time:
-                break
+        try:
+            while not rospy.is_shutdown():
+                now = rospy.Time.now()
+                if end_time is not None and now >= end_time:
+                    break
 
-            self._publish_trigger_reference(now)
-            data = self._snapshot(now)
-            self._write_log(data)
-            self._maybe_print_missing_target_diagnostic(now)
+                self._publish_trigger_reference(now)
+                data = self._snapshot(now)
+                self._write_log(data)
+                self._maybe_print_missing_target_diagnostic(now)
 
-            phase = data.get("inferred_phase")
-            should_print = phase != self.last_printed_phase
-            if (now - self.last_print_time).to_sec() >= self.args.print_period_s:
-                should_print = True
-            if should_print:
-                self._print_snapshot(data)
-                self.last_printed_phase = phase
-                self.last_print_time = now
-                if phase not in self.phase_seen:
-                    self.phase_seen.append(phase)
+                phase = data.get("inferred_phase")
+                should_print = phase != self.last_printed_phase
+                if (now - self.last_print_time).to_sec() >= self.args.print_period_s:
+                    should_print = True
+                if should_print:
+                    self._print_snapshot(data)
+                    self.last_printed_phase = phase
+                    self.last_print_time = now
+                    if phase not in self.phase_seen:
+                        self.phase_seen.append(phase)
 
-            rate.sleep()
+                rate.sleep()
+        finally:
+            self._clear_test_override_params()
 
         print("\nLog saved to %s" % self.log_path)
         print("Seen phases: %s" % ", ".join(self.phase_seen if self.phase_seen else ["none"]))
-    self._print_summary()
+        self._print_summary()
 
 
 def build_arg_parser():

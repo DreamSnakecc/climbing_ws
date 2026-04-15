@@ -617,6 +617,25 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         return False
 
+    def _test_trigger_normal_override(self, leg_name):
+        override_leg_name = str(
+            rospy.get_param(
+                "/swing_leg_controller/test_trigger_leg_name",
+                rospy.get_param("~test_trigger_leg_name", ""),
+            )
+        ).strip()
+        if override_leg_name != str(leg_name):
+            return None
+
+        override_normal_travel = float(
+            rospy.get_param(
+                "/swing_leg_controller/test_trigger_normal_travel_m",
+                rospy.get_param("~test_trigger_normal_travel_m", 0.0),
+            )
+        )
+        max_normal_travel = max(self.max_position_offset)
+        return clamp(override_normal_travel, -max_normal_travel, max_normal_travel)
+
     def _target_delta(self, leg_name, leg_index):
         desired_twist = self._desired_twist_body()
         estimated_twist = [0.0, 0.0, 0.0]
@@ -664,7 +683,16 @@ class SwingLegController(object):
     def _start_swing(self, leg_name, leg_index, stamp_sec):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
-        target = [target_delta[0], target_delta[1], self.nominal_z_m + target_delta[2]]
+        override_normal_travel = self._test_trigger_normal_override(leg_name)
+        if override_normal_travel is None:
+            target = [target_delta[0], target_delta[1], self.nominal_z_m + target_delta[2]]
+        else:
+            target = self._clamp_position(
+                vector_add(
+                    [0.0, 0.0, self.nominal_z_m],
+                    vector_scale(self.wall_normal_body, override_normal_travel),
+                )
+            )
         start = list(state["position"])
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
