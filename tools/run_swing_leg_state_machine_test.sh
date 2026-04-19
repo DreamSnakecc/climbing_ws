@@ -18,6 +18,9 @@ LIFT_DWELL_S="${LIFT_DWELL_S:-1.0}"
 PRESS_DWELL_S="${PRESS_DWELL_S:-1.0}"
 PRESS_TORQUE_THRESHOLD_NM="${PRESS_TORQUE_THRESHOLD_NM:-0.5}"
 ADMITTANCE_FORCE_MIN_N="${ADMITTANCE_FORCE_MIN_N:-2.0}"
+PREP_SUPPORT_S="${PREP_SUPPORT_S:-1.5}"
+JOINT_FEEDBACK_STALE_S="${JOINT_FEEDBACK_STALE_S:-0.5}"
+ACTUATOR_TRACKING_ERROR_M="${ACTUATOR_TRACKING_ERROR_M:-0.010}"
 LAUNCH_LOCAL_STACK=0
 ISOLATE_FROM_AUTO_CONTROL=0
 FORCE_LIMIT_TOLERANCE_N="${FORCE_LIMIT_TOLERANCE_N:-0.5}"
@@ -141,6 +144,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --admittance-force-min-n)
             ADMITTANCE_FORCE_MIN_N="$2"
+            shift 2
+            ;;
+        --prep-support-s)
+            PREP_SUPPORT_S="$2"
+            shift 2
+            ;;
+        --joint-feedback-stale-s)
+            JOINT_FEEDBACK_STALE_S="$2"
+            shift 2
+            ;;
+        --actuator-tracking-error-m)
+            ACTUATOR_TRACKING_ERROR_M="$2"
             shift 2
             ;;
         --force-limit-tolerance-n)
@@ -269,6 +284,9 @@ run_pc_role() {
         --press-dwell-s "$PRESS_DWELL_S"
         --press-torque-threshold-nm "$PRESS_TORQUE_THRESHOLD_NM"
         --admittance-force-min-n "$ADMITTANCE_FORCE_MIN_N"
+        --prep-support-s "$PREP_SUPPORT_S"
+        --joint-feedback-stale-s "$JOINT_FEEDBACK_STALE_S"
+        --actuator-tracking-error-m "$ACTUATOR_TRACKING_ERROR_M"
         --force-limit-tolerance-n "$FORCE_LIMIT_TOLERANCE_N"
         --startup-grace-s "$STARTUP_GRACE_S"
     )

@@ -206,6 +206,16 @@ class SwingLegStateMachineTester(object):
         # Per-controller-phase aggregated statistics so the summary can pinpoint where things went wrong
         # without having to re-parse the full JSONL by hand.
         self.phase_stats = {}
+        # Trackers for "the joints are not actually moving" diagnostics: joint_state freshness, the
+        # last unique encoder reading, and the worst observed |cmd_normal - actual_normal| gap.
+        self.joint_state_first_stamp_s = None
+        self.joint_state_last_stamp_s = None
+        self.joint_state_unique_position_count = 0
+        self._last_joint_position_signature = None
+        self.joint_state_max_inter_arrival_s = 0.0
+        self.joint_state_last_observed_at_s = None
+        self.actuator_tracking_max_abs_error_m = 0.0
+        self.actuator_tracking_error_samples = 0
 
         self.body_reference_pub = None
         if self.args.trigger_swing:
@@ -248,6 +258,31 @@ class SwingLegStateMachineTester(object):
 
     def joint_state_callback(self, msg):
         self.last_joint_state = msg
+        try:
+            now_s = rospy.Time.now().to_sec()
+            stamp_s = msg.header.stamp.to_sec() if msg.header is not None else now_s
+        except Exception:
+            now_s = 0.0
+            stamp_s = 0.0
+        if self.joint_state_first_stamp_s is None:
+            self.joint_state_first_stamp_s = stamp_s
+        else:
+            if self.joint_state_last_observed_at_s is not None:
+                gap = max(0.0, now_s - self.joint_state_last_observed_at_s)
+                if gap > self.joint_state_max_inter_arrival_s:
+                    self.joint_state_max_inter_arrival_s = gap
+        self.joint_state_last_stamp_s = stamp_s
+        self.joint_state_last_observed_at_s = now_s
+        # Track unique encoder snapshots so we can tell "joint_state is being republished but values are
+        # frozen" (typical of motors with torque disabled or enable_auto_position_commands=false) apart
+        # from "joint_state stopped streaming entirely".
+        try:
+            signature = tuple(round(float(value), 5) for value in (msg.position or []))
+        except Exception:
+            signature = None
+        if signature is not None and signature != self._last_joint_position_signature:
+            self.joint_state_unique_position_count += 1
+            self._last_joint_position_signature = signature
 
     def swing_diag_callback(self, msg):
         data = list(msg.data) if msg.data is not None else []
@@ -346,7 +381,16 @@ class SwingLegStateMachineTester(object):
             self.trigger_started_at = now
 
         elapsed = (now - self.trigger_started_at).to_sec()
-        support_leg = elapsed >= self.args.swing_duration_s
+        # First publish support_mask=True for prep_support_s seconds. This forces swing_leg_controller
+        # back into PHASE_SUPPORT before the new trigger goes hot, otherwise a leftover swing from a
+        # previous run keeps running and the new trigger params are never re-applied through _start_swing.
+        prep_window_s = max(self.args.prep_support_s, 0.0)
+        if elapsed < prep_window_s:
+            support_leg = True
+        elif elapsed < prep_window_s + max(self.args.swing_duration_s, 0.0):
+            support_leg = False
+        else:
+            support_leg = True
         msg = self._make_trigger_body_reference(support_leg)
         self.body_reference_pub.publish(msg)
 
@@ -665,6 +709,14 @@ class SwingLegStateMachineTester(object):
             data["joint_feedback"] = joint_feedback
             data.update(self._actual_center_metrics(joint_feedback, data))
 
+        target_normal = data.get("target_normal_from_nominal_m")
+        actual_normal = data.get("actual_normal_from_nominal_m")
+        if target_normal is not None and actual_normal is not None:
+            tracking_error = abs(float(target_normal) - float(actual_normal))
+            data["tracking_error_normal_m"] = round(tracking_error, 5)
+            self.actuator_tracking_max_abs_error_m = max(self.actuator_tracking_max_abs_error_m, tracking_error)
+            self.actuator_tracking_error_samples += 1
+
         if self.last_swing_diag is not None:
             data["controller_diag"] = {
                 key: round(value, 6) if isinstance(value, float) else value
@@ -800,6 +852,9 @@ class SwingLegStateMachineTester(object):
             print("  compliant_response_latency_s=%.4f" % (self.first_compliant_response_time - self.first_contact_hold_time))
         else:
             print("  compliant_response_latency_s=not_detected")
+        print("  joint_state_unique_position_count=%d" % self.joint_state_unique_position_count)
+        print("  joint_state_max_inter_arrival_s=%.3f" % self.joint_state_max_inter_arrival_s)
+        print("  actuator_tracking_max_abs_error_m=%.4f" % self.actuator_tracking_max_abs_error_m)
 
         print("\nPer-phase summary (controller-reported phase when available):")
         for phase_name, stats in self.phase_stats.items():
@@ -857,6 +912,37 @@ class SwingLegStateMachineTester(object):
                 "/control/swing_leg_target {} during the test window".format(
                     "carried non-zero normal motion" if target_seen else "never arrived or stayed at nominal"
                 ),
+            )
+        )
+
+        # 1b. Did the controller actually re-enter the test phases (LIFT then PRESS)?
+        lift_phase_seen = "TEST_LIFT_CLEARANCE" in self.phase_stats
+        press_phase_seen = "TEST_PRESS_CONTACT" in self.phase_stats
+        test_phases_observed = lift_phase_seen and press_phase_seen
+        results.append(
+            (
+                "test_phases_observed",
+                bool(test_phases_observed),
+                "controller_phase_name visited during test: lift={lift}, press={press}; "
+                "if both False the controller skipped TEST_LIFT/TEST_PRESS (likely a stale prior swing - "
+                "increase --prep-support-s)".format(lift=lift_phase_seen, press=press_phase_seen),
+            )
+        )
+
+        # 1c. joint_state freshness / not frozen
+        unique_positions = int(self.joint_state_unique_position_count)
+        max_gap = float(self.joint_state_max_inter_arrival_s)
+        joint_streaming = (
+            self.joint_state_last_observed_at_s is not None
+            and max_gap <= max(self.args.joint_feedback_stale_s, 0.0)
+        )
+        results.append(
+            (
+                "joint_state_streaming",
+                bool(joint_streaming),
+                "joint_state max inter-arrival=%.3fs (threshold=%.3fs); unique encoder snapshots=%d "
+                "(if 1 with target ever moving, motors were not actually driven - check enable_auto_position_commands "
+                "and Dynamixel torque enable)" % (max_gap, self.args.joint_feedback_stale_s, unique_positions),
             )
         )
 
@@ -953,6 +1039,24 @@ class SwingLegStateMachineTester(object):
             )
         )
 
+        # 9. Did the actuator actually follow the command across the full test?
+        tracking_threshold = max(float(self.args.actuator_tracking_error_m), 0.0)
+        actuator_following = (
+            self.actuator_tracking_error_samples > 0
+            and self.actuator_tracking_max_abs_error_m <= tracking_threshold
+        )
+        results.append(
+            (
+                "actuator_following_command",
+                bool(actuator_following),
+                "max|cmd_normal - actual_normal|=%.4fm (threshold=%.4fm) over %d samples" % (
+                    self.actuator_tracking_max_abs_error_m,
+                    tracking_threshold,
+                    self.actuator_tracking_error_samples,
+                ),
+            )
+        )
+
         return results
 
     def spin(self):
@@ -1009,6 +1113,25 @@ def build_arg_parser():
         type=float,
         default=8.0,
         help="When --trigger-swing is enabled, keep the selected leg in swing for this long before restoring support.",
+    )
+    parser.add_argument(
+        "--prep-support-s",
+        type=float,
+        default=1.5,
+        help="Seconds of explicit support_mask=True at the start of --trigger-swing. Forces swing_leg_controller "
+             "back to PHASE_SUPPORT so a stale swing from a prior run is flushed before the new trigger fires.",
+    )
+    parser.add_argument(
+        "--joint-feedback-stale-s",
+        type=float,
+        default=0.5,
+        help="Joint feedback older than this (seconds) is considered stale; the diagnosis flags joint_state_streaming as FAIL.",
+    )
+    parser.add_argument(
+        "--actuator-tracking-error-m",
+        type=float,
+        default=0.010,
+        help="Maximum allowed |cmd_normal - actual_normal| (m) before actuator_following_command is FAIL.",
     )
     parser.add_argument(
         "--trigger-normal-travel-m",
