@@ -184,6 +184,8 @@ swing_leg_controller:
   admittance_damping: [18.0, 18.0, 16.0]
   admittance_stiffness: [85.0, 85.0, 70.0]
   wall_normal_body: [0.0, 0.0, 1.0]
+  test_axis_mode: ground_vertical
+  test_axis_body: [0.0, 0.0, 1.0]
   # Guided wall-attachment swing phases: keep light wall contact, align tangentially, preload, then attach compliantly.
   detach_contact_offset_m: 0.006
   detach_slide_duration_s: 0.12
@@ -204,6 +206,8 @@ swing_leg_controller:
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
   test_lift_velocity_limit_mps: [0.08, 0.08, 0.08]
   test_press_velocity_limit_mps: [0.04, 0.04, 0.04]
+  test_trigger_normal_travel_m: 0.035
+  test_trigger_press_normal_travel_m: -0.04
   # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.008

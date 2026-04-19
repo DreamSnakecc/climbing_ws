@@ -12,8 +12,9 @@ PRINT_PERIOD_S="${PRINT_PERIOD_S:-0.5}"
 OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/test_logs}"
 TRIGGER_SWING=0
 SWING_DURATION_S="${SWING_DURATION_S:-2.0}"
+TEST_AXIS="${TEST_AXIS:-ground_vertical}"
 TRIGGER_NORMAL_TRAVEL_M="${TRIGGER_NORMAL_TRAVEL_M:-0.035}"
-TRIGGER_PRESS_NORMAL_TRAVEL_M="${TRIGGER_PRESS_NORMAL_TRAVEL_M:--0.003}"
+TRIGGER_PRESS_NORMAL_TRAVEL_M="${TRIGGER_PRESS_NORMAL_TRAVEL_M:--0.04}"
 LAUNCH_LOCAL_STACK=0
 ISOLATE_FROM_AUTO_CONTROL=0
 FORCE_LIMIT_TOLERANCE_N="${FORCE_LIMIT_TOLERANCE_N:-0.5}"
@@ -59,10 +60,11 @@ Options:
     --rate-hz 30                  Observer/logging rate for PC role.
     --print-period-s 0.5          Minimum console print interval for PC role.
     --output-dir DIR              Log output directory for PC role.
-    --trigger-swing               For PC role only: publish /control/body_reference to force one pure wall-normal attachment test cycle.
+    --trigger-swing               For PC role only: publish /control/body_reference to force one staged single-leg test cycle.
     --swing-duration-s 2.0        Triggered swing duration when --trigger-swing is used.
-    --trigger-normal-travel-m 0.035 Requested lift travel along the wall normal during the trigger test.
-    --trigger-press-normal-travel-m -0.003 Requested press target relative to nominal after the lift phase.
+    --test-axis ground_vertical   Test axis: ground_vertical or wall_normal. Default: ground_vertical.
+    --trigger-normal-travel-m 0.035 Requested lift travel along the selected test axis during the trigger test.
+    --trigger-press-normal-travel-m -0.04 Requested press target relative to nominal after the lift phase.
     --force-limit-tolerance-n 0.5 Phase inference tolerance passed to the Python observer.
     --startup-grace-s 3.0        Delay before the observer warns that /control/swing_leg_target has no messages.
     --launch-local-stack          Also launch the local bringup before running the test command.
@@ -109,6 +111,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --swing-duration-s)
             SWING_DURATION_S="$2"
+            shift 2
+            ;;
+        --test-axis)
+            TEST_AXIS="$2"
             shift 2
             ;;
         --trigger-normal-travel-m)
@@ -202,6 +208,15 @@ apply_isolation_steps() {
     stop_all_fans
 }
 
+check_body_reference_publishers() {
+    local body_publishers
+    body_publishers=$(rostopic info /control/body_reference 2>/dev/null | rg "Publishers:" -A20 || true)
+    if [[ -n "$body_publishers" ]]; then
+        echo "Current /control/body_reference publishers:"
+        echo "$body_publishers"
+    fi
+}
+
 run_pc_role() {
     if [[ "$ISOLATE_FROM_AUTO_CONTROL" -eq 1 && "$TRIGGER_SWING" -eq 0 ]]; then
         echo "Isolation mode requires a manual swing trigger; enabling --trigger-swing automatically."
@@ -229,6 +244,7 @@ run_pc_role() {
 
     if [[ "$ISOLATE_FROM_AUTO_CONTROL" -eq 1 ]]; then
         apply_isolation_steps
+        check_body_reference_publishers
     fi
 
     local cmd=(
@@ -239,6 +255,7 @@ run_pc_role() {
         --print-period-s "$PRINT_PERIOD_S"
         --output-dir "$OUTPUT_DIR"
         --swing-duration-s "$SWING_DURATION_S"
+        --test-axis "$TEST_AXIS"
         --trigger-normal-travel-m "$TRIGGER_NORMAL_TRAVEL_M"
         --trigger-press-normal-travel-m "$TRIGGER_PRESS_NORMAL_TRAVEL_M"
         --force-limit-tolerance-n "$FORCE_LIMIT_TOLERANCE_N"

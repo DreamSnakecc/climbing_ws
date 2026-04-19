@@ -63,10 +63,10 @@ def build_phase_spans(records, times):
     spans = []
     if not records:
         return spans
-    current_phase = records[0].get("inferred_phase", "UNKNOWN")
+    current_phase = records[0].get("phase", records[0].get("inferred_phase", "UNKNOWN"))
     start_time = times[0]
     for index in range(1, len(records)):
-        phase = records[index].get("inferred_phase", "UNKNOWN")
+        phase = records[index].get("phase", records[index].get("inferred_phase", "UNKNOWN"))
         if phase != current_phase:
             spans.append((start_time, times[index], current_phase))
             current_phase = phase
@@ -88,8 +88,16 @@ def plot_log(records, output_path, title):
     actual_x = series_from_records(records, ["actual_center_estimate", "x"], float("nan"))
     actual_y = series_from_records(records, ["actual_center_estimate", "y"], float("nan"))
     actual_z = series_from_records(records, ["actual_center_estimate", "z"], float("nan"))
-    target_normal = series_from_records(records, ["target_normal_from_nominal_m"], float("nan"))
-    actual_normal = series_from_records(records, ["actual_normal_from_nominal_m"], float("nan"))
+    target_normal = series_from_records(records, ["target_axis_from_nominal_m"], None)
+    if all(value is None for value in target_normal):
+        target_normal = series_from_records(records, ["target_normal_from_nominal_m"], float("nan"))
+    else:
+        target_normal = [float("nan") if value is None else float(value) for value in target_normal]
+    actual_normal = series_from_records(records, ["actual_axis_from_nominal_m"], None)
+    if all(value is None for value in actual_normal):
+        actual_normal = series_from_records(records, ["actual_normal_from_nominal_m"], float("nan"))
+    else:
+        actual_normal = [float("nan") if value is None else float(value) for value in actual_normal]
     joint_feedback = first_available_joint_feedback(records)
     if joint_feedback is None:
         raise RuntimeError("This log does not contain joint_feedback. Re-run the test with the updated logger.")
