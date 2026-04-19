@@ -184,8 +184,6 @@ swing_leg_controller:
   admittance_damping: [18.0, 18.0, 16.0]
   admittance_stiffness: [85.0, 85.0, 70.0]
   wall_normal_body: [0.0, 0.0, 1.0]
-  test_axis_mode: ground_vertical
-  test_axis_body: [0.0, 0.0, 1.0]
   # Guided wall-attachment swing phases: keep light wall contact, align tangentially, preload, then attach compliantly.
   detach_contact_offset_m: 0.006
   detach_slide_duration_s: 0.12
@@ -206,8 +204,9 @@ swing_leg_controller:
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
   test_lift_velocity_limit_mps: [0.08, 0.08, 0.08]
   test_press_velocity_limit_mps: [0.04, 0.04, 0.04]
-  test_trigger_normal_travel_m: 0.035
-  test_trigger_press_normal_travel_m: -0.04
+  # Dwell times (s) hold the test trajectory at the lift / press alignment target so observers can verify each apex.
+  test_lift_dwell_s: 0.0
+  test_press_dwell_s: 0.0
   # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.008
@@ -360,7 +359,7 @@ gait_controller:
     j1: 0.0
     j2: 90.0
     j3: 0.0
-  startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
+  startup_pose_mode: capture_current_as_home  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
