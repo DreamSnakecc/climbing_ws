@@ -5,8 +5,9 @@ import math
 import numpy as np
 
 import rospy
-from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand, SwingLegDebug
+from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout
 
 
 def clamp(value, lower_bound, upper_bound):
@@ -214,6 +215,9 @@ class SwingLegController(object):
         self.compliant_velocity_limit = [float(value) for value in get_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])]
         self.test_lift_velocity_limit = [float(value) for value in get_cfg("test_lift_velocity_limit_mps", [0.08, 0.08, 0.08])]
         self.test_press_velocity_limit = [float(value) for value in get_cfg("test_press_velocity_limit_mps", [0.04, 0.04, 0.04])]
+        # Dwell times keep TEST_LIFT_CLEARANCE / TEST_PRESS_CONTACT held at the alignment target long enough to be observable on the wire.
+        self.test_lift_dwell_s = max(float(get_cfg("test_lift_dwell_s", 0.0)), 0.0)
+        self.test_press_dwell_s = max(float(get_cfg("test_press_dwell_s", 0.0)), 0.0)
         self.compliant_normal_velocity_limit_mps = max(
             float(get_cfg("compliant_normal_velocity_limit_mps", max(self.compliant_velocity_limit))),
             0.0,
@@ -231,8 +235,6 @@ class SwingLegController(object):
         self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
         self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
         self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
-        self.test_axis_mode = str(get_cfg("test_axis_mode", "ground_vertical")).strip().lower()
-        self.test_axis_body_cfg = [float(value) for value in get_cfg("test_axis_body", [0.0, 0.0, 1.0])]
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -265,11 +267,6 @@ class SwingLegController(object):
             [float(value) for value in get_cfg("wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0]))],
             [0.0, 0.0, 1.0],
         )
-        if self.test_axis_mode == "wall_normal":
-            self.test_axis_body = list(self.wall_normal_body)
-        else:
-            self.test_axis_body = normalize_vector(self.test_axis_body_cfg, [0.0, 0.0, 1.0])
-        self.nominal_test_axis_scalar = vector_dot([0.0, 0.0, self.nominal_z_m], self.test_axis_body)
 
         self.body_reference = BodyReference()
         self.estimated_state = EstimatedState()
@@ -304,17 +301,45 @@ class SwingLegController(object):
                 "test_override_value": None,
                 "test_press_value": None,
                 "test_experiment_active": False,
-                "last_measured_axis_force_n": 0.0,
-                "last_contact_hold_satisfied": False,
-                "last_reached_lift_target": False,
-                "last_reached_press_target": False,
-                "last_phase_timed_out": False,
-                "last_transition_reason": "",
-                "restart_test_cycle_requested": False,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
-        self.debug_pub = rospy.Publisher("/control/swing_leg_debug", SwingLegDebug, queue_size=50)
+        # Per-leg diagnostic stream so the test/observer can recover state-machine internals (phase id,
+        # admittance offset/velocity, filtered force estimate, etc.) without scraping the controller's
+        # in-memory dicts. Layout label is documented in _publish_leg_diagnostic.
+        self.diagnostic_pubs = {
+            leg_name: rospy.Publisher(
+                "/control/swing_leg_diag/" + leg_name, Float32MultiArray, queue_size=20
+            )
+            for leg_name in self.leg_names
+        }
+        self.phase_id_map = {
+            self.PHASE_SUPPORT: 0,
+            self.PHASE_TEST_LIFT_CLEARANCE: 1,
+            self.PHASE_TEST_PRESS_CONTACT: 2,
+            self.PHASE_DETACH_SLIDE: 3,
+            self.PHASE_TANGENTIAL_ALIGN: 4,
+            self.PHASE_PRELOAD_COMPRESS: 5,
+            self.PHASE_COMPLIANT_SETTLE: 6,
+            self.PHASE_ATTACHED_HOLD: 7,
+        }
+        self.diagnostic_field_labels = [
+            "leg_index",
+            "phase_id",
+            "phase_elapsed_s",
+            "cmd_normal_from_nominal_m",
+            "lift_target_normal_from_nominal_m",
+            "press_target_normal_from_nominal_m",
+            "preload_target_normal_from_nominal_m",
+            "attach_target_normal_from_nominal_m",
+            "compliant_force_estimate_n",
+            "compliant_normal_offset_m",
+            "compliant_normal_velocity_mps",
+            "estimated_leg_normal_force_n",
+            "joint_torque_bias_norm_nm",
+            "contact_active_since_age_s",
+            "test_experiment_active",
+        ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
 
@@ -376,25 +401,15 @@ class SwingLegController(object):
             return float(values[leg_index])
         return float(default)
 
-    def _test_axis_name(self):
-        return "wall_normal" if self.test_axis_mode == "wall_normal" else "ground_vertical"
+    def _normal_component(self, vector):
+        normal_scalar = vector_dot(vector, self.wall_normal_body)
+        return vector_scale(self.wall_normal_body, normal_scalar)
 
-    def _active_contact_axis(self, state):
-        if state.get("test_experiment_active"):
-            return self.test_axis_body
-        return self.wall_normal_body
+    def _tangential_component(self, vector):
+        return vector_sub(vector, self._normal_component(vector))
 
-    def _normal_component(self, vector, axis=None):
-        active_axis = self.wall_normal_body if axis is None else axis
-        normal_scalar = vector_dot(vector, active_axis)
-        return vector_scale(active_axis, normal_scalar)
-
-    def _tangential_component(self, vector, axis=None):
-        return vector_sub(vector, self._normal_component(vector, axis))
-
-    def _compose_tangent_and_normal(self, tangent_vector, normal_scalar, axis=None):
-        active_axis = self.wall_normal_body if axis is None else axis
-        return vector_add(self._tangential_component(tangent_vector, active_axis), vector_scale(active_axis, normal_scalar))
+    def _compose_tangent_and_normal(self, tangent_vector, normal_scalar):
+        return vector_add(self._tangential_component(tangent_vector), vector_scale(self.wall_normal_body, normal_scalar))
 
     def _phase_elapsed(self, state, now_sec):
         if state["phase_started_at"] is None:
@@ -426,13 +441,11 @@ class SwingLegController(object):
             clamp(position[2], self.nominal_z_m - self.max_position_offset[2], self.nominal_z_m + self.max_position_offset[2]),
         ]
 
-    def _tangential_error_norm(self, lhs, rhs, axis=None):
-        active_axis = self.wall_normal_body if axis is None else axis
-        return vector_norm(self._tangential_component(vector_sub(lhs, rhs), active_axis))
+    def _tangential_error_norm(self, lhs, rhs):
+        return vector_norm(self._tangential_component(vector_sub(lhs, rhs)))
 
-    def _normal_error(self, lhs, rhs, axis=None):
-        active_axis = self.wall_normal_body if axis is None else axis
-        return vector_dot(vector_sub(lhs, rhs), active_axis)
+    def _normal_error(self, lhs, rhs):
+        return vector_dot(vector_sub(lhs, rhs), self.wall_normal_body)
 
     def _body_orientation(self):
         if self.have_estimated_state:
@@ -597,7 +610,7 @@ class SwingLegController(object):
         state["compliant_normal_offset"] = 0.0
         state["compliant_normal_velocity"] = 0.0
 
-    def _estimate_leg_normal_force(self, leg_name, state, axis=None):
+    def _estimate_leg_normal_force(self, leg_name, state):
         torque_vector = self._leg_joint_torque_vector(leg_name)
         if torque_vector is None:
             return 0.0
@@ -613,8 +626,7 @@ class SwingLegController(object):
         except np.linalg.LinAlgError:
             return 0.0
         body_force = self._leg_force_to_body_force(leg_name, leg_force.tolist())
-        active_axis = self.wall_normal_body if axis is None else axis
-        signed_normal_force = self.compliant_force_sign * vector_dot(body_force, active_axis)
+        signed_normal_force = self.compliant_force_sign * vector_dot(body_force, self.wall_normal_body)
         return clamp(signed_normal_force, -self.compliant_force_limit_n, self.compliant_force_limit_n)
 
     def _update_normal_admittance(self, state, measured_force_n, dt):
@@ -692,17 +704,16 @@ class SwingLegController(object):
             return None
 
         press_normal_travel = self._test_trigger_press_override()
-        test_axis = self.test_axis_body
         lift_target = self._clamp_position(
             vector_add(
                 [0.0, 0.0, self.nominal_z_m],
-                vector_scale(test_axis, lift_normal_travel),
+                vector_scale(self.wall_normal_body, lift_normal_travel),
             )
         )
         press_target = self._clamp_position(
             vector_add(
                 [0.0, 0.0, self.nominal_z_m],
-                vector_scale(test_axis, press_normal_travel),
+                vector_scale(self.wall_normal_body, press_normal_travel),
             )
         )
 
@@ -719,9 +730,8 @@ class SwingLegController(object):
 
         rospy.loginfo_throttle(
             1.0,
-            "swing_leg_controller staged test active for %s: axis=%s lift=%.4f press=%.4f lift_z=%.4f press_z=%.4f",
+            "swing_leg_controller staged test active for %s: lift_normal=%.4f press_normal=%.4f lift_z=%.4f press_z=%.4f",
             leg_name,
-            self._test_axis_name(),
             lift_normal_travel,
             press_normal_travel,
             state["lift_target"][2],
@@ -778,18 +788,17 @@ class SwingLegController(object):
         target_delta = self._target_delta(leg_name, leg_index)
         override_normal_travel = self._test_trigger_normal_override(leg_name)
         self._apply_test_trigger_override(leg_name, state)
-        active_axis = self._active_contact_axis(state)
         if override_normal_travel is None:
             target = [target_delta[0], target_delta[1], self.nominal_z_m + target_delta[2]]
         else:
             target = list(state["lift_target"])
         start = list(state["position"])
-        start_normal = vector_dot(start, active_axis)
-        target_normal = vector_dot(target, active_axis)
-        light_contact_target = self._compose_tangent_and_normal(start, start_normal - self.detach_contact_offset_m, active_axis)
-        tangential_target = self._compose_tangent_and_normal(target, start_normal - self.detach_contact_offset_m, active_axis)
-        preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m, active_axis)
-        attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m, active_axis)
+        start_normal = vector_dot(start, self.wall_normal_body)
+        target_normal = vector_dot(target, self.wall_normal_body)
+        light_contact_target = self._compose_tangent_and_normal(start, start_normal - self.detach_contact_offset_m)
+        tangential_target = self._compose_tangent_and_normal(target, start_normal - self.detach_contact_offset_m)
+        preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
+        attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m)
 
         state["start"] = list(start)
         state["target"] = list(target)
@@ -809,7 +818,6 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
-        state["restart_test_cycle_requested"] = False
         if override_normal_travel is None:
             state["test_experiment_active"] = False
             self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
@@ -842,13 +850,6 @@ class SwingLegController(object):
         state["test_override_value"] = None
         state["test_press_value"] = None
         state["test_experiment_active"] = False
-        state["last_measured_axis_force_n"] = 0.0
-        state["last_contact_hold_satisfied"] = False
-        state["last_reached_lift_target"] = False
-        state["last_reached_press_target"] = False
-        state["last_phase_timed_out"] = False
-        state["last_transition_reason"] = ""
-        state["restart_test_cycle_requested"] = False
         return self._build_message(
             leg_name,
             support_target,
@@ -911,73 +912,66 @@ class SwingLegController(object):
         self._apply_test_trigger_override(leg_name, state)
         phase = state["phase"]
         phase_elapsed = self._phase_elapsed(state, now_sec)
-        active_axis = self._active_contact_axis(state)
         wall_touch = self._leg_mask_value(self.estimated_state.wall_touch_mask, leg_index, False)
         attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
         adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
         measured_contact = self._leg_mask_value(self.estimated_state.measured_contact_mask, leg_index, False)
         early_contact = self._leg_mask_value(self.estimated_state.early_contact_mask, leg_index, False)
-        measured_force_n = 0.0
-        contact_hold_satisfied = False
-        reached_lift_target = False
-        reached_press_target = False
-        phase_timed_out = False
-        transition_reason = ""
-        restart_test_cycle_requested = False
 
         if phase == self.PHASE_TEST_LIFT_CLEARANCE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["lift_target"], self.test_lift_velocity_limit, dt)
-            reached_lift_target = abs(self._normal_error(state["lift_target"], cmd_position, active_axis)) <= self.normal_alignment_tolerance_m
-            if reached_lift_target:
+            aligned = abs(self._normal_error(state["lift_target"], cmd_position)) <= self.normal_alignment_tolerance_m
+            if aligned and phase_elapsed >= self.test_lift_dwell_s:
                 self._set_phase(state, self.PHASE_TEST_PRESS_CONTACT, now_sec)
-                transition_reason = "reached_lift_target"
+            elif aligned:
+                # Hold exactly at the lift target while dwell time accumulates so observers can verify the lift was reached.
+                cmd_position = list(state["lift_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
             skirt_target = self.swing_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_TEST_PRESS_CONTACT:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["press_target"], self.test_press_velocity_limit, dt)
-            reached_press_target = abs(self._normal_error(state["press_target"], cmd_position, active_axis)) <= self.normal_alignment_tolerance_m
-            if reached_press_target:
+            aligned = abs(self._normal_error(state["press_target"], cmd_position)) <= self.normal_alignment_tolerance_m
+            if aligned and phase_elapsed >= self.test_press_dwell_s:
                 self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
-                transition_reason = "reached_press_target"
+            elif aligned:
+                cmd_position = list(state["press_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_DETACH_SLIDE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["light_contact_target"], self.detach_velocity_limit, dt)
-            if abs(self._normal_error(state["light_contact_target"], cmd_position, active_axis)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.detach_slide_duration_s:
+            if abs(self._normal_error(state["light_contact_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.detach_slide_duration_s:
                 self._set_phase(state, self.PHASE_TANGENTIAL_ALIGN, now_sec)
-                transition_reason = "detach_complete"
             skirt_target = self.light_contact_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_TANGENTIAL_ALIGN:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["tangential_target"], self.tangential_velocity_limit, dt)
-            if self._tangential_error_norm(state["tangential_target"], cmd_position, active_axis) <= self.tangential_alignment_tolerance_m or phase_elapsed >= self.tangential_align_duration_s:
+            if self._tangential_error_norm(state["tangential_target"], cmd_position) <= self.tangential_alignment_tolerance_m or phase_elapsed >= self.tangential_align_duration_s:
                 self._set_phase(state, self.PHASE_PRELOAD_COMPRESS, now_sec)
-                transition_reason = "tangential_align_complete"
             skirt_target = self.light_contact_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_PRELOAD_COMPRESS:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["preload_target"], self.preload_velocity_limit, dt)
-            if abs(self._normal_error(state["preload_target"], cmd_position, active_axis)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
+            if abs(self._normal_error(state["preload_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
                 self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
-                transition_reason = "preload_complete"
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = self.preload_normal_force_limit_n
             support_leg = False
         elif phase == self.PHASE_COMPLIANT_SETTLE:
             contact_active = measured_contact or wall_touch
-            contact_hold_satisfied = self._contact_hold_satisfied(state, contact_active, now_sec)
-            if contact_hold_satisfied:
-                measured_force_n = self._estimate_leg_normal_force(leg_name, state, active_axis)
+            if self._contact_hold_satisfied(state, contact_active, now_sec):
+                measured_force_n = self._estimate_leg_normal_force(leg_name, state)
                 normal_offset, normal_velocity = self._update_normal_admittance(state, measured_force_n, dt)
-                target_normal_scalar = vector_dot(state["preload_target"], active_axis) + normal_offset
-                cmd_position = self._clamp_position(self._compose_tangent_and_normal(state["attach_target"], target_normal_scalar, active_axis))
-                cmd_velocity = vector_scale(active_axis, normal_velocity)
+                target_normal_scalar = vector_dot(state["preload_target"], self.wall_normal_body) + normal_offset
+                cmd_position = self._clamp_position(self._compose_tangent_and_normal(state["attach_target"], target_normal_scalar))
+                cmd_velocity = vector_scale(self.wall_normal_body, normal_velocity)
             else:
                 cmd_position = list(state["preload_target"])
                 cmd_velocity = [0.0, 0.0, 0.0]
@@ -987,7 +981,6 @@ class SwingLegController(object):
                 self._set_phase(state, self.PHASE_ATTACHED_HOLD, now_sec)
                 cmd_position = list(state["attach_target"])
                 cmd_velocity = [0.0, 0.0, 0.0]
-                transition_reason = "attachment_ready"
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = self.attach_normal_force_limit_n
             support_leg = False
@@ -1008,25 +1001,12 @@ class SwingLegController(object):
         if phase == self.PHASE_COMPLIANT_SETTLE and phase_elapsed >= self.compliant_settle_timeout_s and not (attachment_ready or adhesion_ready):
             cmd_velocity = [0.0, 0.0, 0.0]
             state["compliant_normal_velocity"] = 0.0
-            phase_timed_out = True
-            if not transition_reason:
-                transition_reason = "compliant_timeout"
-            if state.get("test_experiment_active"):
-                rospy.logwarn_throttle(1.0, "swing_leg_controller test cycle timed out for %s; restarting staged test", leg_name)
-                restart_test_cycle_requested = True
 
         if (measured_contact or early_contact or wall_touch) and phase in [self.PHASE_TANGENTIAL_ALIGN, self.PHASE_PRELOAD_COMPRESS, self.PHASE_TEST_PRESS_CONTACT]:
             skirt_target = max(skirt_target, self.light_contact_skirt_compression_target)
 
         state["position"] = list(cmd_position)
         state["velocity"] = list(cmd_velocity)
-        state["last_measured_axis_force_n"] = float(measured_force_n)
-        state["last_contact_hold_satisfied"] = bool(contact_hold_satisfied)
-        state["last_reached_lift_target"] = bool(reached_lift_target)
-        state["last_reached_press_target"] = bool(reached_press_target)
-        state["last_phase_timed_out"] = bool(phase_timed_out)
-        state["last_transition_reason"] = transition_reason
-        state["restart_test_cycle_requested"] = bool(restart_test_cycle_requested)
         return cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit
 
     def _build_message(self, leg_name, position, velocity, support_leg, skirt_compression_target, normal_force_limit):
@@ -1040,72 +1020,56 @@ class SwingLegController(object):
         msg.desired_normal_force_limit = float(normal_force_limit)
         return msg
 
-    def _build_debug_message(self, leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec):
+    def _publish_leg_diagnostic(self, leg_name, leg_index, cmd_position, now_sec):
+        publisher = self.diagnostic_pubs.get(leg_name)
+        if publisher is None:
+            return
         state = self.swing_states[leg_name]
-        active_axis = self._active_contact_axis(state)
-        nominal_axis_scalar = vector_dot([0.0, 0.0, self.nominal_z_m], active_axis)
-        axis_name = self._test_axis_name() if state.get("test_experiment_active") else "wall_normal"
-        phase = str(state.get("phase", self.PHASE_SUPPORT))
-        phase_elapsed = self._phase_elapsed(state, now_sec)
-        command_position = [
-            float(command_msg.center.x),
-            float(command_msg.center.y),
-            float(command_msg.center.z),
-        ]
-        command_velocity = [
-            float(command_msg.center_velocity.x),
-            float(command_msg.center_velocity.y),
-            float(command_msg.center_velocity.z),
-        ]
-        lift_axis_scalar = vector_dot(state["lift_target"], active_axis) - nominal_axis_scalar
-        press_axis_scalar = vector_dot(state["press_target"], active_axis) - nominal_axis_scalar
-        preload_axis_scalar = vector_dot(state["preload_target"], active_axis) - nominal_axis_scalar
-        attach_axis_scalar = vector_dot(state["attach_target"], active_axis) - nominal_axis_scalar
-        measured_contact = self._leg_mask_value(self.estimated_state.measured_contact_mask, leg_index, False)
-        wall_touch = self._leg_mask_value(self.estimated_state.wall_touch_mask, leg_index, False)
-        early_contact = self._leg_mask_value(self.estimated_state.early_contact_mask, leg_index, False)
-        attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
-        adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
+        phase = state.get("phase", self.PHASE_SUPPORT)
+        phase_id = float(self.phase_id_map.get(phase, -1))
+        phase_started_at = state.get("phase_started_at")
+        phase_elapsed = 0.0 if phase_started_at is None else max(0.0, now_sec - float(phase_started_at))
+        nominal_normal = vector_dot([0.0, 0.0, self.nominal_z_m], self.wall_normal_body)
+        cmd_normal_from_nominal = vector_dot(cmd_position, self.wall_normal_body) - nominal_normal
+        lift_normal_from_nominal = vector_dot(state.get("lift_target", [0.0, 0.0, self.nominal_z_m]), self.wall_normal_body) - nominal_normal
+        press_normal_from_nominal = vector_dot(state.get("press_target", [0.0, 0.0, self.nominal_z_m]), self.wall_normal_body) - nominal_normal
+        preload_normal_from_nominal = vector_dot(state.get("preload_target", [0.0, 0.0, self.nominal_z_m]), self.wall_normal_body) - nominal_normal
+        attach_normal_from_nominal = vector_dot(state.get("attach_target", [0.0, 0.0, self.nominal_z_m]), self.wall_normal_body) - nominal_normal
+        bias_vector = state.get("compliant_joint_torque_bias", [0.0, 0.0, 0.0])
+        bias_norm = vector_norm(bias_vector if isinstance(bias_vector, list) else list(bias_vector))
+        contact_active_since = state.get("contact_active_since")
+        contact_age = 0.0 if contact_active_since is None else max(0.0, now_sec - float(contact_active_since))
+        # Snapshot the latest measured force (recomputed lazily from joint torques) so the observer can
+        # see what the admittance actually sees, not only the smoothed estimate.
+        try:
+            measured_force = self._estimate_leg_normal_force(leg_name, state)
+        except Exception:
+            measured_force = 0.0
 
-        msg = SwingLegDebug()
-        msg.header.stamp = command_msg.header.stamp
-        msg.leg_name = leg_name
-        msg.phase = phase
-        msg.test_axis_name = axis_name
-        msg.transition_reason = str(state.get("last_transition_reason", ""))
-        msg.test_mode_active = bool(state.get("test_experiment_active", False))
-        msg.desired_support = bool(desired_support)
-        msg.estimated_support = bool(estimated_support)
-        msg.support_leg_command = bool(command_msg.support_leg)
-        msg.measured_contact = bool(measured_contact)
-        msg.wall_touch = bool(wall_touch)
-        msg.early_contact = bool(early_contact)
-        msg.attachment_ready = bool(attachment_ready)
-        msg.adhesion_ready = bool(adhesion_ready)
-        msg.contact_hold_satisfied = bool(state.get("last_contact_hold_satisfied", False))
-        msg.reached_lift_target = bool(state.get("last_reached_lift_target", False))
-        msg.reached_press_target = bool(state.get("last_reached_press_target", False))
-        msg.phase_timed_out = bool(state.get("last_phase_timed_out", False))
-        msg.active_axis_body = Vector3(active_axis[0], active_axis[1], active_axis[2])
-        msg.start_target = Point(state["start"][0], state["start"][1], state["start"][2])
-        msg.lift_target = Point(state["lift_target"][0], state["lift_target"][1], state["lift_target"][2])
-        msg.press_target = Point(state["press_target"][0], state["press_target"][1], state["press_target"][2])
-        msg.preload_target = Point(state["preload_target"][0], state["preload_target"][1], state["preload_target"][2])
-        msg.attach_target = Point(state["attach_target"][0], state["attach_target"][1], state["attach_target"][2])
-        msg.commanded_center = Point(command_position[0], command_position[1], command_position[2])
-        msg.commanded_velocity = Vector3(command_velocity[0], command_velocity[1], command_velocity[2])
-        msg.phase_elapsed_s = float(phase_elapsed)
-        msg.measured_axis_force_n = float(state.get("last_measured_axis_force_n", 0.0))
-        msg.compliant_force_estimate_n = float(state.get("compliant_force_estimate", 0.0))
-        msg.compliant_axis_offset_m = float(state.get("compliant_normal_offset", 0.0))
-        msg.compliant_axis_velocity_mps = float(state.get("compliant_normal_velocity", 0.0))
-        msg.command_axis_position_m = float(vector_dot(command_position, active_axis))
-        msg.command_axis_velocity_mps = float(vector_dot(command_velocity, active_axis))
-        msg.lift_axis_from_nominal_m = float(lift_axis_scalar)
-        msg.press_axis_from_nominal_m = float(press_axis_scalar)
-        msg.preload_axis_from_nominal_m = float(preload_axis_scalar)
-        msg.attach_axis_from_nominal_m = float(attach_axis_scalar)
-        return msg
+        msg = Float32MultiArray()
+        msg.layout = MultiArrayLayout()
+        msg.layout.dim = [
+            MultiArrayDimension(label=label, size=1, stride=len(self.diagnostic_field_labels))
+            for label in self.diagnostic_field_labels
+        ]
+        msg.data = [
+            float(leg_index),
+            float(phase_id),
+            float(phase_elapsed),
+            float(cmd_normal_from_nominal),
+            float(lift_normal_from_nominal),
+            float(press_normal_from_nominal),
+            float(preload_normal_from_nominal),
+            float(attach_normal_from_nominal),
+            float(state.get("compliant_force_estimate", 0.0)),
+            float(state.get("compliant_normal_offset", 0.0)),
+            float(state.get("compliant_normal_velocity", 0.0)),
+            float(measured_force),
+            float(bias_norm),
+            float(contact_age),
+            1.0 if bool(state.get("test_experiment_active", False)) else 0.0,
+        ]
+        publisher.publish(msg)
 
     def spin(self):
         rate = rospy.Rate(self.rate_hz)
@@ -1123,63 +1087,71 @@ class SwingLegController(object):
 
             for leg_index, leg_name in enumerate(self.leg_names):
                 desired_support = desired_support_mask[leg_index] if leg_index < len(desired_support_mask) else True
-                estimated_support = estimated_support_mask[leg_index] if leg_index < len(estimated_support_mask) else desired_support
                 attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
                 adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
 
                 if desired_support and self.swing_phase_start[leg_name] is None:
-                    command_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(command_msg)
-                    self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
                     continue
 
                 if self.swing_phase_start[leg_name] is None and not desired_support:
                     self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
-                    command_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(command_msg)
-                    self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
                     continue
 
                 if desired_support and (attachment_ready or adhesion_ready):
                     self.swing_phase_start[leg_name] = None
-                    command_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(command_msg)
-                    self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
                     continue
 
                 state = self.swing_states[leg_name]
                 if state["phase"] == self.PHASE_ATTACHED_HOLD and desired_support and (attachment_ready or adhesion_ready):
                     self.swing_phase_start[leg_name] = None
-                    command_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(command_msg)
-                    self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
                     continue
 
                 cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
-                if state.get("restart_test_cycle_requested"):
-                    state["restart_test_cycle_requested"] = False
-                    self.swing_phase_start[leg_name] = None
-                    if desired_support:
-                        command_msg = self._support_command(leg_name, leg_index)
-                        self.pub.publish(command_msg)
-                        self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
-                        continue
-
-                    self._start_swing(leg_name, leg_index, now_sec)
-                    state = self.swing_states[leg_name]
-                    cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
-                command_msg = self._build_message(
-                    leg_name,
-                    cmd_position,
-                    cmd_velocity,
-                    support_leg,
-                    skirt_target,
-                    normal_force_limit,
+                self._publish_leg_diagnostic(leg_name, leg_index, cmd_position, now_sec)
+                self.pub.publish(
+                    self._build_message(
+                        leg_name,
+                        cmd_position,
+                        cmd_velocity,
+                        support_leg,
+                        skirt_target,
+                        normal_force_limit,
+                    )
                 )
-                self.pub.publish(command_msg)
-                self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
             rate.sleep()
 
 
