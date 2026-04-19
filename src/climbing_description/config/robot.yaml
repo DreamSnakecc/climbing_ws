@@ -356,7 +356,7 @@ gait_controller:
     j1: 0.0
     j2: 90.0
     j3: 0.0
-  startup_pose_mode: capture_current_as_home  # Options: capture_current_as_home, use_motor_home_ticks
+  startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
