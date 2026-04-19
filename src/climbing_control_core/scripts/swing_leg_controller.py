@@ -14,26 +14,6 @@ def clamp(value, lower_bound, upper_bound):
     return max(lower_bound, min(upper_bound, value))
 
 
-def smoothstep5(phase):
-    phase = clamp(phase, 0.0, 1.0)
-    return phase * phase * phase * (10.0 + phase * (-15.0 + 6.0 * phase))
-
-
-def smoothstep5_derivative(phase):
-    phase = clamp(phase, 0.0, 1.0)
-    return 30.0 * phase * phase * (1.0 - phase) * (1.0 - phase)
-
-
-def raised_cosine(phase):
-    phase = clamp(phase, 0.0, 1.0)
-    return 0.5 - 0.5 * math.cos(2.0 * math.pi * phase)
-
-
-def raised_cosine_derivative(phase):
-    phase = clamp(phase, 0.0, 1.0)
-    return math.pi * math.sin(2.0 * math.pi * phase)
-
-
 def bezier4(points, phase):
     phase = clamp(phase, 0.0, 1.0)
     one_minus = 1.0 - phase

@@ -58,10 +58,6 @@ def vector_dot(lhs, rhs):
     return float(sum([float(lhs[index]) * float(rhs[index]) for index in range(3)]))
 
 
-def vector_norm(vector):
-    return math.sqrt(vector_dot(vector, vector))
-
-
 def parse_unit_vector(values, fallback):
     try:
         parsed = np.array([float(value) for value in values], dtype=float)

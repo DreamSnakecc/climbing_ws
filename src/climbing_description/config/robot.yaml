@@ -1,6 +1,5 @@
 robot:
   mass_kg: 8.5
-  support_legs: [lf, rf, rr, lr]
   # Control uses the universal-joint center as the non-adhesive quadruped-style support point.
   active_endpoint: universal_joint_center
   suction_cavity_height_mm: 20.0
@@ -222,7 +221,6 @@ swing_leg_controller:
 
 jetson:
   command_rate_hz: 100.0
-  max_command_rate_hz: 200.0
 
 dynamixel_telemetry:
   telemetry_rate_hz: 20.0
