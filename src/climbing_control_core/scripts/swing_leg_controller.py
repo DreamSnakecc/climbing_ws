@@ -310,6 +310,7 @@ class SwingLegController(object):
                 "last_reached_press_target": False,
                 "last_phase_timed_out": False,
                 "last_transition_reason": "",
+                "restart_test_cycle_requested": False,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -808,6 +809,7 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
+        state["restart_test_cycle_requested"] = False
         if override_normal_travel is None:
             state["test_experiment_active"] = False
             self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
@@ -846,6 +848,7 @@ class SwingLegController(object):
         state["last_reached_press_target"] = False
         state["last_phase_timed_out"] = False
         state["last_transition_reason"] = ""
+        state["restart_test_cycle_requested"] = False
         return self._build_message(
             leg_name,
             support_target,
@@ -920,6 +923,7 @@ class SwingLegController(object):
         reached_press_target = False
         phase_timed_out = False
         transition_reason = ""
+        restart_test_cycle_requested = False
 
         if phase == self.PHASE_TEST_LIFT_CLEARANCE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["lift_target"], self.test_lift_velocity_limit, dt)
@@ -1007,6 +1011,9 @@ class SwingLegController(object):
             phase_timed_out = True
             if not transition_reason:
                 transition_reason = "compliant_timeout"
+            if state.get("test_experiment_active"):
+                rospy.logwarn_throttle(1.0, "swing_leg_controller test cycle timed out for %s; restarting staged test", leg_name)
+                restart_test_cycle_requested = True
 
         if (measured_contact or early_contact or wall_touch) and phase in [self.PHASE_TANGENTIAL_ALIGN, self.PHASE_PRELOAD_COMPRESS, self.PHASE_TEST_PRESS_CONTACT]:
             skirt_target = max(skirt_target, self.light_contact_skirt_compression_target)
@@ -1019,6 +1026,7 @@ class SwingLegController(object):
         state["last_reached_press_target"] = bool(reached_press_target)
         state["last_phase_timed_out"] = bool(phase_timed_out)
         state["last_transition_reason"] = transition_reason
+        state["restart_test_cycle_requested"] = bool(restart_test_cycle_requested)
         return cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit
 
     def _build_message(self, leg_name, position, velocity, support_leg, skirt_compression_target, normal_force_limit):
@@ -1150,6 +1158,18 @@ class SwingLegController(object):
                     continue
 
                 cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
+                if state.get("restart_test_cycle_requested"):
+                    state["restart_test_cycle_requested"] = False
+                    self.swing_phase_start[leg_name] = None
+                    if desired_support:
+                        command_msg = self._support_command(leg_name, leg_index)
+                        self.pub.publish(command_msg)
+                        self.debug_pub.publish(self._build_debug_message(leg_name, leg_index, desired_support, estimated_support, command_msg, now_sec))
+                        continue
+
+                    self._start_swing(leg_name, leg_index, now_sec)
+                    state = self.swing_states[leg_name]
+                    cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
                 command_msg = self._build_message(
                     leg_name,
                     cmd_position,
