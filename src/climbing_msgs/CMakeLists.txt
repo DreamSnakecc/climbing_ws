@@ -14,7 +14,6 @@ add_message_files(
   BodyReference.msg
   EstimatedState.msg
   LegCenterCommand.msg
-  SwingLegDebug.msg
   StanceWrenchCommand.msg
 )
 
