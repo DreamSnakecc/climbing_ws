@@ -202,6 +202,8 @@ swing_leg_controller:
   tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
   preload_velocity_limit_mps: [0.04, 0.04, 0.03]
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
+  test_lift_velocity_limit_mps: [0.08, 0.08, 0.08]
+  test_press_velocity_limit_mps: [0.04, 0.04, 0.04]
   # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.008
@@ -344,7 +346,7 @@ gait_controller:
   link_d6: -13.5
   link_d7: -106.7
   base_radius: 203.06
-  gear_ratio_joint2: 1.0
+  gear_ratio_joint2: 4.421
   gear_ratio_joint3: 4.421
   joint_limit_deg:
     j1: [-90.0, 90.0]
