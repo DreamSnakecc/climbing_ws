@@ -688,6 +688,18 @@ class SwingAdmittanceTest(object):
 
     @staticmethod
     def _wait_for_enter():
+        tty_path = "/dev/tty"
+        if os.path.exists(tty_path):
+            try:
+                with open(tty_path, "r") as tty_in:
+                    tty_in.readline()
+                    return
+            except OSError as exc:
+                rospy.logwarn(
+                    "[test_swing_admittance] failed reading %s (%s); fallback to stdin",
+                    tty_path,
+                    exc,
+                )
         try:
             input("")
         except EOFError:
