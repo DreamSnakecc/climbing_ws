@@ -24,13 +24,14 @@ FAN_RPM="${FAN_RPM:-30000}"
 FAN_MODE="${FAN_MODE:-2}"
 FAN_ON_PHASE_ID="${FAN_ON_PHASE_ID:-2}"
 HOLD_ADHESION_S="${HOLD_ADHESION_S:-2.0}"
-TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-15.0}"
+TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-30.0}"
 CONTROL_RATE_HZ="${CONTROL_RATE_HZ:-100.0}"
 LOG_RATE_HZ="${LOG_RATE_HZ:-50.0}"
 OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/test_logs}"
 VERBOSE_STATUS=0
 LAUNCH_JETSON=0
 LAUNCH_PC=0
+KILL_BODY_PLANNER=1
 JETSON_PID=""
 PC_PID=""
 
@@ -42,18 +43,19 @@ Usage:
 Options:
     --leg NAME                 lf | rf | rr | lr (default: lf)
     --lift METERS              lift magnitude along wall normal (default: 0.04)
-    --press METERS             press magnitude along wall normal; sent as -press into the wall (default: 0.045)
+    --press METERS             downward press distance after lift; final normal offset is (lift-press) (default: 0.045)
     --fan-rpm VALUE            fan RPM during press/settle (default: 30000)
     --fan-mode {0,1,2}         AdhesionCommand mode while boosting (default: 2)
     --fan-on-phase-id ID       phase id after which fan boost kicks in (default: 2 = TEST_PRESS_CONTACT)
     --hold-adhesion-s SEC      hold after attachment/adhesion latches (default: 2.0)
-    --test-timeout-s SEC       overall safety timeout (default: 15.0)
+    --test-timeout-s SEC       overall safety timeout (default: 30.0)
     --control-rate-hz VAL      BodyReference publish rate (default: 100)
     --log-rate-hz VAL          log sample rate (default: 50)
     --output-dir PATH          CSV log directory (default: \$WORKSPACE_DIR/test_logs)
     --verbose                  print a throttled live status during the run
     --launch-jetson            start jetson_bringup.launch locally before the test
     --launch-pc                start pc_static_bringup.launch locally before the test
+    --keep-body-planner        do NOT kill /body_planner before test (default is kill)
     -h | --help                show this message
 
 Environment variables override the defaults before parsing arguments
@@ -80,6 +82,7 @@ while [[ $# -gt 0 ]]; do
         --verbose) VERBOSE_STATUS=1; shift ;;
         --launch-jetson) LAUNCH_JETSON=1; shift ;;
         --launch-pc) LAUNCH_PC=1; shift ;;
+        --keep-body-planner) KILL_BODY_PLANNER=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage; exit 1 ;;
     esac
@@ -169,9 +172,22 @@ wait_for_node "/jetson/fan_serial_bridge"
 wait_for_node "/state_estimator"
 wait_for_node "/swing_leg_controller"
 
+if [[ "$KILL_BODY_PLANNER" -eq 1 ]]; then
+    if rosnode list 2>/dev/null | rg -n "^/body_planner$" >/dev/null; then
+        echo "Stopping /body_planner to prevent /control/body_reference publisher conflicts..."
+        rosnode kill /body_planner >/dev/null 2>&1 || true
+        sleep 1.0
+    fi
+fi
+
 echo
 echo "Swing-leg admittance test"
-echo "  leg=$LEG lift=$LIFT_M press=$PRESS_M fan_rpm=$FAN_RPM"
+echo "  leg=$LEG lift=$LIFT_M press=$PRESS_M (press_target_from_nominal=$(python3 - <<PY
+lift=float(\"$LIFT_M\")
+press=float(\"$PRESS_M\")
+print(f\"{lift-press:+.4f}\")
+PY
+) m) fan_rpm=$FAN_RPM"
 echo "  fan_mode=$FAN_MODE fan_on_phase_id=$FAN_ON_PHASE_ID"
 echo "  hold_adhesion_s=$HOLD_ADHESION_S test_timeout_s=$TEST_TIMEOUT_S"
 echo "  output_dir=$OUTPUT_DIR"

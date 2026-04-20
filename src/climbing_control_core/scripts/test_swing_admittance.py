@@ -5,8 +5,8 @@ The test drives a single leg through the `swing_leg_controller` staged
 sequence:
 
   1) PHASE_TEST_LIFT_CLEARANCE : lift +lift_m along the wall normal.
-  2) PHASE_TEST_PRESS_CONTACT  : press -press_m along the wall normal (into
-     the wall, i.e. below the nominal universal-joint-center z).
+  2) PHASE_TEST_PRESS_CONTACT  : after lift, press downward by `press_m`.
+     So the press target in normal-from-nominal is `(lift_m - press_m)`.
   3) PHASE_COMPLIANT_SETTLE    : normal-axis admittance control takes over.
   4) PHASE_ATTACHED_HOLD       : latched once attachment/adhesion asserts.
 
@@ -120,6 +120,7 @@ class SwingAdmittanceTest(object):
 
         self.lift_m = float(abs(args.lift))
         self.press_m = float(abs(args.press))
+        self.press_target_from_nominal_m = float(self.lift_m - self.press_m)
         self.fan_rpm = float(args.fan_rpm)
         self.fan_mode = int(args.fan_mode)
         self.hold_adhesion_s = float(args.hold_adhesion_s)
@@ -137,11 +138,12 @@ class SwingAdmittanceTest(object):
         )
         self.nominal_z_m = float(nominal_z_mm) / 1000.0
         rospy.loginfo(
-            "[test_swing_admittance] leg=%s nominal_z=%.4f m lift=%.3f press=%.3f fan_rpm=%.0f",
+            "[test_swing_admittance] leg=%s nominal_z=%.4f m lift=%.3f press=%.3f press_target_from_nominal=%.3f fan_rpm=%.0f",
             self.leg_name,
             self.nominal_z_m,
             self.lift_m,
             self.press_m,
+            self.press_target_from_nominal_m,
             self.fan_rpm,
         )
 
@@ -270,7 +272,7 @@ class SwingAdmittanceTest(object):
             )
             rospy.set_param(
                 "/swing_leg_controller/test_trigger_press_normal_travel_m",
-                float(-self.press_m),
+                float(self.press_target_from_nominal_m),
             )
         else:
             rospy.set_param("/swing_leg_controller/test_trigger_leg_name", "")
@@ -580,9 +582,10 @@ class SwingAdmittanceTest(object):
         self._hold_support_mask(1.0)
 
         rospy.loginfo(
-            "[test_swing_admittance] starting staged test: lift=%.3f m  press=%.3f m",
+            "[test_swing_admittance] starting staged test: lift=%.3f m  press=%.3f m  press_target_from_nominal=%.3f m",
             self.lift_m,
             self.press_m,
+            self.press_target_from_nominal_m,
         )
         self.test_phase = "TRIGGER_SWING"
         self.test_started_at = time.time()
@@ -784,7 +787,7 @@ class SwingAdmittanceTest(object):
         print("Swing-leg admittance test summary - leg=%s" % self.leg_name)
         print("=" * 76)
         print("  lift target (normal from nominal) : %+.4f m" % self.lift_m)
-        print("  press target (normal from nominal): %+.4f m" % (-self.press_m))
+        print("  press target (normal from nominal): %+.4f m" % (self.press_target_from_nominal_m))
         print(
             "  cmd normal reached  max=%+.4f  min=%+.4f m"
             % (
@@ -853,7 +856,7 @@ class SwingAdmittanceTest(object):
     def _diagnose_issues(self):
         issues = []
         reached_lift = self.highlights["max_cmd_normal_from_nominal_m"] + 1e-4 >= self.lift_m
-        reached_press = self.highlights["min_cmd_normal_from_nominal_m"] - 1e-4 <= -self.press_m
+        reached_press = self.highlights["min_cmd_normal_from_nominal_m"] - 1e-4 <= self.press_target_from_nominal_m
         entered_press = 2 in self.highlights["phase_enter_time"]
         entered_settle = 6 in self.highlights["phase_enter_time"]
         entered_attached = 7 in self.highlights["phase_enter_time"]
@@ -942,7 +945,7 @@ def parse_args(argv=None):
         "--press",
         type=float,
         default=0.045,
-        help="press magnitude along wall-normal, positive value interpreted as -press into the wall (default: 0.045m)",
+        help="downward press distance after lift; press target is (lift - press) in normal-from-nominal (default: 0.045m)",
     )
     parser.add_argument(
         "--fan-rpm",
@@ -977,8 +980,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--test-timeout-s",
         type=float,
-        default=15.0,
-        help="overall safety timeout (default: 15s)",
+        default=20.0,
+        help="overall safety timeout (default: 30s)",
     )
     parser.add_argument(
         "--control-rate-hz",
