@@ -228,7 +228,7 @@ class LegIkExecutor(object):
 
         q1 = math.atan2(float(y_mm), x_prime)
         r_total = math.hypot(x_prime, float(y_mm))
-        r_prime = max(r_total - self.l_femur, 1.0)
+        r_prime = max(r_total - self.l_femur, 1e-6)
 
         l1 = self.l_tibia
         l2 = self.l_a3

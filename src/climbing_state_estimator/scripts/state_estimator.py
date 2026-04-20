@@ -154,6 +154,12 @@ class StateEstimator(object):
         self.fan_attached_current_max_a = [float(value) for value in get_cfg("fan_attached_current_max_a", [2.0, 2.4])]
         self.fan_detached_current_min_a = [float(value) for value in get_cfg("fan_detached_current_min_a", [5.0, 7.0])]
         self.fan_detached_current_max_a = [float(value) for value in get_cfg("fan_detached_current_max_a", [5.4, 9.0])]
+        self.fan_feedback_rpm_min_ratio_for_adhesion = float(
+            get_cfg("fan_feedback_rpm_min_ratio_for_adhesion", 0.60)
+        )
+        self.fan_feedback_rpm_full_ratio_for_adhesion = float(
+            get_cfg("fan_feedback_rpm_full_ratio_for_adhesion", 0.90)
+        )
         self.fan_adhesion_confidence_threshold = float(
             get_cfg("fan_adhesion_confidence_threshold", self.stable_contact_confidence_threshold)
         )
@@ -224,6 +230,7 @@ class StateEstimator(object):
         self.last_joint_state = JointState()
         self.last_joint_currents = []
         self.last_fan_currents = [0.0] * len(self.leg_names)
+        self.last_fan_rpm_feedback = [0.0] * len(self.leg_names)
         self.last_fan_target_rpm = {leg_name: 0.0 for leg_name in self.leg_names}
         self.filtered_linear_velocity = [0.0, 0.0, 0.0]
         self.filtered_angular_velocity = [0.0, 0.0, 0.0]
@@ -245,6 +252,7 @@ class StateEstimator(object):
         rospy.Subscriber("/jetson/dynamixel_bridge/joint_state", JointState, self.joint_callback, queue_size=20)
         rospy.Subscriber("/jetson/dynamixel_bridge/joint_currents", Float32MultiArray, self.current_callback, queue_size=20)
         rospy.Subscriber("/jetson/fan_serial_bridge/fan_currents", Float32MultiArray, self.fan_current_callback, queue_size=20)
+        rospy.Subscriber("/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray, self.fan_rpm_callback, queue_size=20)
         rospy.Subscriber("/jetson/fan_serial_bridge/adhesion_command", AdhesionCommand, self.adhesion_command_callback, queue_size=50)
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self.swing_target_callback, queue_size=50)
@@ -323,6 +331,10 @@ class StateEstimator(object):
         values = list(msg.data)
         self.last_fan_currents = [float(values[index]) if index < len(values) else 0.0 for index in range(len(self.leg_names))]
 
+    def fan_rpm_callback(self, msg):
+        values = list(msg.data)
+        self.last_fan_rpm_feedback = [float(values[index]) if index < len(values) else 0.0 for index in range(len(self.leg_names))]
+
     def adhesion_command_callback(self, msg):
         leg_index = int(msg.leg_index)
         if leg_index < 0 or leg_index >= len(self.leg_names):
@@ -392,6 +404,11 @@ class StateEstimator(object):
             return float(self.last_fan_currents[leg_index])
         return 0.0
 
+    def _leg_fan_rpm_feedback(self, leg_index):
+        if leg_index < len(self.last_fan_rpm_feedback):
+            return float(self.last_fan_rpm_feedback[leg_index])
+        return 0.0
+
     @staticmethod
     def _interpolate_reference_curve(target_rpm, rpm_points, value_points):
         if not rpm_points or not value_points:
@@ -458,15 +475,33 @@ class StateEstimator(object):
         detached_center = 0.5 * (detached_min + detached_max)
         boundary = 0.5 * (attached_max + detached_min)
 
+        current_confidence = 0.0
         if current_value <= attached_max:
             span = max(attached_max - attached_min, 0.2)
-            return clamp(1.0 - max(0.0, current_value - attached_center) / span, 0.0, 1.0)
-        if current_value >= detached_min:
+            current_confidence = clamp(1.0 - max(0.0, current_value - attached_center) / span, 0.0, 1.0)
+        elif current_value >= detached_min:
             span = max(detached_max - detached_min, 0.2)
-            return clamp((detached_center - current_value) / span, 0.0, 1.0)
+            current_confidence = clamp((detached_center - current_value) / span, 0.0, 1.0)
+        else:
+            transition_span = max(detached_min - attached_max, 1e-3)
+            current_confidence = clamp((boundary - current_value) / transition_span + 0.5, 0.0, 1.0)
 
-        transition_span = max(detached_min - attached_max, 1e-3)
-        return clamp((boundary - current_value) / transition_span + 0.5, 0.0, 1.0)
+        measured_rpm = abs(self._leg_fan_rpm_feedback(leg_index))
+        effective_target_rpm = max(target_rpm, self.fan_min_active_rpm)
+        rpm_ratio = measured_rpm / max(effective_target_rpm, 1e-6)
+        min_ratio = min(
+            self.fan_feedback_rpm_min_ratio_for_adhesion,
+            self.fan_feedback_rpm_full_ratio_for_adhesion,
+        )
+        full_ratio = max(
+            self.fan_feedback_rpm_min_ratio_for_adhesion,
+            self.fan_feedback_rpm_full_ratio_for_adhesion,
+        )
+        rpm_span = max(full_ratio - min_ratio, 1e-6)
+        rpm_confidence = clamp((rpm_ratio - min_ratio) / rpm_span, 0.0, 1.0)
+
+        # Require both current and RPM evidence for attachment readiness.
+        return min(current_confidence, rpm_confidence)
 
     def _compression_from_required_adhesion_force(self, required_force_n):
         if required_force_n <= 0.0:
@@ -915,7 +950,7 @@ class StateEstimator(object):
             swing_phase = self._leg_swing_phase(leg_name, planned_support)
             early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
             wall_touch = (not planned_support) and measured_contact
-            # Adhesion judgement is based only on fan current under commanded RPM.
+            # Adhesion judgement combines fan current and fan feedback RPM under commanded RPM.
             seal_value = float(adhesion_confidence)
             attachment_ready = adhesion_confidence >= self.fan_adhesion_confidence_threshold
             confidence_value = max(

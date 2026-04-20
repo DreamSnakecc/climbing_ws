@@ -129,6 +129,7 @@ class SwingAdmittanceTest(object):
         self.log_rate_hz = max(1.0, float(args.log_rate_hz))
         self.adhesion_rate_hz = max(1.0, float(args.adhesion_rate_hz))
         self.fan_on_phase_id = int(args.fan_on_phase_id)
+        self.pause_after_lift = bool(args.pause_after_lift)
         self.pre_boost_duration_s = max(0.0, float(args.pre_boost_duration_s))
         self.verbose_status = bool(args.verbose_status)
 
@@ -158,6 +159,7 @@ class SwingAdmittanceTest(object):
         self.latest_safe_mode = False
 
         self.test_phase = "IDLE"
+        self._lift_pause_done = False
         self.test_started_at = None
         self.fan_commanded = False
         self.highlights = {
@@ -623,6 +625,13 @@ class SwingAdmittanceTest(object):
                 if phase_id_int == 1:
                     self.test_phase = "LIFT"
                 elif phase_id_int == 2:
+                    if self.pause_after_lift and not self._lift_pause_done:
+                        self.test_phase = "PAUSE_AFTER_LIFT"
+                        rospy.loginfo(
+                            "[test_swing_admittance] lift complete; press Enter to continue PRESS/admittance flow..."
+                        )
+                        self._wait_for_enter()
+                        self._lift_pause_done = True
                     self.test_phase = "PRESS"
                 elif phase_id_int == 6:
                     self.test_phase = "COMPLIANT_SETTLE"
@@ -676,6 +685,13 @@ class SwingAdmittanceTest(object):
 
         rospy.loginfo("[test_swing_admittance] test window ended")
         self.test_phase = "TERMINATE"
+
+    @staticmethod
+    def _wait_for_enter():
+        try:
+            input("")
+        except EOFError:
+            rospy.logwarn("[test_swing_admittance] no stdin available; continue without Enter pause")
 
     def _log_loop(self):
         rate = rospy.Rate(self.log_rate_hz)
@@ -977,6 +993,13 @@ def parse_args(argv=None):
         default=2.0,
         help="hold time after attachment/adhesion latch (default: 2.0s)",
     )
+    parser.add_argument(
+        "--no-pause-after-lift",
+        action="store_false",
+        dest="pause_after_lift",
+        help="disable Enter pause after lift and continue immediately to press",
+    )
+    parser.set_defaults(pause_after_lift=True)
     parser.add_argument(
         "--test-timeout-s",
         type=float,
