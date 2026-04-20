@@ -27,7 +27,7 @@ HOLD_ADHESION_S="${HOLD_ADHESION_S:-2.0}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-15.0}"
 CONTROL_RATE_HZ="${CONTROL_RATE_HZ:-100.0}"
 LOG_RATE_HZ="${LOG_RATE_HZ:-50.0}"
-OUTPUT_DIR="${OUTPUT_DIR:-$HOME/.ros/climbing_logs/swing_admittance}"
+OUTPUT_DIR="${OUTPUT_DIR:-$WORKSPACE_DIR/test_logs}"
 VERBOSE_STATUS=0
 LAUNCH_JETSON=0
 LAUNCH_PC=0
@@ -50,7 +50,7 @@ Options:
     --test-timeout-s SEC       overall safety timeout (default: 15.0)
     --control-rate-hz VAL      BodyReference publish rate (default: 100)
     --log-rate-hz VAL          log sample rate (default: 50)
-    --output-dir PATH          CSV log directory (default: ~/.ros/climbing_logs/swing_admittance)
+    --output-dir PATH          CSV log directory (default: \$WORKSPACE_DIR/test_logs)
     --verbose                  print a throttled live status during the run
     --launch-jetson            start jetson_bringup.launch locally before the test
     --launch-pc                start pc_static_bringup.launch locally before the test

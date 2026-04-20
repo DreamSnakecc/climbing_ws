@@ -16,7 +16,8 @@ them, publishes a BodyReference marking the target leg as swing, and
 drives the fan directly (bypassing mission_supervisor).
 
 All relevant monitoring topics are subscribed; per-sample state goes to a
-CSV log and a phase-level summary is printed to stdout.
+CSV under the workspace `test_logs/` directory (default) and a phase-level
+summary is printed to stdout.
 
 Preconditions
 -------------
@@ -44,6 +45,23 @@ from climbing_msgs.msg import AdhesionCommand, BodyReference, EstimatedState, Le
 from geometry_msgs.msg import Point, Pose, Quaternion, Twist, Vector3
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray
+
+
+def _default_test_logs_dir():
+    """`<workspace>/test_logs` (workspace = ancestor containing `src/climbing_control_core`)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = here
+    for _ in range(12):
+        if os.path.isdir(os.path.join(path, "test_logs")):
+            return os.path.join(path, "test_logs")
+        if os.path.isdir(os.path.join(path, "src", "climbing_control_core")):
+            return os.path.join(path, "test_logs")
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    ws = os.environ.get("CLIMBING_WS", os.path.join(os.path.expanduser("~"), "climbing_ws"))
+    return os.path.join(ws, "test_logs")
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
@@ -982,8 +1000,8 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--output-dir",
-        default=os.path.expanduser("~/.ros/climbing_logs/swing_admittance"),
-        help="where to write CSV logs",
+        default=_default_test_logs_dir(),
+        help="where to write CSV logs (default: <workspace>/test_logs)",
     )
     parser.add_argument(
         "--verbose-status",
