@@ -173,7 +173,7 @@ wait_for_node "/state_estimator"
 wait_for_node "/swing_leg_controller"
 
 if [[ "$KILL_BODY_PLANNER" -eq 1 ]]; then
-    if rosnode list 2>/dev/null | rg -n "^/body_planner$" >/dev/null; then
+    if rosnode list 2>/dev/null | grep -qx "/body_planner"; then
         echo "Stopping /body_planner to prevent /control/body_reference publisher conflicts..."
         rosnode kill /body_planner >/dev/null 2>&1 || true
         sleep 1.0
@@ -182,12 +182,13 @@ fi
 
 echo
 echo "Swing-leg admittance test"
-echo "  leg=$LEG lift=$LIFT_M press=$PRESS_M (press_target_from_nominal=$(python3 - <<PY
-lift=float(\"$LIFT_M\")
-press=float(\"$PRESS_M\")
-print(f\"{lift-press:+.4f}\")
+PRESS_TARGET_FROM_NOMINAL=$(python3 - <<PY
+lift=float("$LIFT_M")
+press=float("$PRESS_M")
+print(f"{lift-press:+.4f}")
 PY
-) m) fan_rpm=$FAN_RPM"
+)
+echo "  leg=$LEG lift=$LIFT_M press=$PRESS_M (press_target_from_nominal=${PRESS_TARGET_FROM_NOMINAL} m) fan_rpm=$FAN_RPM"
 echo "  fan_mode=$FAN_MODE fan_on_phase_id=$FAN_ON_PHASE_ID"
 echo "  hold_adhesion_s=$HOLD_ADHESION_S test_timeout_s=$TEST_TIMEOUT_S"
 echo "  output_dir=$OUTPUT_DIR"
