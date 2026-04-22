@@ -134,6 +134,9 @@ wait_for_node() {
 }
 
 clear_swing_test_trigger_params() {
+    # Test-only reset gate: when enabled, swing_leg_controller can force any
+    # lingering swing state back to SUPPORT if upper-level command is all-support.
+    rosparam set /swing_leg_controller/test_force_support_reset_enable true
     rosparam set /swing_leg_controller/test_trigger_leg_name ""
     rosparam set /swing_leg_controller/test_trigger_normal_travel_m 0.0
     rosparam set /swing_leg_controller/test_trigger_press_normal_travel_m -0.003
@@ -144,17 +147,19 @@ require_leg_phase_support() {
     local leg_name="$1"
     local topic="/control/swing_leg_diag/${leg_name}"
     local timeout_s="${2:-3.0}"
-    local phase
+    local start_ts now_ts phase
 
-    if ! rostopic list 2>/dev/null | rg -qx "${topic}"; then
+    if ! rostopic list 2>/dev/null | grep -qx "${topic}"; then
         echo "Required diagnostic topic missing: ${topic}" >&2
         return 1
     fi
 
     # Float32MultiArray diagnostic layout:
     # data[1] == phase_id, where 0 means SUPPORT.
-    phase=$(timeout "$timeout_s" rostopic echo -n 1 "$topic" 2>/dev/null | \
-        python3 -c 'import sys,re
+    start_ts=$(python3 -c 'import time; print(time.time())')
+    while true; do
+        phase=$(timeout 1.0 rostopic echo -n 1 "$topic" 2>/dev/null | \
+            python3 -c 'import sys,re
 text=sys.stdin.read()
 m=re.search(r"data:\s*\[([^\]]+)\]", text, re.S)
 if not m:
@@ -167,18 +172,29 @@ if len(vals) < 2:
 try:
     print(int(round(float(vals[1]))))
 except Exception:
-    print("PARSE_ERROR")')
+    print("PARSE_ERROR")' || true)
 
-    if [[ -z "${phase}" || "${phase}" == "PARSE_ERROR" ]]; then
-        echo "Failed to parse phase_id from ${topic}; refusing to start test." >&2
-        return 1
-    fi
-    if [[ "${phase}" != "0" ]]; then
-        echo "Refusing to start test: ${leg_name} phase_id=${phase} (expected 0 SUPPORT)." >&2
-        echo "Hint: restart /swing_leg_controller or clear swing state before testing." >&2
-        return 1
-    fi
-    return 0
+        if [[ -n "${phase}" && "${phase}" == "0" ]]; then
+            return 0
+        fi
+
+        now_ts=$(python3 -c 'import time; print(time.time())')
+        if ! python3 - "$start_ts" "$now_ts" "$timeout_s" <<'PY'
+import sys
+start=float(sys.argv[1]); now=float(sys.argv[2]); timeout=float(sys.argv[3])
+sys.exit(0 if (now-start) < timeout else 1)
+PY
+        then
+            if [[ -z "${phase}" || "${phase}" == "PARSE_ERROR" ]]; then
+                echo "Failed to parse phase_id from ${topic}; refusing to start test." >&2
+            else
+                echo "Refusing to start test: ${leg_name} phase_id=${phase} (expected 0 SUPPORT)." >&2
+                echo "Hint: restart /swing_leg_controller or clear swing state before testing." >&2
+            fi
+            return 1
+        fi
+        sleep 0.2
+    done
 }
 
 cleanup() {
@@ -220,6 +236,11 @@ wait_for_node "/jetson/fan_serial_bridge"
 wait_for_node "/state_estimator"
 wait_for_node "/swing_leg_controller"
 
+echo "Clearing swing-leg test trigger params..."
+clear_swing_test_trigger_params
+echo "Checking ${LEG} phase is SUPPORT (phase_id=0) before starting..."
+require_leg_phase_support "$LEG" 5.0
+
 if [[ "$KILL_BODY_PLANNER" -eq 1 ]]; then
     if rosnode list 2>/dev/null | grep -qx "/body_planner"; then
         echo "Stopping /body_planner to prevent /control/body_reference publisher conflicts..."
@@ -227,11 +248,6 @@ if [[ "$KILL_BODY_PLANNER" -eq 1 ]]; then
         sleep 1.0
     fi
 fi
-
-echo "Clearing swing-leg test trigger params..."
-clear_swing_test_trigger_params
-echo "Checking ${LEG} phase is SUPPORT (phase_id=0) before starting..."
-require_leg_phase_support "$LEG" 3.0
 
 echo
 echo "Swing-leg admittance test"

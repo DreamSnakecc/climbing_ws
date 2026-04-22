@@ -281,6 +281,9 @@ class SwingAdmittanceTest(object):
 
     def _apply_controller_trigger_params(self, enable):
         if enable:
+            rospy.set_param(
+                "/swing_leg_controller/test_force_support_reset_enable", True
+            )
             rospy.set_param("/swing_leg_controller/test_trigger_leg_name", self.leg_name)
             rospy.set_param(
                 "/swing_leg_controller/test_trigger_normal_travel_m", float(self.lift_m)
@@ -296,6 +299,9 @@ class SwingAdmittanceTest(object):
                 bool(self.pause_after_lift),
             )
         else:
+            rospy.set_param(
+                "/swing_leg_controller/test_force_support_reset_enable", False
+            )
             rospy.set_param("/swing_leg_controller/test_trigger_leg_name", "")
             rospy.set_param("/swing_leg_controller/test_trigger_normal_travel_m", 0.0)
             rospy.set_param(
@@ -695,7 +701,16 @@ class SwingAdmittanceTest(object):
                     "press Enter on the controlling terminal to continue to PRESS...",
                     lift_reached_t,
                 )
+                pause_started = time.time()
                 self._wait_for_enter()
+                pause_duration = max(0.0, time.time() - pause_started)
+                # Operator pause is intentionally excluded from safety timeout accounting.
+                # Shift the loop deadline forward by the exact blocking duration.
+                deadline += pause_duration
+                rospy.loginfo(
+                    "[test_swing_admittance] pause duration %.3fs excluded from test timeout",
+                    pause_duration,
+                )
                 self._set_hold_at_lift(False)
                 self._lift_pause_done = True
                 self.highlights["pause_release_time"] = time.time() - start_wall
@@ -774,6 +789,10 @@ class SwingAdmittanceTest(object):
         rate = rospy.Rate(self.log_rate_hz)
         while not rospy.is_shutdown():
             if self.test_started_at is None:
+                rate.sleep()
+                continue
+            if self.test_phase == "PAUSE_AFTER_LIFT":
+                # Do not record operator-wait samples into CSV.
                 rate.sleep()
                 continue
             wall_time = time.time() - self.test_started_at

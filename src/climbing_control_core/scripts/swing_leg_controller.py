@@ -699,6 +699,22 @@ class SwingLegController(object):
         except Exception:
             return False
 
+    def _test_force_support_reset_enabled(self):
+        """Allow force-reset to SUPPORT when running staged tests.
+
+        This is intentionally opt-in via ROS param so normal whole-body control
+        behavior is unchanged unless a test harness enables it.
+        """
+        try:
+            return bool(
+                rospy.get_param(
+                    "/swing_leg_controller/test_force_support_reset_enable",
+                    rospy.get_param("~test_force_support_reset_enable", False),
+                )
+            )
+        except Exception:
+            return False
+
     def _apply_test_trigger_override(self, leg_name, state):
         lift_normal_travel = self._test_trigger_normal_override(leg_name)
         if lift_normal_travel is None:
@@ -1107,6 +1123,7 @@ class SwingLegController(object):
                 desired_support = desired_support_mask[leg_index] if leg_index < len(desired_support_mask) else True
                 attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
                 adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
+                test_force_reset_enabled = self._test_force_support_reset_enabled()
 
                 if desired_support and self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
@@ -1123,6 +1140,21 @@ class SwingLegController(object):
                     self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
+                    continue
+
+                if desired_support and test_force_reset_enabled:
+                    # Test-only safeguard: when upper-level commands all-support, force
+                    # any lingering swing phase back to SUPPORT so the next staged test
+                    # starts from a clean state.
+                    self.swing_phase_start[leg_name] = None
                     support_msg = self._support_command(leg_name, leg_index)
                     self.pub.publish(support_msg)
                     self._publish_leg_diagnostic(
