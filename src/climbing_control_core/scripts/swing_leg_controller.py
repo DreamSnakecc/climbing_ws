@@ -319,6 +319,8 @@ class SwingLegController(object):
             "joint_torque_bias_norm_nm",
             "contact_active_since_age_s",
             "test_experiment_active",
+            "test_hold_at_lift",
+            "test_lift_aligned",
         ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -399,6 +401,11 @@ class SwingLegController(object):
     def _set_phase(self, state, phase_name, now_sec):
         state["phase"] = phase_name
         state["phase_started_at"] = now_sec
+        # Hold/aligned flags only describe the LIFT phase; clear them on any other transition
+        # so the diagnostic vector doesn't report stale values.
+        if phase_name != self.PHASE_TEST_LIFT_CLEARANCE:
+            state["test_hold_at_lift"] = False
+            state["test_lift_aligned"] = False
 
     def _step_toward_target(self, current_position, target_position, velocity_limits, dt):
         next_position = []
@@ -675,6 +682,23 @@ class SwingLegController(object):
         max_normal_travel = max(self.max_position_offset)
         return clamp(press_normal_travel, -max_normal_travel, max_normal_travel)
 
+    def _test_trigger_hold_at_lift(self):
+        """Runtime flag that blocks the LIFT->PRESS transition while True.
+
+        The flag is polled every control tick so the test script can freeze the
+        leg at the lift target, prompt the operator, and then release the hold
+        so the staged press/compliance sequence can continue.
+        """
+        try:
+            return bool(
+                rospy.get_param(
+                    "/swing_leg_controller/test_trigger_hold_at_lift",
+                    rospy.get_param("~test_trigger_hold_at_lift", False),
+                )
+            )
+        except Exception:
+            return False
+
     def _apply_test_trigger_override(self, leg_name, state):
         lift_normal_travel = self._test_trigger_normal_override(leg_name)
         if lift_normal_travel is None:
@@ -830,6 +854,8 @@ class SwingLegController(object):
         state["test_override_value"] = None
         state["test_press_value"] = None
         state["test_experiment_active"] = False
+        state["test_hold_at_lift"] = False
+        state["test_lift_aligned"] = False
         return self._build_message(
             leg_name,
             support_target,
@@ -901,12 +927,22 @@ class SwingLegController(object):
         if phase == self.PHASE_TEST_LIFT_CLEARANCE:
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["lift_target"], self.test_lift_velocity_limit, dt)
             aligned = abs(self._normal_error(state["lift_target"], cmd_position)) <= self.normal_alignment_tolerance_m
-            if aligned and phase_elapsed >= self.test_lift_dwell_s:
+            hold_at_lift = self._test_trigger_hold_at_lift()
+            state["test_hold_at_lift"] = hold_at_lift
+            state["test_lift_aligned"] = bool(aligned)
+            if aligned and phase_elapsed >= self.test_lift_dwell_s and not hold_at_lift:
                 self._set_phase(state, self.PHASE_TEST_PRESS_CONTACT, now_sec)
             elif aligned:
-                # Hold exactly at the lift target while dwell time accumulates so observers can verify the lift was reached.
+                # Hold exactly at the lift target while dwell time accumulates (or while hold_at_lift is set by the operator)
+                # so observers can verify the lift was reached before pressing.
                 cmd_position = list(state["lift_target"])
                 cmd_velocity = [0.0, 0.0, 0.0]
+                if hold_at_lift:
+                    rospy.loginfo_throttle(
+                        2.0,
+                        "swing_leg_controller staged test holding at LIFT for %s (waiting on test_trigger_hold_at_lift)",
+                        leg_name,
+                    )
             skirt_target = self.swing_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
@@ -1048,6 +1084,8 @@ class SwingLegController(object):
             float(bias_norm),
             float(contact_age),
             1.0 if bool(state.get("test_experiment_active", False)) else 0.0,
+            1.0 if bool(state.get("test_hold_at_lift", False)) else 0.0,
+            1.0 if bool(state.get("test_lift_aligned", False)) else 0.0,
         ]
         publisher.publish(msg)
 

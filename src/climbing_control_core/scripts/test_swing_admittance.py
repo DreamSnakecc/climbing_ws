@@ -93,6 +93,8 @@ DIAG_FIELDS = [
     "joint_torque_bias_norm_nm",
     "contact_active_since_age_s",
     "test_experiment_active",
+    "test_hold_at_lift",
+    "test_lift_aligned",
 ]
 
 FAN_MODE_RELEASE = 0
@@ -178,6 +180,17 @@ class SwingAdmittanceTest(object):
             "max_cmd_normal_from_nominal_m": 0.0,
             "min_cmd_normal_from_nominal_m": 0.0,
             "max_normal_force_reading_n": 0.0,
+            "lift_reached_time": None,
+            "pause_release_time": None,
+            "press_reached_time": None,
+            "admittance_peak_force_n": 0.0,
+            "admittance_peak_force_time": None,
+            "admittance_settled_force_n": None,
+            "admittance_settled_offset_m": None,
+            "admittance_force_reduction_n": None,
+            "admittance_force_reduction_ratio": None,
+            "admittance_settling_time_s": None,
+            "admittance_steady_state_std_n": None,
         }
         self.samples = []
         self.last_phase_id_seen = None
@@ -276,11 +289,32 @@ class SwingAdmittanceTest(object):
                 "/swing_leg_controller/test_trigger_press_normal_travel_m",
                 float(self.press_target_from_nominal_m),
             )
+            # Start with the operator-pause flag in the desired initial state so the
+            # controller will hold at LIFT until we explicitly release it.
+            rospy.set_param(
+                "/swing_leg_controller/test_trigger_hold_at_lift",
+                bool(self.pause_after_lift),
+            )
         else:
             rospy.set_param("/swing_leg_controller/test_trigger_leg_name", "")
             rospy.set_param("/swing_leg_controller/test_trigger_normal_travel_m", 0.0)
             rospy.set_param(
                 "/swing_leg_controller/test_trigger_press_normal_travel_m", -0.003
+            )
+            rospy.set_param(
+                "/swing_leg_controller/test_trigger_hold_at_lift", False
+            )
+
+    def _set_hold_at_lift(self, value):
+        try:
+            rospy.set_param(
+                "/swing_leg_controller/test_trigger_hold_at_lift", bool(value)
+            )
+        except Exception as exc:
+            rospy.logwarn(
+                "[test_swing_admittance] failed to set test_trigger_hold_at_lift=%s: %s",
+                value,
+                exc,
             )
 
     # ---------- Publishers ----------
@@ -498,6 +532,17 @@ class SwingAdmittanceTest(object):
             self.highlights["min_cmd_normal_from_nominal_m"] = min(
                 self.highlights["min_cmd_normal_from_nominal_m"], float(cmd_normal)
             )
+        # Mark the instant the commanded normal first comes within alignment tolerance
+        # of the press target (= "PRESS target reached"). This is a good proxy for when
+        # the controller finished descending and handed control to the admittance loop.
+        if (
+            self.highlights.get("press_reached_time") is None
+            and cmd_normal is not None
+            and phase_id is not None
+            and int(phase_id) in (2, 6, 7)
+            and float(cmd_normal) <= (self.press_target_from_nominal_m + 5e-4)
+        ):
+            self.highlights["press_reached_time"] = now_sec
 
     # ---------- Test sequencing ----------
 
@@ -611,11 +656,11 @@ class SwingAdmittanceTest(object):
             self.body_ref_pub.publish(self._build_body_reference(target_in_swing=True))
 
             phase_id = self._get_diag_field("phase_id")
+            lift_aligned_flag = self._get_diag_field("test_lift_aligned")
             now = time.time()
             phase_id_int = int(phase_id) if phase_id is not None else None
 
             if phase_id_int is not None and phase_id_int != last_phase_id:
-                previous_phase_id = last_phase_id
                 rospy.loginfo(
                     "[test_swing_admittance] phase transition %s -> %s (elapsed=%.3fs)",
                     PHASE_NAMES.get(last_phase_id, str(last_phase_id)),
@@ -623,18 +668,6 @@ class SwingAdmittanceTest(object):
                     now - start_wall,
                 )
                 last_phase_id = phase_id_int
-                if (
-                    self.pause_after_lift
-                    and not self._lift_pause_done
-                    and previous_phase_id == 1
-                    and phase_id_int != 1
-                ):
-                    self.test_phase = "PAUSE_AFTER_LIFT"
-                    rospy.loginfo(
-                        "[test_swing_admittance] lift phase exited; press Enter to continue..."
-                    )
-                    self._wait_for_enter()
-                    self._lift_pause_done = True
                 if phase_id_int == 1:
                     self.test_phase = "LIFT"
                 elif phase_id_int == 2:
@@ -643,6 +676,32 @@ class SwingAdmittanceTest(object):
                     self.test_phase = "COMPLIANT_SETTLE"
                 elif phase_id_int == 7:
                     self.test_phase = "ATTACHED_HOLD"
+
+            # Operator-gated pause: once the controller reports the leg has reached the lift
+            # target (phase 1 and aligned), prompt for Enter, then clear hold_at_lift so the
+            # staged press/compliance sequence proceeds.
+            if (
+                self.pause_after_lift
+                and not self._lift_pause_done
+                and phase_id_int == 1
+                and lift_aligned_flag is not None
+                and lift_aligned_flag >= 0.5
+            ):
+                lift_reached_t = now - start_wall
+                self.highlights["lift_reached_time"] = lift_reached_t
+                self.test_phase = "PAUSE_AFTER_LIFT"
+                rospy.loginfo(
+                    "[test_swing_admittance] LIFT target reached at t=%.3fs; "
+                    "press Enter on the controlling terminal to continue to PRESS...",
+                    lift_reached_t,
+                )
+                self._wait_for_enter()
+                self._set_hold_at_lift(False)
+                self._lift_pause_done = True
+                self.highlights["pause_release_time"] = time.time() - start_wall
+                rospy.loginfo(
+                    "[test_swing_admittance] hold released; controller will transition LIFT->PRESS"
+                )
 
             should_boost_fan = (
                 phase_id_int is not None and phase_id_int >= self.fan_on_phase_id
@@ -816,6 +875,7 @@ class SwingAdmittanceTest(object):
         return filename
 
     def print_summary(self):
+        self._compute_admittance_metrics()
         print()
         print("=" * 76)
         print("Swing-leg admittance test summary - leg=%s" % self.leg_name)
@@ -834,6 +894,9 @@ class SwingAdmittanceTest(object):
         def _fmt_time(value):
             return "%.3fs" % value if value is not None else "not reached"
 
+        def _fmt_opt(value, spec="%.3f"):
+            return spec % value if value is not None else "n/a"
+
         def _duration(phase_id):
             enter = self.highlights["phase_enter_time"].get(phase_id)
             exit_t = self.highlights["phase_exit_time"].get(phase_id)
@@ -842,6 +905,29 @@ class SwingAdmittanceTest(object):
             if exit_t is None:
                 return "entered@%.3fs (not exited)" % enter
             return "entered@%.3fs duration=%.3fs" % (enter, exit_t - enter)
+
+        # ----- Phase flow verification (LIFT -> HOLD -> PRESS -> COMPLIANT -> ATTACHED) -----
+        print("  --- Staged flow verification ---")
+        flow_steps = [
+            ("LIFT entered (phase 1)", self.highlights["phase_enter_time"].get(1)),
+            ("LIFT target reached    ", self.highlights["lift_reached_time"]),
+            ("Operator Enter released", self.highlights["pause_release_time"]),
+            ("PRESS entered (phase 2)", self.highlights["phase_enter_time"].get(2)),
+            ("PRESS target reached   ", self.highlights["press_reached_time"]),
+            ("COMPLIANT (phase 6)    ", self.highlights["phase_enter_time"].get(6)),
+            ("ATTACHED_HOLD (phase 7)", self.highlights["phase_enter_time"].get(7)),
+        ]
+        last_ok = True
+        for name, value in flow_steps:
+            status = "OK " if value is not None else "-- "
+            if value is None:
+                last_ok = False
+            print("    [%s] %-25s %s" % (status, name, _fmt_time(value)))
+        if last_ok:
+            print("    Flow complete: lift -> hold(enter) -> press -> compliant -> attached.")
+        else:
+            print("    Flow INCOMPLETE: one or more milestones were not reached (see above).")
+        print()
 
         for phase_id in sorted(PHASE_NAMES):
             name = PHASE_NAMES[phase_id]
@@ -878,6 +964,31 @@ class SwingAdmittanceTest(object):
         )
         print()
 
+        # ----- Quantitative admittance-effect analysis -----
+        print("  --- Admittance effect (quantitative) ---")
+        peak_f = self.highlights.get("admittance_peak_force_n")
+        peak_f_t = self.highlights.get("admittance_peak_force_time")
+        settled_f = self.highlights.get("admittance_settled_force_n")
+        settled_offset = self.highlights.get("admittance_settled_offset_m")
+        reduction_n = self.highlights.get("admittance_force_reduction_n")
+        reduction_ratio = self.highlights.get("admittance_force_reduction_ratio")
+        settling_t = self.highlights.get("admittance_settling_time_s")
+        std_n = self.highlights.get("admittance_steady_state_std_n")
+        max_offset = self.highlights.get("max_compliant_offset_m")
+        print("    peak contact force (N)            : %s at %s"
+              % (_fmt_opt(peak_f, "%.2f"), _fmt_time(peak_f_t)))
+        print("    steady-state force (N)            : %s" % _fmt_opt(settled_f, "%.2f"))
+        print("    force reduction by admittance (N) : %s (%s%%)"
+              % (
+                  _fmt_opt(reduction_n, "%.2f"),
+                  _fmt_opt(None if reduction_ratio is None else reduction_ratio * 100.0, "%.1f"),
+              ))
+        print("    admittance retraction (m)         : peak=%s settled=%s"
+              % (_fmt_opt(max_offset, "%.4f"), _fmt_opt(settled_offset, "%.4f")))
+        print("    force settling time (s)           : %s" % _fmt_opt(settling_t, "%.3f"))
+        print("    attached-hold force std (N)       : %s" % _fmt_opt(std_n, "%.3f"))
+        print()
+
         issues = self._diagnose_issues()
         if issues:
             print("  ATTENTION (probable issues / tuning hints):")
@@ -886,6 +997,103 @@ class SwingAdmittanceTest(object):
         else:
             print("  No obvious anomalies detected.")
         print("=" * 76)
+
+    def _compute_admittance_metrics(self):
+        """Distill the admittance-control effect from the recorded samples.
+
+        Metrics computed (written back into self.highlights):
+          * admittance_peak_force_n / _time        : max of |measured normal force|
+                during COMPLIANT_SETTLE + ATTACHED_HOLD (post-press contact).
+          * admittance_settled_force_n             : mean |force| over the last
+                settle window (default 0.5 s of ATTACHED_HOLD, else the last
+                0.5 s of COMPLIANT_SETTLE).
+          * admittance_settled_offset_m            : compliant_normal_offset at the
+                same settle window.
+          * admittance_force_reduction_n / _ratio  : peak - settled (reduction = how
+                much the admittance back-drove to relieve overload).
+          * admittance_settling_time_s             : time from peak-force instant
+                until |force| stays within 25% of settled value for >=0.25 s.
+          * admittance_steady_state_std_n          : std of |force| over the settle
+                window (smaller = steadier admittance regulation).
+        """
+        if not self.samples:
+            return
+
+        # Restrict to rows where the admittance loop is actually running.
+        admittance_rows = []
+        for row in self.samples:
+            phase_id = row.get("phase_id")
+            if phase_id is None:
+                continue
+            pid = int(phase_id)
+            if pid not in (6, 7):
+                continue
+            t = row.get("wall_time")
+            # Prefer the filtered compliant force; fall back to estimated leg normal force.
+            f = row.get("compliant_force_estimate_n")
+            if f is None or abs(float(f)) < 1e-6:
+                f = row.get("estimated_leg_normal_force_n")
+            if f is None or t is None:
+                continue
+            offset = row.get("compliant_normal_offset_m") or 0.0
+            admittance_rows.append(
+                {
+                    "t": float(t),
+                    "f_abs": abs(float(f)),
+                    "offset": float(offset),
+                    "phase_id": pid,
+                }
+            )
+        if not admittance_rows:
+            return
+
+        # Peak force.
+        peak_row = max(admittance_rows, key=lambda r: r["f_abs"])
+        self.highlights["admittance_peak_force_n"] = float(peak_row["f_abs"])
+        self.highlights["admittance_peak_force_time"] = float(peak_row["t"])
+
+        # Settle window: prefer last 0.5 s of ATTACHED_HOLD; else last 0.5 s of COMPLIANT_SETTLE.
+        attached_rows = [r for r in admittance_rows if r["phase_id"] == 7]
+        settle_rows = attached_rows if attached_rows else admittance_rows
+        t_end = settle_rows[-1]["t"]
+        settle_window_s = 0.5
+        window_rows = [r for r in settle_rows if r["t"] >= t_end - settle_window_s]
+        if not window_rows:
+            window_rows = settle_rows[-max(1, len(settle_rows) // 4):]
+
+        mean_f = sum(r["f_abs"] for r in window_rows) / len(window_rows)
+        mean_offset = sum(r["offset"] for r in window_rows) / len(window_rows)
+        variance = sum((r["f_abs"] - mean_f) ** 2 for r in window_rows) / len(window_rows)
+        std_f = math.sqrt(max(variance, 0.0))
+        self.highlights["admittance_settled_force_n"] = float(mean_f)
+        self.highlights["admittance_settled_offset_m"] = float(mean_offset)
+        self.highlights["admittance_steady_state_std_n"] = float(std_f)
+
+        # Force reduction (how much the admittance relieved the load after peak).
+        reduction = float(peak_row["f_abs"]) - float(mean_f)
+        self.highlights["admittance_force_reduction_n"] = reduction
+        if peak_row["f_abs"] > 1e-6:
+            self.highlights["admittance_force_reduction_ratio"] = reduction / float(peak_row["f_abs"])
+
+        # Settling time: from peak-force instant, find first run where |f - settled| stays
+        # within 25% of settled force for >= 0.25 s.
+        tol = max(0.25 * abs(mean_f), 0.5)  # at least 0.5 N absolute to ignore small noise
+        min_hold_s = 0.25
+        inside_since = None
+        settling_t = None
+        for r in admittance_rows:
+            if r["t"] < peak_row["t"]:
+                continue
+            if abs(r["f_abs"] - mean_f) <= tol:
+                if inside_since is None:
+                    inside_since = r["t"]
+                elif r["t"] - inside_since >= min_hold_s:
+                    settling_t = inside_since - peak_row["t"]
+                    break
+            else:
+                inside_since = None
+        if settling_t is not None and settling_t >= 0.0:
+            self.highlights["admittance_settling_time_s"] = float(settling_t)
 
     def _diagnose_issues(self):
         issues = []
@@ -1015,7 +1223,8 @@ def parse_args(argv=None):
         "--no-pause-after-lift",
         action="store_false",
         dest="pause_after_lift",
-        help="disable Enter pause after lift and continue immediately to press",
+        help="disable the Enter-wait between LIFT and PRESS; the controller will auto-advance "
+             "lift -> press -> compliant as soon as the lift target is reached",
     )
     parser.set_defaults(pause_after_lift=True)
     parser.add_argument(
