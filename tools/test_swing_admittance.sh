@@ -133,6 +133,54 @@ wait_for_node() {
     done
 }
 
+clear_swing_test_trigger_params() {
+    rosparam set /swing_leg_controller/test_trigger_leg_name ""
+    rosparam set /swing_leg_controller/test_trigger_normal_travel_m 0.0
+    rosparam set /swing_leg_controller/test_trigger_press_normal_travel_m -0.003
+    rosparam set /swing_leg_controller/test_trigger_hold_at_lift false
+}
+
+require_leg_phase_support() {
+    local leg_name="$1"
+    local topic="/control/swing_leg_diag/${leg_name}"
+    local timeout_s="${2:-3.0}"
+    local phase
+
+    if ! rostopic list 2>/dev/null | rg -qx "${topic}"; then
+        echo "Required diagnostic topic missing: ${topic}" >&2
+        return 1
+    fi
+
+    # Float32MultiArray diagnostic layout:
+    # data[1] == phase_id, where 0 means SUPPORT.
+    phase=$(timeout "$timeout_s" rostopic echo -n 1 "$topic" 2>/dev/null | \
+        python3 -c 'import sys,re
+text=sys.stdin.read()
+m=re.search(r"data:\s*\[([^\]]+)\]", text, re.S)
+if not m:
+    print("PARSE_ERROR")
+    raise SystemExit(0)
+vals=[v.strip() for v in m.group(1).split(",") if v.strip()]
+if len(vals) < 2:
+    print("PARSE_ERROR")
+    raise SystemExit(0)
+try:
+    print(int(round(float(vals[1]))))
+except Exception:
+    print("PARSE_ERROR")')
+
+    if [[ -z "${phase}" || "${phase}" == "PARSE_ERROR" ]]; then
+        echo "Failed to parse phase_id from ${topic}; refusing to start test." >&2
+        return 1
+    fi
+    if [[ "${phase}" != "0" ]]; then
+        echo "Refusing to start test: ${leg_name} phase_id=${phase} (expected 0 SUPPORT)." >&2
+        echo "Hint: restart /swing_leg_controller or clear swing state before testing." >&2
+        return 1
+    fi
+    return 0
+}
+
 cleanup() {
     local exit_code=$?
     if [[ -n "$PC_PID" ]]; then
@@ -179,6 +227,11 @@ if [[ "$KILL_BODY_PLANNER" -eq 1 ]]; then
         sleep 1.0
     fi
 fi
+
+echo "Clearing swing-leg test trigger params..."
+clear_swing_test_trigger_params
+echo "Checking ${LEG} phase is SUPPORT (phase_id=0) before starting..."
+require_leg_phase_support "$LEG" 3.0
 
 echo
 echo "Swing-leg admittance test"
