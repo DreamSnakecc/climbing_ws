@@ -359,20 +359,20 @@ gait_controller:
     j3: 0.0
   startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
-  position_mode_ids: [11, 12, 13, 14]
+  position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
-    "1": 2048
-    "2": 4515
-    "3": 2048
-    "4": 2163
-    "5": 2159
-    "6": 1657
-    "7": 2048
-    "8": 2111
-    "11": 2034
-    "12": 1897
-    "13": 2039
-    "14": 1021
+    "1": 2043
+    "2": 544
+    "3": 2044
+    "4": 2157
+    "5": 2157
+    "6": 1658
+    "7": 2029
+    "8": 2107
+    "11": 2032
+    "12": 1894
+    "13": 2046
+    "14": 1024
   motor_dir:
     "1": 1
     "2": 1
