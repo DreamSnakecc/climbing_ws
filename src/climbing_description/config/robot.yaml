@@ -237,7 +237,7 @@ dynamixel_telemetry:
   joint_current_scale: [0.35, 1.0, 1.0]
   # Approximate piecewise fits digitized from the provided motor current-torque plots.
   # The bridge uses absolute current for interpolation and restores the sign afterward.
-  # xw540 is used on joint 1 (IDs 11-14), xw430 is used on joints 2/3 (IDs 1-8).
+  # xw540 is used on IDs 11-14 and on IDs 1/3/5/7. xw430 remains on IDs 2/4/6/8.
   torque_models:
     xw540:
       current_to_torque_points:
@@ -268,13 +268,13 @@ dynamixel_telemetry:
       torque_constant_nm_per_a: 1.28
       torque_bias_nm: -0.06
   torque_model_by_motor:
-    "1": xw430
+    "1": xw540
     "2": xw430
-    "3": xw430
+    "3": xw540
     "4": xw430
-    "5": xw430
+    "5": xw540
     "6": xw430
-    "7": xw430
+    "7": xw540
     "8": xw430
     "11": xw540
     "12": xw540
@@ -334,20 +334,20 @@ legs:
     motor_ids: [13, 5, 6]
 
 gait_controller:
-  nominal_x: 118.75
+  nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -191.5
+  nominal_universal_joint_center_z: -195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
   # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
   nominal_z: -321.7   # This is the nominal foot bottom center height, used only for legacy support point calculations. The universal-joint-center nominal height is more relevant for control and state estimation.
   link_coxa: 44.75
-  link_femur: 74.0
-  link_tibia: 150.0
+  link_femur: 83.0
+  link_tibia: 154.0
   link_a3: 41.5
   link_d6: -13.5
   link_d7: -106.7
   base_radius: 203.06
-  gear_ratio_joint2: 4.421
+  gear_ratio_joint2: 1
   gear_ratio_joint3: 4.421
   joint_limit_deg:
     j1: [-90.0, 90.0]
@@ -359,7 +359,7 @@ gait_controller:
     j3: 0.0
   startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
-  position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
+  position_mode_ids: [11, 12, 13, 14]
   motor_home_ticks:
     "1": 2806
     "2": 1641

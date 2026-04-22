@@ -615,6 +615,7 @@ class SwingAdmittanceTest(object):
             phase_id_int = int(phase_id) if phase_id is not None else None
 
             if phase_id_int is not None and phase_id_int != last_phase_id:
+                previous_phase_id = last_phase_id
                 rospy.loginfo(
                     "[test_swing_admittance] phase transition %s -> %s (elapsed=%.3fs)",
                     PHASE_NAMES.get(last_phase_id, str(last_phase_id)),
@@ -622,16 +623,21 @@ class SwingAdmittanceTest(object):
                     now - start_wall,
                 )
                 last_phase_id = phase_id_int
+                if (
+                    self.pause_after_lift
+                    and not self._lift_pause_done
+                    and previous_phase_id == 1
+                    and phase_id_int != 1
+                ):
+                    self.test_phase = "PAUSE_AFTER_LIFT"
+                    rospy.loginfo(
+                        "[test_swing_admittance] lift phase exited; press Enter to continue..."
+                    )
+                    self._wait_for_enter()
+                    self._lift_pause_done = True
                 if phase_id_int == 1:
                     self.test_phase = "LIFT"
                 elif phase_id_int == 2:
-                    if self.pause_after_lift and not self._lift_pause_done:
-                        self.test_phase = "PAUSE_AFTER_LIFT"
-                        rospy.loginfo(
-                            "[test_swing_admittance] lift complete; press Enter to continue PRESS/admittance flow..."
-                        )
-                        self._wait_for_enter()
-                        self._lift_pause_done = True
                     self.test_phase = "PRESS"
                 elif phase_id_int == 6:
                     self.test_phase = "COMPLIANT_SETTLE"
