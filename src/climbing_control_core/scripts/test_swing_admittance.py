@@ -17,7 +17,9 @@ drives the fan directly (bypassing mission_supervisor).
 
 All relevant monitoring topics are subscribed; per-sample state goes to a
 CSV under the workspace `test_logs/` directory (default) and a phase-level
-summary is printed to stdout.
+summary is printed to stdout. Per-leg sums of absolute motor current
+(`joint_currents` topic) and absolute joint effort / torque (`joint_state`)
+match `state_estimator` aggregation for `measured_contact` threshold tuning.
 
 Preconditions
 -------------
@@ -111,6 +113,25 @@ def _safe_index(values, idx, default=0.0):
     return default
 
 
+def _aggregate_leg_scalar(motor_ids, values, joint_name_map):
+    """Sum of absolute values over leg motors; mirrors state_estimator._aggregate_leg_scalar."""
+    total = 0.0
+    count = 0
+    for motor_id in motor_ids:
+        joint_index = joint_name_map.get(str(int(motor_id)))
+        if joint_index is None or joint_index >= len(values):
+            continue
+        total += abs(float(values[joint_index]))
+        count += 1
+    return total, count
+
+
+def _min_max_mean(values):
+    if not values:
+        return None
+    return min(values), max(values), sum(values) / float(len(values))
+
+
 class SwingAdmittanceTest(object):
     def __init__(self, args):
         rospy.init_node("test_swing_admittance", anonymous=False)
@@ -150,9 +171,14 @@ class SwingAdmittanceTest(object):
             self.fan_rpm,
         )
 
+        self._leg_motor_ids = [
+            int(mid) for mid in rospy.get_param("/legs/%s/motor_ids" % self.leg_name, [])
+        ]
+
         self._state_lock = threading.Lock()
         self.latest_estimated = None
         self.latest_joint_state = None
+        self.latest_joint_currents = None
         self.latest_fan_currents = None
         self.latest_leg_rpm = None
         self.latest_leg_command = None
@@ -215,6 +241,12 @@ class SwingAdmittanceTest(object):
             "/jetson/dynamixel_bridge/joint_state", JointState, self._joint_state_cb, queue_size=5
         )
         rospy.Subscriber(
+            "/jetson/dynamixel_bridge/joint_currents",
+            Float32MultiArray,
+            self._joint_currents_cb,
+            queue_size=5,
+        )
+        rospy.Subscriber(
             "/jetson/fan_serial_bridge/fan_currents",
             Float32MultiArray,
             self._fan_current_cb,
@@ -252,6 +284,10 @@ class SwingAdmittanceTest(object):
     def _joint_state_cb(self, msg):
         with self._state_lock:
             self.latest_joint_state = msg
+
+    def _joint_currents_cb(self, msg):
+        with self._state_lock:
+            self.latest_joint_currents = list(msg.data) if msg.data else []
 
     def _fan_current_cb(self, msg):
         with self._state_lock:
@@ -378,6 +414,11 @@ class SwingAdmittanceTest(object):
         with self._state_lock:
             estimated = self.latest_estimated
             joint_state = self.latest_joint_state
+            joint_currents_vec = (
+                list(self.latest_joint_currents)
+                if self.latest_joint_currents is not None
+                else None
+            )
             fan_currents = list(self.latest_fan_currents) if self.latest_fan_currents else []
             leg_rpm = list(self.latest_leg_rpm) if self.latest_leg_rpm else []
             leg_command = self.latest_leg_command
@@ -460,14 +501,34 @@ class SwingAdmittanceTest(object):
         )
         row["fan_rpm_fb"] = float(leg_rpm[leg_idx]) if leg_idx < len(leg_rpm) else None
 
+        row["leg_contact_current_sum_a"] = None
+        row["leg_contact_current_count"] = None
+        row["leg_contact_torque_sum_nm"] = None
+        row["leg_contact_torque_count"] = None
+
         row["joint_positions"] = []
         row["joint_velocities"] = []
         row["joint_currents"] = []
         if joint_state is not None:
-            motor_ids = rospy.get_param("/legs/%s/motor_ids" % self.leg_name, [])
             joint_name_map = {
                 str(int(name)): index for index, name in enumerate(joint_state.name)
             }
+            motor_ids = self._leg_motor_ids
+            if motor_ids:
+                efforts = list(joint_state.effort) if joint_state.effort else []
+                torque_sum, torque_count = _aggregate_leg_scalar(
+                    motor_ids, efforts, joint_name_map
+                )
+                if torque_count > 0:
+                    row["leg_contact_torque_sum_nm"] = float(torque_sum)
+                    row["leg_contact_torque_count"] = int(torque_count)
+                if joint_currents_vec is not None:
+                    cur_sum, cur_count = _aggregate_leg_scalar(
+                        motor_ids, joint_currents_vec, joint_name_map
+                    )
+                    if cur_count > 0:
+                        row["leg_contact_current_sum_a"] = float(cur_sum)
+                        row["leg_contact_current_count"] = int(cur_count)
             for motor_id in motor_ids:
                 idx = joint_name_map.get(str(int(motor_id)))
                 if idx is None:
@@ -554,11 +615,20 @@ class SwingAdmittanceTest(object):
 
     def _wait_for_streams(self, timeout_s=5.0):
         deadline = time.time() + timeout_s
+        have_jc = False
         while time.time() < deadline and not rospy.is_shutdown():
             with self._state_lock:
                 have_est = self.latest_estimated is not None
                 have_js = self.latest_joint_state is not None
+                have_jc = self.latest_joint_currents is not None
             if have_est and have_js:
+                if not have_jc:
+                    rospy.logwarn(
+                        "[test_swing_admittance] /jetson/dynamixel_bridge/joint_currents not "
+                        "received yet; leg_contact_current_* CSV columns will be empty until it "
+                        "publishes (required for measured_contact current term, same as "
+                        "state_estimator)."
+                    )
                 return True
             time.sleep(0.05)
         rospy.logwarn(
@@ -601,9 +671,12 @@ class SwingAdmittanceTest(object):
             int(bool(row.get("attachment_ready_mask"))),
             int(bool(row.get("adhesion_mask"))),
         )
+        i_sum = row.get("leg_contact_current_sum_a")
+        tau_sum = row.get("leg_contact_torque_sum_nm")
         rospy.loginfo_throttle(
             0.5,
-            "[%s] phase=%s cmd_z=%s f_filt=%s est_f=%s offset=%s skirt=%s fan_i=%s | %s",
+            "[%s] phase=%s cmd_z=%s f_filt=%s est_f=%s offset=%s skirt=%s fan_i=%s "
+            "sum|I|=%s sum|tau|=%s | %s",
             self.test_phase,
             phase_name,
             _fmt(cmd_z, "%.4f"),
@@ -612,6 +685,8 @@ class SwingAdmittanceTest(object):
             _fmt(offset, "%.4f"),
             _fmt(skirt, "%.2f"),
             _fmt(fan_current, "%.2f"),
+            _fmt(i_sum, "%.3f"),
+            _fmt(tau_sum, "%.3f"),
             masks,
         )
 
@@ -791,10 +866,6 @@ class SwingAdmittanceTest(object):
             if self.test_started_at is None:
                 rate.sleep()
                 continue
-            if self.test_phase == "PAUSE_AFTER_LIFT":
-                # Do not record operator-wait samples into CSV.
-                rate.sleep()
-                continue
             wall_time = time.time() - self.test_started_at
             row = self._snapshot(wall_time)
             self.samples.append(row)
@@ -860,6 +931,10 @@ class SwingAdmittanceTest(object):
             "contact_confidence",
             "seal_confidence",
             "leg_torque_sum",
+            "leg_contact_current_sum_a",
+            "leg_contact_current_count",
+            "leg_contact_torque_sum_nm",
+            "leg_contact_torque_count",
             "wall_touch_mask",
             "measured_contact_mask",
             "early_contact_mask",
@@ -893,8 +968,204 @@ class SwingAdmittanceTest(object):
         rospy.loginfo("[test_swing_admittance] log saved to %s (%d rows)", filename, len(self.samples))
         return filename
 
+    @staticmethod
+    def _measured_contact_trips(row, thr_i, thr_tau):
+        """Same OR logic as state_estimator (current branch uses >=, torque uses >)."""
+        csum = row.get("leg_contact_current_sum_a")
+        ccnt = row.get("leg_contact_current_count")
+        tsum = row.get("leg_contact_torque_sum_nm")
+        tcnt = row.get("leg_contact_torque_count")
+        cur_ok = csum is not None and ccnt is not None and int(ccnt) > 0
+        tau_ok = tsum is not None and tcnt is not None and int(tcnt) > 0
+        cur_trip = cur_ok and float(csum) >= thr_i * max(int(ccnt), 1)
+        tau_trip = tau_ok and float(tsum) > thr_tau * max(int(tcnt), 1)
+        return cur_trip, tau_trip
+
+    def _print_contact_model_stats(self):
+        """Min/max/mean of leg motor |I| and |tau| sums for LIFT, short PRESS, and 2+6+7 wall load."""
+        if not self.samples:
+            return
+        thr_i = float(rospy.get_param("/state_estimator/current_contact_threshold_a", 0.12))
+        thr_tau = float(
+            rospy.get_param("/state_estimator/torque_contact_threshold_nm", 0.05)
+        )
+
+        def collect_rows(phase_id_target):
+            rows = []
+            for row in self.samples:
+                pid = row.get("phase_id")
+                if pid is None:
+                    continue
+                if int(pid) != int(phase_id_target):
+                    continue
+                rows.append(row)
+            return rows
+
+        def collect_rows_phases(phase_id_targets):
+            idset = {int(p) for p in phase_id_targets}
+            rows = []
+            for row in self.samples:
+                pid = row.get("phase_id")
+                if pid is None or int(pid) not in idset:
+                    continue
+                rows.append(row)
+            return rows
+
+        def _summarize_row_list(rows, title, block_kind, phase_id=None):
+            cur_sums = []
+            tau_sums = []
+            n_cur_trip = 0
+            n_tau_trip = 0
+            n_either = 0
+            for row in rows:
+                c = row.get("leg_contact_current_sum_a")
+                t = row.get("leg_contact_torque_sum_nm")
+                if c is not None:
+                    cur_sums.append(float(c))
+                if t is not None:
+                    tau_sums.append(float(t))
+                ct, tt = self._measured_contact_trips(row, thr_i, thr_tau)
+                if ct:
+                    n_cur_trip += 1
+                if tt:
+                    n_tau_trip += 1
+                if ct or tt:
+                    n_either += 1
+            cur_mm = _min_max_mean(cur_sums)
+            tau_mm = _min_max_mean(tau_sums)
+            return {
+                "phase_id": phase_id,
+                "block_kind": block_kind,
+                "title": title,
+                "n_rows": len(rows),
+                "cur_mm": cur_mm,
+                "tau_mm": tau_mm,
+                "n_cur_trip": n_cur_trip,
+                "n_tau_trip": n_tau_trip,
+                "n_either": n_either,
+            }
+
+        def summarize_phase(phase_id, title, block_kind):
+            return _summarize_row_list(
+                collect_rows(phase_id), title, block_kind, phase_id=int(phase_id)
+            )
+
+        def summarize_phases(phase_id_targets, title, block_kind):
+            return _summarize_row_list(
+                collect_rows_phases(phase_id_targets),
+                title,
+                block_kind,
+                phase_id=None,
+            )
+
+        def fmt_mm(label, mm, unit):
+            if mm is None:
+                return "    %s: (no data)" % label
+            lo, hi, mid = mm
+            return "    %s: min=%.4f max=%.4f mean=%.4f %s" % (label, lo, hi, mid, unit)
+
+        print()
+        print("  --- Leg motor sums (state_estimator measured_contact model) ---")
+        print(
+            "    Params: current_contact_threshold_a=%.4f  torque_contact_threshold_nm=%.4f"
+            % (thr_i, thr_tau)
+        )
+        print(
+            "    Trip rule: sum|I| >= thr_i*max(n,1) OR sum|tau| > thr_tau*max(n,1) "
+            "(n = motors on leg with valid samples)."
+        )
+        print(
+            "    Motors on this leg (from /legs/%s/motor_ids): %s"
+            % (self.leg_name, self._leg_motor_ids)
+        )
+        print(
+            "    Note: phase 2 alone is often very short; use the 2+6+7 block to see "
+            "current/torque sums after the foot is loading (press + compliant + attached)."
+        )
+
+        blocks = [
+            summarize_phase(
+                1,
+                "TEST_LIFT_CLEARANCE (phase_id=1, includes operator pause)",
+                "lift",
+            ),
+            summarize_phase(2, "TEST_PRESS_CONTACT (phase_id=2 only)", "press_only"),
+            summarize_phases(
+                (2, 6, 7),
+                "Phases 2+6+7 (press + COMPLIANT_SETTLE + ATTACHED_HOLD; wall load)",
+                "wall_load",
+            ),
+        ]
+        for block in blocks:
+            print("  %s — logged samples: %d" % (block["title"], block["n_rows"]))
+            if block["n_rows"] == 0:
+                print("    (no samples in this phase)")
+                continue
+            print(fmt_mm("sum|motor current|", block["cur_mm"], "A"))
+            print(fmt_mm("sum|joint effort| ", block["tau_mm"], "Nm"))
+            denom = float(block["n_rows"]) if block["n_rows"] else 1.0
+            print(
+                "    measured_contact would be true on: current-only %d/%d (%.1f%%), "
+                "torque-only %d/%d (%.1f%%), either %d/%d (%.1f%%)"
+                % (
+                    block["n_cur_trip"],
+                    block["n_rows"],
+                    100.0 * block["n_cur_trip"] / denom,
+                    block["n_tau_trip"],
+                    block["n_rows"],
+                    100.0 * block["n_tau_trip"] / denom,
+                    block["n_either"],
+                    block["n_rows"],
+                    100.0 * block["n_either"] / denom,
+                )
+            )
+            n0 = max(len(self._leg_motor_ids), 1)
+            if block["phase_id"] == 1 and block["cur_mm"] is not None and n0 > 0:
+                line_i = thr_i * float(n0)
+                hi = block["cur_mm"][1]
+                print(
+                    "    Lift (false contact): keep max(sum|I|) below trip line ~%.4f A "
+                    "(=%.4f * %d); max observed=%.4f A, headroom=%.4f A"
+                    % (line_i, thr_i, n0, hi, line_i - hi)
+                )
+            if block["phase_id"] == 1 and block["tau_mm"] is not None and n0 > 0:
+                line_t = thr_tau * float(n0)
+                hi = block["tau_mm"][1]
+                print(
+                    "    Lift (false contact): max(sum|tau|) trip line ~%.4f Nm "
+                    "(=%.4f * %d); max observed=%.4f Nm, headroom=%.4f Nm"
+                    % (line_t, thr_tau, n0, hi, line_t - hi)
+                )
+            if block["block_kind"] in ("press_only", "wall_load") and block["cur_mm"] is not None and n0 > 0:
+                line_i = thr_i * float(n0)
+                hi = block["cur_mm"][1]
+                excess = hi - line_i
+                if excess >= 0.0:
+                    note = "excess above trip line +%.4f A (good for detection)" % excess
+                else:
+                    note = "shortfall below trip line %.4f A (raise signal or lower thr_i)" % excess
+                label = "Wall load" if block["block_kind"] == "wall_load" else "Press-only"
+                print(
+                    "    %s: max(sum|I|)=%.4f A vs trip ~%.4f A (=%.4f * %d) — %s"
+                    % (label, hi, line_i, thr_i, n0, note)
+                )
+            if block["block_kind"] in ("press_only", "wall_load") and block["tau_mm"] is not None and n0 > 0:
+                line_t = thr_tau * float(n0)
+                hi = block["tau_mm"][1]
+                excess = hi - line_t
+                if excess > 0.0:
+                    note = "excess above trip line +%.4f Nm (good for detection)" % excess
+                else:
+                    note = "shortfall below trip line %.4f Nm (raise signal or lower thr_tau)" % excess
+                label = "Wall load" if block["block_kind"] == "wall_load" else "Press-only"
+                print(
+                    "    %s: max(sum|tau|)=%.4f Nm vs trip ~%.4f Nm (=%.4f * %d) — %s"
+                    % (label, hi, line_t, thr_tau, n0, note)
+                )
+
     def print_summary(self):
         self._compute_admittance_metrics()
+        self._print_contact_model_stats()
         print()
         print("=" * 76)
         print("Swing-leg admittance test summary - leg=%s" % self.leg_name)

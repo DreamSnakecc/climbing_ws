@@ -105,8 +105,8 @@ state_estimator:
   angular_velocity_alpha: 0.35
   support_force_threshold_n: 5.0
   adhesion_force_threshold_n: 10.0
-  current_contact_threshold_a: 0.4
-  torque_contact_threshold_nm: 0.5
+  current_contact_threshold_a: 0.2
+  torque_contact_threshold_nm: 0.25
   # Torque/current/fan-current derived contact states feed the guided swing attachment state machine.
   slip_warning_ratio: 0.75
   early_contact_phase_threshold: 0.5
@@ -216,6 +216,9 @@ swing_leg_controller:
   compliant_force_deadband_n: 1.0
   compliant_force_limit_n: 80.0
   compliant_force_sign: 1.0
+  # false: enter COMPLIANT_SETTLE and start admittance immediately (can sync with fan start).
+  # true : wait for measured_contact / wall_touch to be stable for contact_hold_min_s first.
+  compliant_start_requires_contact: false
   contact_hold_min_s: 0.04
   jacobian_delta_rad: 0.001
 

@@ -213,6 +213,7 @@ class SwingLegController(object):
         self.compliant_force_deadband_n = max(float(get_cfg("compliant_force_deadband_n", 1.0)), 0.0)
         self.compliant_force_limit_n = max(float(get_cfg("compliant_force_limit_n", 80.0)), self.compliant_force_deadband_n)
         self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
+        self.compliant_start_requires_contact = bool(get_cfg("compliant_start_requires_contact", False))
         self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
         self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
 
@@ -998,7 +999,9 @@ class SwingLegController(object):
             support_leg = False
         elif phase == self.PHASE_COMPLIANT_SETTLE:
             contact_active = measured_contact or wall_touch
-            if self._contact_hold_satisfied(state, contact_active, now_sec):
+            contact_stable = self._contact_hold_satisfied(state, contact_active, now_sec)
+            admittance_enabled = contact_stable if self.compliant_start_requires_contact else True
+            if admittance_enabled:
                 measured_force_n = self._estimate_leg_normal_force(leg_name, state)
                 normal_offset, normal_velocity = self._update_normal_admittance(state, measured_force_n, dt)
                 target_normal_scalar = vector_dot(state["preload_target"], self.wall_normal_body) + normal_offset
