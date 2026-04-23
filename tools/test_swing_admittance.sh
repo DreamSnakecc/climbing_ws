@@ -22,7 +22,7 @@ LIFT_M="${LIFT_M:-0.04}"
 PRESS_M="${PRESS_M:-0.045}"
 FAN_RPM="${FAN_RPM:-30000}"
 FAN_MODE="${FAN_MODE:-2}"
-FAN_ON_PHASE_ID="${FAN_ON_PHASE_ID:-2}"
+FAN_ON_PHASE_ID="${FAN_ON_PHASE_ID:-6}"
 HOLD_ADHESION_S="${HOLD_ADHESION_S:-2.0}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-30.0}"
 CONTROL_RATE_HZ="${CONTROL_RATE_HZ:-100.0}"
@@ -46,7 +46,7 @@ Options:
     --press METERS             downward press distance after lift; final normal offset is (lift-press) (default: 0.045)
     --fan-rpm VALUE            fan RPM during press/settle (default: 30000)
     --fan-mode {0,1,2}         AdhesionCommand mode while boosting (default: 2)
-    --fan-on-phase-id ID       phase id after which fan boost kicks in (default: 2 = TEST_PRESS_CONTACT)
+    --fan-on-phase-id ID       phase id 及以后开风机（默认: 6 = COMPLIANT_SETTLE，与导纳同步启动）
     --hold-adhesion-s SEC      hold after attachment/adhesion latches (default: 2.0)
     --test-timeout-s SEC       overall safety timeout (default: 30.0)
     --control-rate-hz VAL      BodyReference publish rate (default: 100)
@@ -261,6 +261,10 @@ echo "  leg=$LEG lift=$LIFT_M press=$PRESS_M (press_target_from_nominal=${PRESS_
 echo "  fan_mode=$FAN_MODE fan_on_phase_id=$FAN_ON_PHASE_ID"
 echo "  hold_adhesion_s=$HOLD_ADHESION_S test_timeout_s=$TEST_TIMEOUT_S"
 echo "  output_dir=$OUTPUT_DIR"
+if [[ "$FAN_ON_PHASE_ID" =~ ^-?[0-9]+$ ]] && (( FAN_ON_PHASE_ID < 6 )); then
+    echo "  [WARN] fan_on_phase_id=$FAN_ON_PHASE_ID < 6，风机将早于 COMPLIANT_SETTLE 启动。"
+    echo "  [WARN] 建议默认保持 6（到达下压位并进入导纳时同步点火）。"
+fi
 echo
 
 PYTHON_ARGS=(

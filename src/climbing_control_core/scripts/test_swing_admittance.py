@@ -207,10 +207,12 @@ class SwingAdmittanceTest(object):
             "first_fan_command_time": None,
             "max_skirt_compression": 0.0,
             "max_compliant_force_n": 0.0,
-            # Peak inward admittance travel (magnitude); offset is clamped to [-limit, 0],
-            # so the sign is always non-positive in the raw diagnostic stream.
+            # Bidirectional admittance: offset floats in [-limit, +limit]. Track peak magnitude
+            # for the legacy "compliance range" readout plus both signed extremes so the summary
+            # tells you whether the leg was pushed inward (-), retracted outward (+), or both.
             "max_compliant_offset_m": 0.0,
             "min_compliant_offset_signed_m": 0.0,
+            "max_compliant_offset_signed_m": 0.0,
             "max_estimated_leg_normal_force_n": 0.0,
             "max_fan_current_a": 0.0,
             "max_cmd_normal_from_nominal_m": 0.0,
@@ -590,14 +592,18 @@ class SwingAdmittanceTest(object):
             )
         offset = row.get("compliant_normal_offset_m")
         if offset is not None:
-            # Inward admittance offset is <= 0; track peak magnitude so legacy metrics still
-            # surface "deepest comply distance", plus the signed extremum for sanity checks.
+            # Bidirectional admittance: offset in [-limit, +limit]. Track peak magnitude plus
+            # both signed extremes so the summary can distinguish retraction (+) from extension
+            # (-) and flag lopsided compliance.
             offset_f = float(offset)
             self.highlights["max_compliant_offset_m"] = max(
                 self.highlights["max_compliant_offset_m"], abs(offset_f)
             )
             self.highlights["min_compliant_offset_signed_m"] = min(
                 self.highlights["min_compliant_offset_signed_m"], offset_f
+            )
+            self.highlights["max_compliant_offset_signed_m"] = max(
+                self.highlights["max_compliant_offset_signed_m"], offset_f
             )
         est_force = row.get("estimated_leg_normal_force_n")
         if est_force is not None:
@@ -811,36 +817,19 @@ class SwingAdmittanceTest(object):
                     "[test_swing_admittance] hold released; controller will transition LIFT->PRESS"
                 )
 
-            # Fan is gated on controller-confirmed wall contact rather than phase id alone: the
-            # swing_leg_controller now samples a PRESS-phase torque/current baseline and
-            # publishes press_contact_confirmed once the leg actually touches the wall. This
-            # guarantees the fan never turns on while the leg is still in free air (which would
-            # pollute the delta-contact baseline for subsequent cycles) and never stays off when
-            # the leg has already compressed the skirt.
-            press_contact_confirmed_flag = self._get_diag_field("press_contact_confirmed")
-            contact_confirmed = (
-                press_contact_confirmed_flag is not None
-                and float(press_contact_confirmed_flag) >= 0.5
+            # Fan gating is phase-based: once the leg reaches press target and the controller
+            # advances into COMPLIANT_SETTLE, enable fan boost. This keeps fan start aligned with
+            # admittance start.
+            should_boost_fan = (
+                phase_id_int is not None and phase_id_int >= self.fan_on_phase_id
             )
-            # Legacy phase-id bypass kept for debugging: any non-negative --fan-on-phase-id
-            # arms an additional OR gate that turns the fan on as soon as the controller reports
-            # it entered that phase, independent of the delta-contact detector. Pass -1 (or any
-            # negative value) to rely solely on press_contact_confirmed.
-            legacy_phase_gate = (
-                self.fan_on_phase_id >= 0
-                and phase_id_int is not None
-                and phase_id_int >= self.fan_on_phase_id
-            )
-            should_boost_fan = contact_confirmed or legacy_phase_gate
             if should_boost_fan:
                 if not self.fan_commanded:
-                    trigger_reason = "contact_confirmed" if contact_confirmed else "phase_bypass"
                     rospy.loginfo(
-                        "[test_swing_admittance] entering fan boost mode=%d rpm=%.0f at phase=%s (trigger=%s)",
+                        "[test_swing_admittance] entering fan boost mode=%d rpm=%.0f at phase=%s",
                         self.fan_mode,
                         self.fan_rpm,
                         PHASE_NAMES.get(phase_id_int, str(phase_id_int)),
-                        trigger_reason,
                     )
                 if self.highlights["first_fan_command_time"] is None:
                     self.highlights["first_fan_command_time"] = now - start_wall
@@ -1278,13 +1267,14 @@ class SwingAdmittanceTest(object):
         print()
         print("  max skirt compression est         : %.3f" % self.highlights["max_skirt_compression"])
         print("  max compliant filtered force (N)  : %.2f" % self.highlights["max_compliant_force_n"])
-        # Admittance now complies inward-only: offset is clamped to [-limit, 0]. Report the peak
-        # inward travel as a positive magnitude, plus the signed extremum for clarity.
+        # Bidirectional admittance: offset in [-limit, +limit]. Show peak magnitude plus signed
+        # min/max so the reviewer can tell direction of compliance at a glance.
         print(
-            "  peak inward admittance travel (m) : %.4f  (signed offset min %.4f)"
+            "  compliant normal offset (m)       : |peak|=%.4f  signed=[%+.4f, %+.4f]"
             % (
                 self.highlights["max_compliant_offset_m"],
                 self.highlights["min_compliant_offset_signed_m"],
+                self.highlights["max_compliant_offset_signed_m"],
             )
         )
         print(
@@ -1311,21 +1301,19 @@ class SwingAdmittanceTest(object):
         settling_t = self.highlights.get("admittance_settling_time_s")
         std_n = self.highlights.get("admittance_steady_state_std_n")
         max_offset = self.highlights.get("max_compliant_offset_m")
-        # The admittance now complies inward (toward the wall) to follow fan-skirt compression.
-        # "Peak" is the largest |inward force|, "settled" is the steady residual the loop
-        # regulates to; reduction = peak - settled still expresses how much of the initial
-        # inward load the compliant controller relaxed by extending the leg into the wall.
-        print("    peak inward contact force (N)     : %s at %s"
+        # Bidirectional admittance summary. "Peak" uses |force| so the magnitude is unambiguous
+        # regardless of which side the compliance happened on; "settled_signed" offset keeps the
+        # sign so the direction of the final compliance (retract / extend) is immediately
+        # readable.
+        print("    peak contact |force| (N)          : %s at %s"
               % (_fmt_opt(peak_f, "%.2f"), _fmt_time(peak_f_t)))
-        print("    steady-state inward force (N)     : %s" % _fmt_opt(settled_f, "%.2f"))
-        print("    force relief by admittance (N)    : %s (%s%%)"
+        print("    steady-state |force| (N)          : %s" % _fmt_opt(settled_f, "%.2f"))
+        print("    |force| relief by admittance (N)  : %s (%s%%)"
               % (
                   _fmt_opt(reduction_n, "%.2f"),
                   _fmt_opt(None if reduction_ratio is None else reduction_ratio * 100.0, "%.1f"),
               ))
-        # settled_offset is signed (<= 0). Show it verbatim next to the magnitude so the log
-        # tells you both "how far inward we ended up" and "the direction is correct".
-        print("    admittance inward travel (m)      : peak=%s settled_signed=%s"
+        print("    admittance travel (m)             : |peak|=%s settled_signed=%s"
               % (_fmt_opt(max_offset, "%.4f"), _fmt_opt(settled_offset, "%+.4f")))
         print("    force settling time (s)           : %s" % _fmt_opt(settling_t, "%.3f"))
         print("    attached-hold force std (N)       : %s" % _fmt_opt(std_n, "%.3f"))
@@ -1341,24 +1329,26 @@ class SwingAdmittanceTest(object):
         print("=" * 76)
 
     def _compute_admittance_metrics(self):
-        """Distill the inward admittance-control effect from the recorded samples.
+        """Distill the bidirectional admittance-control effect from the recorded samples.
 
-        Sign convention (post 2026-04 refactor): compliant_normal_offset is clamped to
-        [-limit, 0]; it grows more negative as the leg extends inward along -wall_normal
-        to follow fan-induced skirt compression. "Force" metrics below use |force| so the
-        values read naturally in the summary regardless of the signed projection.
+        Sign convention (post 2026-04 revision): compliant_normal_offset floats in
+        [-limit, +limit]; positive offsets retract the leg along +wall_normal (outward from
+        the wall), negative offsets extend it along -wall_normal. "Force" metrics below use
+        |force| so the magnitude is unambiguous; "settled_offset" keeps its sign so the
+        direction of the final compliance is readable from the summary.
 
         Metrics computed (written back into self.highlights):
           * admittance_peak_force_n / _time        : max |measured normal force| during
-                COMPLIANT_SETTLE + ATTACHED_HOLD (post delta-contact confirmation).
+                COMPLIANT_SETTLE + ATTACHED_HOLD (post press-target reach / fan start).
           * admittance_settled_force_n             : mean |force| over the last settle
                 window (default 0.5 s of ATTACHED_HOLD, else the last 0.5 s of
                 COMPLIANT_SETTLE).
-          * admittance_settled_offset_m            : mean compliant_normal_offset (signed,
-                <= 0) over the same settle window; a value close to -offset_limit means
-                the loop is saturated and the leg is maximally extended.
-          * admittance_force_reduction_n / _ratio  : peak - settled (how much of the
-                initial inward load the compliant loop relaxed by extending inward).
+          * admittance_settled_offset_m            : mean compliant_normal_offset (signed)
+                over the same settle window; near +/-offset_limit means the loop is
+                saturated in that direction.
+          * admittance_force_reduction_n / _ratio  : peak - settled |force| (how much of
+                the initial contact load the compliant loop relaxed, either by retracting
+                outward or extending inward).
           * admittance_settling_time_s             : time from peak-force instant until
                 |force| stays within 25% of settled value for >=0.25 s.
           * admittance_steady_state_std_n          : std of |force| over the settle
@@ -1552,12 +1542,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--fan-on-phase-id",
         type=int,
-        default=-1,
+        default=6,
         help=(
-            "debug bypass: fan is OR-gated on with phase_id >= fan_on_phase_id. "
-            "Default -1 disables the phase gate so the fan is driven solely by the "
-            "controller's press_contact_confirmed (delta-torque/current) flag. "
-            "Set e.g. 2 to additionally force-on at TEST_PRESS_CONTACT for A/B debugging."
+            "phase id at/after which fan is commanded on (default: 6 = COMPLIANT_SETTLE, "
+            "synchronized with admittance start)."
         ),
     )
     parser.add_argument(

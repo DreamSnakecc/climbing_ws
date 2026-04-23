@@ -666,15 +666,17 @@ class SwingLegController(object):
         return clamp(signed_normal_force, -self.compliant_force_limit_n, self.compliant_force_limit_n)
 
     def _update_normal_admittance(self, state, measured_force_n, dt):
-        # Inward-only admittance: comply with the "body pulled toward the wall" load produced by
-        # fan-vacuum-induced skirt compression. wall_normal_body points away from the wall, so an
-        # inward body-force (along -n) projects to a negative signed_normal_force in
-        # _estimate_leg_normal_force. We drive the admittance only on the inward half of the signal;
-        # outward reaction loads are intentionally ignored here (upstream normal-force limits and
-        # position clamps still protect the leg).
+        # Bidirectional admittance around the nominal preload point: the offset floats in
+        # [-offset_limit, +offset_limit] along wall_normal_body so the leg can either retract
+        # (outward, +n) when the wall over-reacts or extend (inward, -n) when skirt vacuum
+        # out-pulls the command. A symmetric deadband suppresses both-sign noise below
+        # compliant_force_deadband_n; above it, effective_force preserves the sign of
+        # filtered_force (classic sign-preserving deadband).
         filtered_force = (1.0 - self.compliant_force_filter_alpha) * float(state["compliant_force_estimate"]) + self.compliant_force_filter_alpha * float(measured_force_n)
         state["compliant_force_estimate"] = filtered_force
-        if filtered_force < -self.compliant_force_deadband_n:
+        if filtered_force > self.compliant_force_deadband_n:
+            effective_force = min(filtered_force - self.compliant_force_deadband_n, self.compliant_force_limit_n)
+        elif filtered_force < -self.compliant_force_deadband_n:
             effective_force = max(filtered_force + self.compliant_force_deadband_n, -self.compliant_force_limit_n)
         else:
             effective_force = 0.0
@@ -687,10 +689,12 @@ class SwingLegController(object):
         next_velocity = float(state["compliant_normal_velocity"]) + acceleration * dt
         next_velocity = clamp(next_velocity, -self.compliant_normal_velocity_limit_mps, self.compliant_normal_velocity_limit_mps)
         next_offset = float(state["compliant_normal_offset"]) + next_velocity * dt
-        # Offset is non-positive: leg may only extend along -n (toward the wall) to follow skirt
-        # compression; applied via target_normal_scalar = preload.n + normal_offset, with offset <= 0.
-        next_offset = clamp(next_offset, -self.compliant_normal_offset_limit_m, 0.0)
-        if next_offset >= 0.0 and next_velocity > 0.0:
+        # Two-sided clamp: positive offset retracts the leg along +n, negative offset extends it
+        # along -n. Upstream position clamps still bound the raw foot command.
+        next_offset = clamp(next_offset, -self.compliant_normal_offset_limit_m, self.compliant_normal_offset_limit_m)
+        if next_offset >= self.compliant_normal_offset_limit_m and next_velocity > 0.0:
+            next_velocity = 0.0
+        if next_offset <= -self.compliant_normal_offset_limit_m and next_velocity < 0.0:
             next_velocity = 0.0
 
         state["compliant_normal_velocity"] = next_velocity
@@ -1034,74 +1038,25 @@ class SwingLegController(object):
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_TEST_PRESS_CONTACT:
-            # Delta-based touchdown detection: capture sum|effort|/sum|current| baseline on the
-            # first PRESS tick (leg just released from LIFT static hold, still in free air), then
-            # watch for upward deviation. LIFT-phase motion produces larger absolute joint effort
-            # than the PRESS static set-point, so an absolute threshold under-performs in both
-            # directions -- the change from the in-air zero is the physically meaningful signal.
-            torque_sum_now = self._leg_torque_sum_nm(leg_name)
-            current_sum_now = self._leg_current_sum_a(leg_name)
-            if state.get("press_torque_sum_baseline") is None:
-                state["press_torque_sum_baseline"] = float(torque_sum_now)
-                state["press_current_sum_baseline"] = float(current_sum_now)
-                state["press_contact_confirmed"] = False
-                state["press_contact_confirmed_at"] = None
-                state["press_torque_delta"] = 0.0
-                state["press_current_delta"] = 0.0
-
-            baseline_torque = float(state.get("press_torque_sum_baseline") or 0.0)
-            baseline_current = float(state.get("press_current_sum_baseline") or 0.0)
-            torque_delta = max(0.0, float(torque_sum_now) - baseline_torque)
-            current_delta = max(0.0, float(current_sum_now) - baseline_current)
-            state["press_torque_delta"] = torque_delta
-            state["press_current_delta"] = current_delta
-
-            n_valid = max(len(self.leg_to_motors.get(leg_name, [])), 1)
-            torque_trip = self.press_contact_torque_delta_nm > 0.0 and torque_delta >= self.press_contact_torque_delta_nm * n_valid
-            current_trip = self.press_contact_current_delta_a > 0.0 and current_delta >= self.press_contact_current_delta_a * n_valid
-            if self.press_contact_require_both:
-                contact_detected = bool(torque_trip and current_trip)
-            else:
-                contact_detected = bool(torque_trip or current_trip)
-
+            # No explicit touchdown detection here: once PRESS target is reached (and optional
+            # dwell is satisfied), we immediately enter COMPLIANT_SETTLE. The fan test harness
+            # keys off phase progression so fan start and admittance start happen together.
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["press_target"], self.test_press_velocity_limit, dt)
             aligned = abs(self._normal_error(state["press_target"], cmd_position)) <= self.normal_alignment_tolerance_m
+            if state.get("press_torque_sum_baseline") is None:
+                # Keep these diagnostic fields populated for logging compatibility, but they no
+                # longer gate phase transitions.
+                torque_sum_now = self._leg_torque_sum_nm(leg_name)
+                current_sum_now = self._leg_current_sum_a(leg_name)
+                state["press_torque_sum_baseline"] = float(torque_sum_now)
+                state["press_current_sum_baseline"] = float(current_sum_now)
+                state["press_torque_delta"] = 0.0
+                state["press_current_delta"] = 0.0
+                self._capture_compliant_torque_bias(leg_name, state)
 
-            if contact_detected and not state.get("press_contact_confirmed", False):
-                # Freeze the command exactly where the leg first registered contact so we don't
-                # keep pushing deeper into the wall. Adopt this position as the downstream
-                # preload / attach anchor so COMPLIANT_SETTLE builds its inward-admittance offset
-                # relative to the true contact depth.
+            if aligned and phase_elapsed >= self.test_press_dwell_s:
                 state["press_contact_confirmed"] = True
                 state["press_contact_confirmed_at"] = now_sec
-                contact_position = list(cmd_position)
-                state["press_target"] = self._clamp_position(contact_position)
-                state["preload_target"] = self._clamp_position(contact_position)
-                state["attach_target"] = self._clamp_position(contact_position)
-                cmd_position = list(state["press_target"])
-                cmd_velocity = [0.0, 0.0, 0.0]
-                rospy.loginfo(
-                    "swing_leg_controller PRESS delta-contact confirmed for %s (dtau=%.3f Nm, dI=%.3f A)",
-                    leg_name,
-                    torque_delta,
-                    current_delta,
-                )
-                self._capture_compliant_torque_bias(leg_name, state)
-                self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
-            elif aligned and phase_elapsed >= self.test_press_dwell_s:
-                # Fallback: PRESS target reached without a delta trip. Advance to COMPLIANT_SETTLE
-                # so the state machine doesn't stall, but log a warning -- the fan-gate consumer
-                # will not see press_contact_confirmed and therefore will not turn on.
-                rospy.logwarn_throttle(
-                    2.0,
-                    "swing_leg_controller PRESS reached target without delta-contact for %s (dtau=%.3f/%.3f Nm, dI=%.3f/%.3f A)",
-                    leg_name,
-                    torque_delta,
-                    self.press_contact_torque_delta_nm * n_valid,
-                    current_delta,
-                    self.press_contact_current_delta_a * n_valid,
-                )
-                self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
             elif aligned:
                 cmd_position = list(state["press_target"])

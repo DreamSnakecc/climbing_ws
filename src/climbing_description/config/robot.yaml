@@ -168,8 +168,8 @@ swing_leg_controller:
   slip_clearance_gain: 0.5
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  foot_delta_x_limit_m: 0.10
-  foot_delta_y_limit_m: 0.10
+  foot_delta_x_limit_m: 0.25
+  foot_delta_y_limit_m: 0.25
   nominal_skirt_compression_target: 0.0
   swing_skirt_compression_target: 0.0
   max_position_offset_m: [0.045, 0.035, 0.05]
@@ -207,19 +207,22 @@ swing_leg_controller:
   test_lift_dwell_s: 0.0
   test_press_dwell_s: 0.0
   # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
-  # Convention: admittance is inward-only. The offset grows along -wall_normal_body (toward the
-  # wall) to follow skirt compression produced by fan adhesion. filtered_force < -deadband
-  # drives the offset negative; offset clamps to [-compliant_normal_offset_limit_m, 0].
+  # Convention: admittance is bidirectional. The offset floats in
+  # [-compliant_normal_offset_limit_m, +compliant_normal_offset_limit_m] along wall_normal_body,
+  # so filtered_force > +deadband retracts the leg outward (+n) and filtered_force < -deadband
+  # extends it inward (-n). The sign the leg sees at the wall depends on the skirt-fan
+  # interplay; we don't pick a direction in advance.
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.012
   compliant_admittance_mass: 0.35
   compliant_admittance_damping: 18.0
   compliant_admittance_stiffness: 120.0
   compliant_force_filter_alpha: 0.35
-  # Deadband on the inward (negative) component of the filtered force projected onto the wall
-  # normal. Only |filtered_force| above this value in the inward direction drives admittance.
+  # Symmetric deadband (N) on |filtered_force|: below this magnitude both directions are
+  # treated as noise and effective_force = 0; above it the sign of filtered_force is
+  # preserved, clamped in magnitude to compliant_force_limit_n.
   compliant_force_deadband_n: 0.5
-  compliant_force_limit_n: 80.0
+  compliant_force_limit_n: 200.0
   compliant_force_sign: 1.0
   # false: enter COMPLIANT_SETTLE and start admittance immediately (can sync with fan start).
   # true : wait for measured_contact / wall_touch to be stable for contact_hold_min_s first.
