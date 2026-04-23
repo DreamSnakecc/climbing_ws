@@ -38,6 +38,9 @@ class MissionSupervisor(object):
         self.touchdown_rpm = float(get_cfg("touchdown_rpm", 3400.0))
         self.touchdown_boost_duration_s = max(float(get_cfg("touchdown_boost_duration_s", 0.25)), 0.0)
         self.pre_attach_time_s = max(float(get_cfg("pre_attach_time_s", 0.12)), 0.0)
+        self.boost_after_preload_without_contact = bool(
+            get_cfg("boost_after_preload_without_contact", False)
+        )
         self.swing_duration_s = max(float(get_cfg("swing_duration_s", rospy.get_param("/swing_leg_controller/swing_duration_s", 0.65))), 0.1)
         self.default_normal_force_limit = float(get_cfg("default_normal_force_limit", rospy.get_param("/wall/max_normal_force_n", 150.0)))
         self.preload_normal_force_limit_n = float(
@@ -240,6 +243,8 @@ class MissionSupervisor(object):
 
         if attachment_ready or adhesion_ready:
             return 1, self._scale_rpm_by_required_adhesion(self.climb_rpm, leg_name)
+        if self.boost_after_preload_without_contact and post_preload:
+            return 2, self._scale_rpm_by_required_adhesion(self.touchdown_rpm, leg_name)
         if contact_stable:
             return 2, self._scale_rpm_by_required_adhesion(self.touchdown_rpm, leg_name)
         if fan_current > 0.05:

@@ -1,0 +1,33 @@
+<launch>
+  <!--
+    Test launch for the whole-body crawl gait.
+
+    Loads the standard robot config and then overrides
+      /gait_controller/nominal_universal_joint_center_z
+    to the requested value (default -80 mm) BEFORE the PC-side control stack
+    starts, so body_planner / swing_leg_controller / state_estimator pick up
+    the override at init time.
+
+    mission_auto_start is left False so the test script owns the transition
+    INIT -> STICK -> CLIMB via /control/mission_start, but
+    enable_auto_adhesion_commands is True so mission_supervisor drives the
+    fans throughout the crawl (the swing-leg / fan coordination under test).
+  -->
+
+  <arg name="ujc_z_mm" default="-80.0" />
+  <arg name="enable_state_logger" default="false" />
+  <arg name="mission_auto_start" default="false" />
+  <arg name="enable_auto_adhesion_commands" default="true" />
+  <arg name="boost_after_preload_without_contact" default="true" />
+
+  <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
+  <param name="/gait_controller/nominal_universal_joint_center_z" value="$(arg ujc_z_mm)" type="double" />
+  <param name="/mission_supervisor/boost_after_preload_without_contact" value="$(arg boost_after_preload_without_contact)" type="bool" />
+  <param name="/swing_leg_controller/compliant_start_requires_contact" value="false" type="bool" />
+
+  <include file="$(find climbing_bringup)/launch/pc_bringup.launch">
+    <arg name="enable_state_logger" value="$(arg enable_state_logger)" />
+    <arg name="mission_auto_start" value="$(arg mission_auto_start)" />
+    <arg name="enable_auto_adhesion_commands" value="$(arg enable_auto_adhesion_commands)" />
+  </include>
+</launch>
