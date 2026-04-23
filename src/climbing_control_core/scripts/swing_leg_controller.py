@@ -215,6 +215,12 @@ class SwingLegController(object):
         self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
         self.compliant_start_requires_contact = bool(get_cfg("compliant_start_requires_contact", False))
         self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
+        # PRESS-phase delta-contact detector: baseline (sum|joint effort|, sum|joint current|) is
+        # captured on the first PRESS tick (leg just came off static LIFT hold, still in free air),
+        # then contact is confirmed when either aggregate rises above its per-motor threshold x N.
+        self.press_contact_torque_delta_nm = max(float(get_cfg("press_contact_torque_delta_nm", 0.10)), 0.0)
+        self.press_contact_current_delta_a = max(float(get_cfg("press_contact_current_delta_a", 0.20)), 0.0)
+        self.press_contact_require_both = bool(get_cfg("press_contact_require_both", False))
         self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
@@ -282,6 +288,12 @@ class SwingLegController(object):
                 "test_override_value": None,
                 "test_press_value": None,
                 "test_experiment_active": False,
+                "press_torque_sum_baseline": None,
+                "press_current_sum_baseline": None,
+                "press_contact_confirmed": False,
+                "press_contact_confirmed_at": None,
+                "press_torque_delta": 0.0,
+                "press_current_delta": 0.0,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -322,6 +334,13 @@ class SwingLegController(object):
             "test_experiment_active",
             "test_hold_at_lift",
             "test_lift_aligned",
+            "leg_torque_sum_nm",
+            "leg_current_sum_a",
+            "press_torque_baseline_nm",
+            "press_current_baseline_a",
+            "press_torque_delta_nm",
+            "press_current_delta_a",
+            "press_contact_confirmed",
         ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -591,6 +610,35 @@ class SwingLegController(object):
             torque_vector.append(float(joint_torques[joint_index]))
         return torque_vector
 
+    def _aggregate_leg_abs_sum(self, leg_name, values):
+        """Sum of |values[joint_index]| over this leg's motor ids.
+
+        Mirrors state_estimator._aggregate_leg_scalar so the delta-contact detector matches
+        the same raw-effort / raw-current units used elsewhere. Returns (total, count).
+        """
+        motor_ids = self.leg_to_motors.get(leg_name, [])
+        total = 0.0
+        count = 0
+        if not values:
+            return total, count
+        for motor_id in motor_ids:
+            joint_index = self.joint_name_to_index.get(str(int(motor_id)))
+            if joint_index is None or joint_index >= len(values):
+                continue
+            total += abs(float(values[joint_index]))
+            count += 1
+        return total, count
+
+    def _leg_torque_sum_nm(self, leg_name):
+        values = list(self.estimated_state.joint_torques_est) if self.estimated_state.joint_torques_est else []
+        total, _count = self._aggregate_leg_abs_sum(leg_name, values)
+        return total
+
+    def _leg_current_sum_a(self, leg_name):
+        values = list(self.estimated_state.joint_currents) if self.estimated_state.joint_currents else []
+        total, _count = self._aggregate_leg_abs_sum(leg_name, values)
+        return total
+
     def _capture_compliant_torque_bias(self, leg_name, state):
         torque_vector = self._leg_joint_torque_vector(leg_name)
         state["compliant_joint_torque_bias"] = list(torque_vector) if torque_vector is not None else [0.0, 0.0, 0.0]
@@ -618,10 +666,18 @@ class SwingLegController(object):
         return clamp(signed_normal_force, -self.compliant_force_limit_n, self.compliant_force_limit_n)
 
     def _update_normal_admittance(self, state, measured_force_n, dt):
+        # Inward-only admittance: comply with the "body pulled toward the wall" load produced by
+        # fan-vacuum-induced skirt compression. wall_normal_body points away from the wall, so an
+        # inward body-force (along -n) projects to a negative signed_normal_force in
+        # _estimate_leg_normal_force. We drive the admittance only on the inward half of the signal;
+        # outward reaction loads are intentionally ignored here (upstream normal-force limits and
+        # position clamps still protect the leg).
         filtered_force = (1.0 - self.compliant_force_filter_alpha) * float(state["compliant_force_estimate"]) + self.compliant_force_filter_alpha * float(measured_force_n)
         state["compliant_force_estimate"] = filtered_force
-        effective_force = max(0.0, filtered_force - self.compliant_force_deadband_n)
-        effective_force = min(effective_force, self.compliant_force_limit_n)
+        if filtered_force < -self.compliant_force_deadband_n:
+            effective_force = max(filtered_force + self.compliant_force_deadband_n, -self.compliant_force_limit_n)
+        else:
+            effective_force = 0.0
 
         acceleration = (
             effective_force
@@ -631,8 +687,10 @@ class SwingLegController(object):
         next_velocity = float(state["compliant_normal_velocity"]) + acceleration * dt
         next_velocity = clamp(next_velocity, -self.compliant_normal_velocity_limit_mps, self.compliant_normal_velocity_limit_mps)
         next_offset = float(state["compliant_normal_offset"]) + next_velocity * dt
-        next_offset = clamp(next_offset, 0.0, self.compliant_normal_offset_limit_m)
-        if next_offset <= 0.0 and next_velocity < 0.0:
+        # Offset is non-positive: leg may only extend along -n (toward the wall) to follow skirt
+        # compression; applied via target_normal_scalar = preload.n + normal_offset, with offset <= 0.
+        next_offset = clamp(next_offset, -self.compliant_normal_offset_limit_m, 0.0)
+        if next_offset >= 0.0 and next_velocity > 0.0:
             next_velocity = 0.0
 
         state["compliant_normal_velocity"] = next_velocity
@@ -839,6 +897,12 @@ class SwingLegController(object):
         state["contact_active_since"] = None
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
+        state["press_torque_sum_baseline"] = None
+        state["press_current_sum_baseline"] = None
+        state["press_contact_confirmed"] = False
+        state["press_contact_confirmed_at"] = None
+        state["press_torque_delta"] = 0.0
+        state["press_current_delta"] = 0.0
         if override_normal_travel is None:
             state["test_experiment_active"] = False
             self._set_phase(state, self.PHASE_DETACH_SLIDE, stamp_sec)
@@ -873,6 +937,12 @@ class SwingLegController(object):
         state["test_experiment_active"] = False
         state["test_hold_at_lift"] = False
         state["test_lift_aligned"] = False
+        state["press_torque_sum_baseline"] = None
+        state["press_current_sum_baseline"] = None
+        state["press_contact_confirmed"] = False
+        state["press_contact_confirmed_at"] = None
+        state["press_torque_delta"] = 0.0
+        state["press_current_delta"] = 0.0
         return self._build_message(
             leg_name,
             support_target,
@@ -964,9 +1034,73 @@ class SwingLegController(object):
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_TEST_PRESS_CONTACT:
+            # Delta-based touchdown detection: capture sum|effort|/sum|current| baseline on the
+            # first PRESS tick (leg just released from LIFT static hold, still in free air), then
+            # watch for upward deviation. LIFT-phase motion produces larger absolute joint effort
+            # than the PRESS static set-point, so an absolute threshold under-performs in both
+            # directions -- the change from the in-air zero is the physically meaningful signal.
+            torque_sum_now = self._leg_torque_sum_nm(leg_name)
+            current_sum_now = self._leg_current_sum_a(leg_name)
+            if state.get("press_torque_sum_baseline") is None:
+                state["press_torque_sum_baseline"] = float(torque_sum_now)
+                state["press_current_sum_baseline"] = float(current_sum_now)
+                state["press_contact_confirmed"] = False
+                state["press_contact_confirmed_at"] = None
+                state["press_torque_delta"] = 0.0
+                state["press_current_delta"] = 0.0
+
+            baseline_torque = float(state.get("press_torque_sum_baseline") or 0.0)
+            baseline_current = float(state.get("press_current_sum_baseline") or 0.0)
+            torque_delta = max(0.0, float(torque_sum_now) - baseline_torque)
+            current_delta = max(0.0, float(current_sum_now) - baseline_current)
+            state["press_torque_delta"] = torque_delta
+            state["press_current_delta"] = current_delta
+
+            n_valid = max(len(self.leg_to_motors.get(leg_name, [])), 1)
+            torque_trip = self.press_contact_torque_delta_nm > 0.0 and torque_delta >= self.press_contact_torque_delta_nm * n_valid
+            current_trip = self.press_contact_current_delta_a > 0.0 and current_delta >= self.press_contact_current_delta_a * n_valid
+            if self.press_contact_require_both:
+                contact_detected = bool(torque_trip and current_trip)
+            else:
+                contact_detected = bool(torque_trip or current_trip)
+
             cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["press_target"], self.test_press_velocity_limit, dt)
             aligned = abs(self._normal_error(state["press_target"], cmd_position)) <= self.normal_alignment_tolerance_m
-            if aligned and phase_elapsed >= self.test_press_dwell_s:
+
+            if contact_detected and not state.get("press_contact_confirmed", False):
+                # Freeze the command exactly where the leg first registered contact so we don't
+                # keep pushing deeper into the wall. Adopt this position as the downstream
+                # preload / attach anchor so COMPLIANT_SETTLE builds its inward-admittance offset
+                # relative to the true contact depth.
+                state["press_contact_confirmed"] = True
+                state["press_contact_confirmed_at"] = now_sec
+                contact_position = list(cmd_position)
+                state["press_target"] = self._clamp_position(contact_position)
+                state["preload_target"] = self._clamp_position(contact_position)
+                state["attach_target"] = self._clamp_position(contact_position)
+                cmd_position = list(state["press_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
+                rospy.loginfo(
+                    "swing_leg_controller PRESS delta-contact confirmed for %s (dtau=%.3f Nm, dI=%.3f A)",
+                    leg_name,
+                    torque_delta,
+                    current_delta,
+                )
+                self._capture_compliant_torque_bias(leg_name, state)
+                self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
+            elif aligned and phase_elapsed >= self.test_press_dwell_s:
+                # Fallback: PRESS target reached without a delta trip. Advance to COMPLIANT_SETTLE
+                # so the state machine doesn't stall, but log a warning -- the fan-gate consumer
+                # will not see press_contact_confirmed and therefore will not turn on.
+                rospy.logwarn_throttle(
+                    2.0,
+                    "swing_leg_controller PRESS reached target without delta-contact for %s (dtau=%.3f/%.3f Nm, dI=%.3f/%.3f A)",
+                    leg_name,
+                    torque_delta,
+                    self.press_contact_torque_delta_nm * n_valid,
+                    current_delta,
+                    self.press_contact_current_delta_a * n_valid,
+                )
                 self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
             elif aligned:
@@ -1087,6 +1221,16 @@ class SwingLegController(object):
             MultiArrayDimension(label=label, size=1, stride=len(self.diagnostic_field_labels))
             for label in self.diagnostic_field_labels
         ]
+        # Snapshot the PRESS-phase delta-contact detector so the observer (and the test harness
+        # that gates the fan) can follow what the controller saw tick-by-tick, without having to
+        # re-aggregate joint effort/current itself.
+        leg_torque_sum_now = self._leg_torque_sum_nm(leg_name)
+        leg_current_sum_now = self._leg_current_sum_a(leg_name)
+        press_torque_baseline_raw = state.get("press_torque_sum_baseline")
+        press_current_baseline_raw = state.get("press_current_sum_baseline")
+        press_torque_baseline = float(press_torque_baseline_raw) if press_torque_baseline_raw is not None else float("nan")
+        press_current_baseline = float(press_current_baseline_raw) if press_current_baseline_raw is not None else float("nan")
+
         msg.data = [
             float(leg_index),
             float(phase_id),
@@ -1105,6 +1249,13 @@ class SwingLegController(object):
             1.0 if bool(state.get("test_experiment_active", False)) else 0.0,
             1.0 if bool(state.get("test_hold_at_lift", False)) else 0.0,
             1.0 if bool(state.get("test_lift_aligned", False)) else 0.0,
+            float(leg_torque_sum_now),
+            float(leg_current_sum_now),
+            press_torque_baseline,
+            press_current_baseline,
+            float(state.get("press_torque_delta", 0.0)),
+            float(state.get("press_current_delta", 0.0)),
+            1.0 if bool(state.get("press_contact_confirmed", False)) else 0.0,
         ]
         publisher.publish(msg)
 

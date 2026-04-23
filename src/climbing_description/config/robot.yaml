@@ -207,13 +207,18 @@ swing_leg_controller:
   test_lift_dwell_s: 0.0
   test_press_dwell_s: 0.0
   # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
+  # Convention: admittance is inward-only. The offset grows along -wall_normal_body (toward the
+  # wall) to follow skirt compression produced by fan adhesion. filtered_force < -deadband
+  # drives the offset negative; offset clamps to [-compliant_normal_offset_limit_m, 0].
   compliant_normal_velocity_limit_mps: 0.035
-  compliant_normal_offset_limit_m: 0.008
+  compliant_normal_offset_limit_m: 0.012
   compliant_admittance_mass: 0.35
   compliant_admittance_damping: 18.0
   compliant_admittance_stiffness: 120.0
   compliant_force_filter_alpha: 0.35
-  compliant_force_deadband_n: 1.0
+  # Deadband on the inward (negative) component of the filtered force projected onto the wall
+  # normal. Only |filtered_force| above this value in the inward direction drives admittance.
+  compliant_force_deadband_n: 0.5
   compliant_force_limit_n: 80.0
   compliant_force_sign: 1.0
   # false: enter COMPLIANT_SETTLE and start admittance immediately (can sync with fan start).
@@ -221,6 +226,16 @@ swing_leg_controller:
   compliant_start_requires_contact: false
   contact_hold_min_s: 0.04
   jacobian_delta_rad: 0.001
+  # PRESS-phase delta-contact detector (swing-leg only): the first PRESS tick samples
+  # sum|joint effort| and sum|joint current| as the free-air baseline; contact is confirmed
+  # once either aggregate rises by at least (threshold * n_motors_on_leg). Defaults chosen to
+  # sit above sensor quantization noise but well below the full LIFT-motion signal so LIFT
+  # does not leak into the PRESS detector.
+  press_contact_torque_delta_nm: 0.10
+  press_contact_current_delta_a: 0.20
+  # OR by default: a single well-behaved channel is enough to declare contact. Set true to
+  # require both torque and current channels to trip simultaneously (more conservative).
+  press_contact_require_both: false
 
 jetson:
   command_rate_hz: 100.0
