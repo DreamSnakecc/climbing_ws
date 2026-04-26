@@ -122,7 +122,10 @@ class LegIkExecutor(object):
         self.startup_move_started = False
         self.startup_move_completed = False
 
-        self.targets_m = {name: Point(0.0, 0.0, self.nominal_universal_joint_center_z / 1000.0) for name in self.leg_order}
+        self.targets_m = {
+            name: self._operating_center_command(name)
+            for name in self.leg_order
+        }
         self.last_ticks = self.compute_all_ticks()
 
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self.command_callback, queue_size=50)
@@ -250,6 +253,25 @@ class LegIkExecutor(object):
         dx_leg = cos_yaw * dx_base_mm + sin_yaw * dy_base_mm
         dy_leg = -sin_yaw * dx_base_mm + cos_yaw * dy_base_mm
         return dx_leg, dy_leg
+
+    def _leg_delta_to_base_delta(self, dx_leg_mm, dy_leg_mm, leg):
+        cos_yaw = math.cos(leg.hip_yaw)
+        sin_yaw = math.sin(leg.hip_yaw)
+        dx_base = cos_yaw * dx_leg_mm - sin_yaw * dy_leg_mm
+        dy_base = sin_yaw * dx_leg_mm + cos_yaw * dy_leg_mm
+        return dx_base, dy_base
+
+    def _operating_center_command(self, leg_name):
+        """LegCenterCommand.center that maps to the operating UJC in leg frame 0."""
+        leg = self.legs[leg_name]
+        dx_leg_mm = self.operating_universal_joint_center_x - self.nominal_x
+        dy_leg_mm = self.operating_universal_joint_center_y - self.nominal_y
+        dx_base_mm, dy_base_mm = self._leg_delta_to_base_delta(dx_leg_mm, dy_leg_mm, leg)
+        return Point(
+            dx_base_mm / 1000.0,
+            dy_base_mm / 1000.0,
+            self.operating_universal_joint_center_z / 1000.0,
+        )
 
     def _clamp_joint_solution_deg(self, joint_solution_deg):
         return [
