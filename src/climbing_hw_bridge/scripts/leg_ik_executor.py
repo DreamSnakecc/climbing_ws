@@ -381,8 +381,10 @@ class LegIkExecutor(object):
         return ordered_ticks
 
     def _startup_move_progress(self, now_sec):
-        if not self.startup_target_enabled or self.external_command_received:
+        if self.external_command_received:
             return None
+        if not self.startup_target_enabled:
+            return 1.0  # stay at nominal – treated the same as "move complete"
         elapsed = max(0.0, float(now_sec) - self.startup_time_sec)
         if elapsed <= self.startup_target_hold_s:
             return 0.0
@@ -404,15 +406,23 @@ class LegIkExecutor(object):
                 self.startup_target_universal_joint_center_z,
             )
             self.startup_move_started = True
+        if not self.startup_target_enabled and not self.startup_move_completed:
+            rospy.loginfo("leg_ik_executor startup: staying at nominal UJC (startup_target_enabled=false)")
+            self.startup_move_completed = True
         if self.startup_target_enabled and progress >= 1.0 and not self.startup_move_completed:
             rospy.loginfo("leg_ik_executor startup move completed")
             self.startup_move_completed = True
 
-        tx_mm = self.nominal_x + progress * (self.startup_target_x - self.nominal_x)
-        ty_mm = self.nominal_y + progress * (self.startup_target_y - self.nominal_y)
-        tz_mm = self.nominal_universal_joint_center_z + progress * (
-            self.startup_target_universal_joint_center_z - self.nominal_universal_joint_center_z
-        )
+        if self.startup_target_enabled:
+            tx_mm = self.nominal_x + progress * (self.startup_target_x - self.nominal_x)
+            ty_mm = self.nominal_y + progress * (self.startup_target_y - self.nominal_y)
+            tz_mm = self.nominal_universal_joint_center_z + progress * (
+                self.startup_target_universal_joint_center_z - self.nominal_universal_joint_center_z
+            )
+        else:
+            tx_mm = self.nominal_x
+            ty_mm = self.nominal_y
+            tz_mm = self.nominal_universal_joint_center_z
 
         ordered_ticks = []
         for leg_name in self.leg_order:
