@@ -359,12 +359,12 @@ gait_controller:
   nominal_y: 0.0
   nominal_universal_joint_center_z: -195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  startup_target_enabled: true
+  startup_target_enabled: false
   startup_target_x: 270.21
   startup_target_y: 0.0
   startup_target_universal_joint_center_z: -100.0
   startup_target_hold_s: 0.5
-  startup_target_move_duration_s: 2.0
+  startup_target_move_duration_s: 10.0
   # Startup target is interpreted in each leg's local frame-0 coordinates.
   # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
   nominal_z: -321.7   # This is the nominal foot bottom center height, used only for legacy support point calculations. The universal-joint-center nominal height is more relevant for control and state estimation.
@@ -385,22 +385,22 @@ gait_controller:
     j1: 0.0
     j2: 90.0
     j3: 0.0
-  startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
+  startup_pose_mode: capture_current_as_home  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
-    "1": 2043
-    "2": 544
-    "3": 2044
-    "4": 2157
-    "5": 2157
-    "6": 1658
-    "7": 2029
-    "8": 2107
-    "11": 2032
-    "12": 1894
-    "13": 2046
-    "14": 1024
+    "1": 2047
+    "2": 522
+    "3": 2060
+    "4": 2277
+    "5": 2185
+    "6": 2682
+    "7": 2050
+    "8": 293
+    "11": 2020
+    "12": 1884
+    "13": 2060
+    "14": 1034
   motor_dir:
     "1": 1
     "2": 1
