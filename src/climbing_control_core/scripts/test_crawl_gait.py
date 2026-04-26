@@ -238,23 +238,89 @@ class CrawlGaitTester(object):
     # ------------------------------------------------------------------ #
     # INIT 稳定性检查
     # ------------------------------------------------------------------ #
+    def _snapshot_init_state(self):
+        """单帧抓取 mission_state, swing_target, estimated UJC; 用于诊断打印."""
+        with self._lock:
+            state = self._latest_mission_state
+            est = self._latest_estimated_state
+            swing = dict(self._latest_swing_targets)
+        legs_info = []
+        for leg_index, leg in enumerate(LEG_NAMES):
+            cmd = swing.get(leg)
+            cmd_xyz = (None, None, None)
+            cmd_support = None
+            if cmd is not None:
+                cmd_xyz = (float(cmd.center.x), float(cmd.center.y), float(cmd.center.z))
+                cmd_support = bool(cmd.support_leg)
+            ujc_xyz = (None, None, None)
+            if est is not None and len(est.universal_joint_center_positions) > leg_index:
+                p = est.universal_joint_center_positions[leg_index]
+                ujc_xyz = (float(p.x), float(p.y), float(p.z))
+            legs_info.append({
+                "leg": leg,
+                "cmd_xyz": cmd_xyz,
+                "cmd_support": cmd_support,
+                "ujc_xyz": ujc_xyz,
+            })
+        return state, legs_info
+
+    def _format_init_table(self, legs_info, tol_m):
+        """生成可读性好的 INIT 状态表 (按腿一行)."""
+        lines = [
+            "  leg  cmd_support |     cmd_xyz (m)            |     ujc_xyz (m)            |  dz_to_op (mm)  status",
+        ]
+        for info in legs_info:
+            cmd_xyz = info["cmd_xyz"]
+            ujc_xyz = info["ujc_xyz"]
+            cmd_support = info["cmd_support"]
+
+            cmd_str = (
+                "(%+.4f, %+.4f, %+.4f)" % cmd_xyz
+                if cmd_xyz[0] is not None else "(    n/a              )"
+            )
+            ujc_str = (
+                "(%+.4f, %+.4f, %+.4f)" % ujc_xyz
+                if ujc_xyz[0] is not None else "(    n/a              )"
+            )
+            if ujc_xyz[2] is not None:
+                dz_mm = (ujc_xyz[2] - self._operating_z_m) * 1000.0
+                status = "OK" if abs(ujc_xyz[2] - self._operating_z_m) <= tol_m else "BAD"
+                dz_str = "%+8.2f" % dz_mm
+            else:
+                dz_str = "    n/a "
+                status = "?"
+            sup_str = "False" if cmd_support is False else (
+                "True " if cmd_support is True else "  ?  "
+            )
+            lines.append(
+                "  %-3s    %s     | %s | %s | %s     %s" % (
+                    info["leg"], sup_str, cmd_str, ujc_str, dz_str, status,
+                )
+            )
+        return "\n".join(lines)
+
     def _verify_init_hold(self):
-        """在 INIT 阶段连续 hold_check_s 内验证四腿处于位置保持模式."""
+        """在 INIT 阶段连续 hold_check_s 内验证四腿处于位置保持模式.
+
+        失败时打印 4 条腿的完整 INIT 状态表, 用户能直接看到哪条偏多少, 是机械
+        误差还是真异常. 可以通过 --allow-init-mismatch 强制继续.
+        """
         check_s = max(0.5, float(self.args.hold_check_s))
         tol_m = max(0.001, float(self.args.hold_tol_mm) / 1000.0)
         rate = rospy.Rate(20.0)
         end_t = time.time() + check_s
-        violations = []
         rospy.loginfo(
             "test_crawl_gait: verifying INIT hold for %.1fs "
-            "(operating_z=%.4f m, tol=%.4f m)...",
-            check_s, self._operating_z_m, tol_m,
+            "(operating_z=%.4f m, tol=%.4f m, %.1f mm)...",
+            check_s, self._operating_z_m, tol_m, tol_m * 1000.0,
         )
+        violations = []
+        latest_state = None
+        latest_legs = []
         while not rospy.is_shutdown() and time.time() < end_t:
-            with self._lock:
-                state = self._latest_mission_state
-                est = self._latest_estimated_state
-                swing = dict(self._latest_swing_targets)
+            state, legs_info = self._snapshot_init_state()
+            latest_state = state
+            latest_legs = legs_info
 
             if state != STATE_INIT:
                 rospy.logwarn(
@@ -262,37 +328,88 @@ class CrawlGaitTester(object):
                     "脚本只在 INIT 启动. 请退出后确认.",
                     state,
                 )
+                rospy.loginfo("INIT snapshot:\n%s",
+                              self._format_init_table(latest_legs, tol_m))
                 return False
 
-            for leg_index, leg in enumerate(LEG_NAMES):
-                cmd = swing.get(leg)
-                if cmd is None:
-                    continue
-                # support_leg 必须为 False (我们刚加的 hold_position_states 修复)
-                if bool(cmd.support_leg):
+            violations = []
+            for info in legs_info:
+                cmd_support = info["cmd_support"]
+                if cmd_support is True:
                     violations.append(
-                        "%s: cmd_support_leg=True (expected False)" % leg)
-                # UJC z 偏离 operating_z 不应超过 tol
-                if est is not None and len(est.universal_joint_center_positions) > leg_index:
-                    p = est.universal_joint_center_positions[leg_index]
-                    if abs(float(p.z) - self._operating_z_m) > tol_m:
-                        violations.append(
-                            "%s: ujc.z=%.4f m (operating=%.4f m, |delta|>%.4f)" % (
-                                leg, float(p.z), self._operating_z_m, tol_m))
+                        "%s: cmd_support_leg=True (expected False)" % info["leg"])
+                ujc_xyz = info["ujc_xyz"]
+                if ujc_xyz[2] is not None and abs(ujc_xyz[2] - self._operating_z_m) > tol_m:
+                    violations.append(
+                        "%s: |ujc.z - operating_z|=%.2f mm > %.2f mm" % (
+                            info["leg"],
+                            (ujc_xyz[2] - self._operating_z_m) * 1000.0,
+                            tol_m * 1000.0,
+                        )
+                    )
             if violations:
                 rospy.logerr(
-                    "test_crawl_gait: INIT hold check failed: %s",
-                    "; ".join(violations[:6]),
+                    "test_crawl_gait: INIT hold check failed (%s):\n%s\n  violations: %s",
+                    latest_state,
+                    self._format_init_table(latest_legs, tol_m),
+                    "; ".join(violations),
+                )
+                if bool(self.args.allow_init_mismatch):
+                    rospy.logwarn(
+                        "test_crawl_gait: --allow-init-mismatch set, continuing despite mismatch.",
+                    )
+                    return True
+                rospy.logwarn(
+                    "test_crawl_gait: hint - lr 大幅偏差通常是 startup_move 未完成 / 电机零点错位; "
+                    "12 mm 量级常见于机械校准误差, 可加大 --hold-tol-mm 放宽."
                 )
                 return False
             rate.sleep()
 
-        rospy.loginfo("test_crawl_gait: INIT hold check passed.")
+        rospy.loginfo(
+            "test_crawl_gait: INIT hold check passed.\n%s",
+            self._format_init_table(latest_legs, tol_m),
+        )
         return True
 
     # ------------------------------------------------------------------ #
     # mission state 推进
     # ------------------------------------------------------------------ #
+    def _mission_diagnostic_lines(self):
+        """Return compact per-leg adhesion/fan diagnostics for STICK failures."""
+        with self._lock:
+            est = self._latest_estimated_state
+            fan_rpm = list(self._latest_fan_rpm)
+            fan_curr = list(self._latest_fan_currents)
+
+        lines = [
+            "  leg  adhesion  attach_ready  seal_conf  fan_rpm  fan_current_a  measured_contact",
+        ]
+        for leg_index, leg in enumerate(LEG_NAMES):
+            def mask(attr_name):
+                if est is None:
+                    return False
+                values = getattr(est, attr_name, [])
+                return leg_index < len(values) and bool(values[leg_index])
+
+            seal = 0.0
+            if est is not None and leg_index < len(est.seal_confidence):
+                seal = float(est.seal_confidence[leg_index])
+            rpm = fan_rpm[leg_index] if leg_index < len(fan_rpm) else 0.0
+            current = fan_curr[leg_index] if leg_index < len(fan_curr) else 0.0
+            lines.append(
+                "  %-3s     %-5s       %-5s       %6.3f   %7.1f      %7.3f          %-5s" % (
+                    leg,
+                    str(mask("adhesion_mask")),
+                    str(mask("attachment_ready_mask")),
+                    seal,
+                    float(rpm),
+                    float(current),
+                    str(mask("measured_contact_mask")),
+                )
+            )
+        return "\n".join(lines)
+
     def _wait_state(self, target, timeout_s):
         deadline = time.time() + timeout_s
         last_log = 0.0
@@ -303,12 +420,15 @@ class CrawlGaitTester(object):
                 return True
             if state == STATE_FAULT:
                 rospy.logerr(
-                    "test_crawl_gait: entered FAULT while waiting for %s.", target)
+                    "test_crawl_gait: entered FAULT while waiting for %s.\n%s",
+                    target,
+                    self._mission_diagnostic_lines(),
+                )
                 return False
             if time.time() >= deadline:
                 rospy.logerr(
-                    "test_crawl_gait: timeout (%ss) waiting for state %s; current=%s",
-                    timeout_s, target, state,
+                    "test_crawl_gait: timeout (%ss) waiting for state %s; current=%s\n%s",
+                    timeout_s, target, state, self._mission_diagnostic_lines(),
                 )
                 return False
             now = time.time()
@@ -594,8 +714,14 @@ def parse_args(argv):
         help="INIT 稳定性观察时长 (s, 默认 3)",
     )
     parser.add_argument(
-        "--hold-tol-mm", type=float, default=5.0,
-        help="INIT 阶段 UJC z 偏离 operating 的允许误差 (mm, 默认 5)",
+        "--hold-tol-mm", type=float, default=20.0,
+        help="INIT 阶段 UJC z 偏离 operating 的允许误差 (mm, 默认 20). "
+             "经验值: <10 mm 通常需要良好的机械校准; 实机 ~12 mm 误差常见.",
+    )
+    parser.add_argument(
+        "--allow-init-mismatch", action="store_true",
+        help="即使 INIT hold 检查失败 (UJC 偏差 / support_leg 异常) 也继续, "
+             "仅打印警告. 用于已知机械误差场景的强制测试.",
     )
     parser.add_argument(
         "--stick-timeout-s", type=float, default=15.0,
