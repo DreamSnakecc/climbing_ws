@@ -364,7 +364,7 @@ gait_controller:
   startup_target_y: 0.0
   startup_target_universal_joint_center_z: -100.0
   startup_target_hold_s: 0.5
-  startup_target_move_duration_s: 2.0
+  startup_target_move_duration_s: 5.0
   # Startup target is interpreted in each leg's local frame-0 coordinates.
   # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
   nominal_z: -321.7   # This is the nominal foot bottom center height, used only for legacy support point calculations. The universal-joint-center nominal height is more relevant for control and state estimation.
