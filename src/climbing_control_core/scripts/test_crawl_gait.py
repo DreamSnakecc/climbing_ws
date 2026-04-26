@@ -1,1619 +1,650 @@
 #!/usr/bin/env python3
-"""Whole-body crawl-gait test.
-
-This script drives the robot through a whole-body crawl gait and records
-key system data. It is designed to verify that:
-
-  * The crawl gait schedule emitted by ``body_planner`` swings each leg in
-    order while the other three remain in support.
-  * ``swing_leg_controller`` completes the full staged swing
-    (DETACH_SLIDE -> TANGENTIAL_ALIGN -> PRELOAD_COMPRESS -> COMPLIANT_SETTLE
-    -> ATTACHED_HOLD) for every leg.
-  * ``mission_supervisor`` synchronizes each fan with the swing of the
-    corresponding leg (release during detach/align, boost immediately once
-    ``PRELOAD_COMPRESS`` completes / ``COMPLIANT_SETTLE`` begins, then attach
-    once ``attachment_ready`` / adhesion asserts).
-
-Key knobs (exposed as CLI options):
-
-  * ``--ujc-z-mm`` (default **-80.0 mm**): overrides
-    ``/gait_controller/nominal_universal_joint_center_z``. Note that this
-    parameter is consumed at node startup; the script sets it but warns
-    the user if the control stack must be relaunched to pick it up.
-  * ``--test-duration-s``: total recording window after mission start.
-  * ``--linear-velocity-mps`` / ``--angular-velocity-rps``: optional body
-    velocity overrides pushed to ``/body_planner`` so the gait can walk
-    (defaults keep the robot stepping in place).
-
-Preconditions
--------------
-  * ``jetson_bringup.launch`` already running (dynamixel_bridge,
-    leg_ik_executor, fan_serial_bridge, imu_serial_bridge,
-    local_safety_supervisor).
-  * ``pc_bringup.launch`` running with
-    ``mission_auto_start:=false`` and
-    ``enable_auto_adhesion_commands:=true``. The script explicitly
-    publishes ``/control/mission_start`` so the mission state machine
-    transitions INIT -> STICK -> CLIMB.
-  * All four feet are adhered to the wall (required for the STICK ->
-    CLIMB transition inside ``mission_supervisor``).
-  * ``swing_leg_controller`` has the "test trigger" overrides cleared so
-    the swing phase runs the full staged sequence (not the test
-    LIFT/PRESS override).
 """
+整机 crawl 步态集成测试 (半交互流程)
+
+预设运行环境 (调用本脚本前必须就绪):
+  - Jetson 侧已起 jetson_bringup.launch, leg_ik_executor 已把四条腿
+    平滑送至 operating UJC (270.21, 0, -100) [mm].
+  - PC 侧已起 test_crawl_gait.launch (mission_auto_start=false). 此时
+    mission_state == "INIT", swing_leg_controller 在 INIT 状态强制
+    LegCenterCommand.support_leg=false, dynamixel_bridge 不切电流模式,
+    四腿在位置模式下静止保持 operating UJC.
+
+本脚本流程:
+  1. 等关键话题就绪 (mission_state, body_reference, estimated_state,
+     swing_leg_target, fan_rpm, fan_currents).
+  2. 在 INIT 阶段做一段稳定性观察 (--hold-check-s, 默认 3s):
+       - 所有腿 cmd_support_leg 必须为 false
+       - 所有腿 UJC z 与 operating_z 偏差 < --hold-tol-mm (默认 5mm)
+     未通过则中止 (避免后续盲飞).
+  3. 提示用户回车确认 "机器人已贴墙, 风机控制就位" (除非 --no-confirm).
+  4. 发布 /control/mission_start=true:
+       - 等到 mission_state == STICK (--stick-timeout-s, 默认 15s)
+       - 等到 mission_state == CLIMB (--climb-timeout-s, 默认 30s)
+  5. CLIMB 状态下持续 --duration 秒 (默认 60), 实时按 --log-rate-hz
+     采样 CSV. 中途如出现 FAULT 立即退出.
+  6. 发布 /control/mission_pause=true 收尾, 写入 CSV, 打印总结.
+
+记录字段精简版 (约 60 列):
+  通用 (6):    wall_time, ros_time, elapsed_s, mission_state, mission_active, phase_label
+  body  (6):   body_x, body_y, body_z, body_vx, body_vy, body_vz
+  腿 ×4(12):   {leg}_phase, {leg}_phase_id,
+               {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
+               {leg}_ujc_z, {leg}_attachment_ready, {leg}_adhesion,
+               {leg}_measured_contact, {leg}_fan_rpm, {leg}_fan_current_a
+"""
+
+from __future__ import print_function
 
 import argparse
 import csv
-import datetime
+import datetime as _dt
 import math
 import os
-import signal
 import sys
 import threading
 import time
 
 import rospy
+from std_msgs.msg import Bool, Float32MultiArray, String
+
 from climbing_msgs.msg import (
-    AdhesionCommand,
     BodyReference,
     EstimatedState,
     LegCenterCommand,
-    StanceWrenchCommand,
 )
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float32MultiArray, String
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
 
-PHASE_NAMES = {
-    0: "SUPPORT",
-    1: "TEST_LIFT_CLEARANCE",
-    2: "TEST_PRESS_CONTACT",
-    3: "DETACH_SLIDE",
-    4: "TANGENTIAL_ALIGN",
-    5: "PRELOAD_COMPRESS",
-    6: "COMPLIANT_SETTLE",
-    7: "ATTACHED_HOLD",
+PHASE_ID_MAP = {
+    "SUPPORT": 0,
+    "TEST_LIFT_CLEARANCE": 1,
+    "TEST_PRESS_CONTACT": 2,
+    "DETACH_SLIDE": 3,
+    "TANGENTIAL_ALIGN": 4,
+    "PRELOAD_COMPRESS": 5,
+    "COMPLIANT_SETTLE": 6,
+    "ATTACHED_HOLD": 7,
 }
 
-FAN_MODE_RELEASE = 0
-FAN_MODE_ATTACH = 1
-FAN_MODE_BOOST = 2
-FAN_MODE_NAMES = {
-    FAN_MODE_RELEASE: "RELEASE",
-    FAN_MODE_ATTACH: "ATTACH",
-    FAN_MODE_BOOST: "BOOST",
-}
-
-# Mirrors swing_leg_controller.diagnostic_field_labels ordering so the
-# per-leg Float32MultiArray can be unpacked by name.
-DIAG_FIELDS = [
-    "leg_index",
-    "phase_id",
-    "phase_elapsed_s",
-    "cmd_normal_from_nominal_m",
-    "lift_target_normal_from_nominal_m",
-    "press_target_normal_from_nominal_m",
-    "preload_target_normal_from_nominal_m",
-    "attach_target_normal_from_nominal_m",
-    "compliant_force_estimate_n",
-    "compliant_normal_offset_m",
-    "compliant_normal_velocity_mps",
-    "estimated_leg_normal_force_n",
-    "joint_torque_bias_norm_nm",
-    "contact_active_since_age_s",
-    "test_experiment_active",
-    "test_hold_at_lift",
-    "test_lift_aligned",
-    "leg_torque_sum_nm",
-    "leg_current_sum_a",
-    "press_torque_baseline_nm",
-    "press_current_baseline_a",
-    "press_torque_delta_nm",
-    "press_current_delta_a",
-    "press_contact_confirmed",
-]
-PHASE_ID_FIELD_INDEX = DIAG_FIELDS.index("phase_id")
-SUPPORT_PHASE_ID = 0
+STATE_INIT = "INIT"
+STATE_STICK = "STICK"
+STATE_CLIMB = "CLIMB"
+STATE_PAUSE = "PAUSE"
+STATE_FAULT = "FAULT"
 
 
-def _default_test_logs_dir():
-    """`<workspace>/test_logs` (workspace = ancestor containing `src/climbing_control_core`)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    path = here
-    for _ in range(12):
-        if os.path.isdir(os.path.join(path, "test_logs")):
-            return os.path.join(path, "test_logs")
-        if os.path.isdir(os.path.join(path, "src", "climbing_control_core")):
-            return os.path.join(path, "test_logs")
-        parent = os.path.dirname(path)
-        if parent == path:
-            break
-        path = parent
-    ws = os.environ.get("CLIMBING_WS", os.path.join(os.path.expanduser("~"), "climbing_ws"))
-    return os.path.join(ws, "test_logs")
-
-
-def _safe_index(values, idx, default=0.0):
-    try:
-        if idx < len(values):
-            return values[idx]
-    except TypeError:
-        return default
-    return default
-
-
-def _aggregate_leg_scalar(motor_ids, values, joint_name_map):
-    """Sum of absolute values over leg motors; mirrors state_estimator._aggregate_leg_scalar."""
-    total = 0.0
-    count = 0
-    for motor_id in motor_ids:
-        joint_index = joint_name_map.get(str(int(motor_id)))
-        if joint_index is None or joint_index >= len(values):
-            continue
-        total += abs(float(values[joint_index]))
-        count += 1
-    return total, count
-
-
-def _min_max_mean(values):
-    if not values:
-        return None
-    return min(values), max(values), sum(values) / float(len(values))
-
-
-class CrawlGaitTest(object):
+class CrawlGaitTester(object):
     def __init__(self, args):
-        rospy.init_node("test_crawl_gait", anonymous=False)
+        self.args = args
 
-        self.ujc_z_mm = float(args.ujc_z_mm)
-        self.test_duration_s = max(float(args.test_duration_s), 1.0)
-        self.control_rate_hz = max(1.0, float(args.control_rate_hz))
-        self.log_rate_hz = max(1.0, float(args.log_rate_hz))
-        self.warmup_s = max(float(args.warmup_s), 0.0)
-        self.cooldown_s = max(float(args.cooldown_s), 0.0)
-        self.auto_release_fans_on_exit = bool(args.release_fans_on_exit)
-        self.verbose_status = bool(args.verbose_status)
-        self.output_dir = str(args.output_dir)
-        self.linear_velocity_mps = [float(value) for value in args.linear_velocity_mps]
-        self.angular_velocity_rps = [float(value) for value in args.angular_velocity_rps]
-        if len(self.linear_velocity_mps) != 3:
-            raise ValueError("--linear-velocity-mps expects 3 values (x y z)")
-        if len(self.angular_velocity_rps) != 3:
-            raise ValueError("--angular-velocity-rps expects 3 values (x y z)")
+        # 最近一次收到的各话题数据, 全部用 lock 保护读写
+        self._lock = threading.Lock()
+        self._latest_mission_state = None
+        self._latest_mission_active = False
+        self._latest_body_reference = None
+        self._latest_estimated_state = None
+        self._latest_swing_targets = {leg: None for leg in LEG_NAMES}
+        self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
+        self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
 
-        self._apply_ujc_z_param(self.ujc_z_mm)
-        self._apply_body_planner_velocity_params()
-        self._apply_crawl_sync_params()
-        self._clear_swing_test_triggers()
+        # 状态机切换时间线, 用于最后总结
+        self._state_history = []  # list of (rel_time, state)
+        self._fault_seen = False
 
-        # Snapshot what swing_leg_controller actually thinks nominal_z is (may differ from
-        # the param if the node was launched before we updated the param).
-        self.configured_ujc_z_m = float(
-            rospy.get_param("/gait_controller/nominal_universal_joint_center_z", -195.5)
-        ) / 1000.0
+        # operating UJC 用于 INIT 稳定性判定
+        operating_z_mm = float(rospy.get_param(
+            "/gait_controller/operating_universal_joint_center_z",
+            -100.0,
+        ))
+        self._operating_z_m = operating_z_mm / 1000.0
 
-        self._state_lock = threading.Lock()
-        self.latest_body_reference = None
-        self.latest_estimated = None
-        self.latest_joint_state = None
-        self.latest_joint_currents = None
-        self.latest_fan_currents = None
-        self.latest_leg_rpm = None
-        self.latest_leg_command = {name: None for name in LEG_NAMES}
-        self.latest_leg_diag = {name: None for name in LEG_NAMES}
-        self.latest_leg_diag_stamp = {name: None for name in LEG_NAMES}
-        self.latest_leg_adhesion_cmd = {name: None for name in LEG_NAMES}
-        self.latest_stance_wrench = {name: None for name in LEG_NAMES}
-        self.latest_mission_state = None
-        self.latest_mission_active = False
-        self.latest_safe_mode = False
-
-        self._leg_motor_ids = {
-            name: [int(mid) for mid in rospy.get_param("/legs/%s/motor_ids" % name, [])]
-            for name in LEG_NAMES
-        }
-
-        self.samples = []
-        self.test_phase = "IDLE"
-        self.test_started_at = None
-        self._stop_requested = False
-        self._mission_state_history = []  # list of (t_rel, state)
-        self._fan_cmd_history = {name: [] for name in LEG_NAMES}  # list of (t_rel, mode, rpm)
-        self._swing_events = {name: [] for name in LEG_NAMES}  # per-leg swing-cycle summaries
-
-        self._last_support_leg = {name: None for name in LEG_NAMES}
-        self._current_swing_event = {name: None for name in LEG_NAMES}
-
-        self._setup_pubs_subs()
-        rospy.on_shutdown(self._handle_ros_shutdown)
-        signal.signal(signal.SIGINT, self._handle_sigint)
-
-    # ---------- Param setup ----------
-
-    def _apply_ujc_z_param(self, ujc_z_mm):
-        current_mm = float(
-            rospy.get_param(
-                "/gait_controller/nominal_universal_joint_center_z", -195.5
-            )
+        # 发布器, latch=False (不需要保持最后状态)
+        self._mission_start_pub = rospy.Publisher(
+            "/control/mission_start", Bool, queue_size=2,
         )
-        rospy.set_param(
-            "/gait_controller/nominal_universal_joint_center_z",
-            float(ujc_z_mm),
-        )
-        rospy.loginfo(
-            "[test_crawl_gait] set /gait_controller/nominal_universal_joint_center_z: "
-            "%.3f mm -> %.3f mm",
-            current_mm,
-            float(ujc_z_mm),
-        )
-        if abs(current_mm - float(ujc_z_mm)) > 1e-3:
-            rospy.logwarn(
-                "[test_crawl_gait] UJC z param changed at runtime. Already-running nodes "
-                "(swing_leg_controller / state_estimator / body_planner) read this value "
-                "only at init. Relaunch the control stack so the new UJC z is in effect."
-            )
-
-    def _apply_body_planner_velocity_params(self):
-        """Push requested crawl progression into body_planner params.
-
-        body_planner reads /body_planner/linear_velocity_world_mps and
-        /body_planner/angular_velocity_world_rps at init. Setting them here only
-        helps if the planner is (re)started after we set the params. For a stack
-        that is already running, these are effectively documented-in-the-log
-        hints; the planner will keep whatever values it captured at startup.
-        """
-        rospy.set_param(
-            "/body_planner/linear_velocity_world_mps",
-            [float(v) for v in self.linear_velocity_mps],
-        )
-        rospy.set_param(
-            "/body_planner/angular_velocity_world_rps",
-            [float(v) for v in self.angular_velocity_rps],
-        )
-        rospy.loginfo(
-            "[test_crawl_gait] set body_planner velocity overrides (requires planner restart "
-            "to take effect): linear=%s  angular=%s",
-            self.linear_velocity_mps,
-            self.angular_velocity_rps,
+        self._mission_pause_pub = rospy.Publisher(
+            "/control/mission_pause", Bool, queue_size=2,
         )
 
-    def _apply_crawl_sync_params(self):
-        """Align crawl-gait fan timing with the single-leg admittance test.
-
-        The relevant nodes read these params at init, so runtime updates only
-        affect a newly launched mission_supervisor / swing_leg_controller.
-        """
-        current_boost_after_preload = bool(
-            rospy.get_param(
-                "/mission_supervisor/boost_after_preload_without_contact",
-                False,
-            )
-        )
-        current_compliant_requires_contact = bool(
-            rospy.get_param(
-                "/swing_leg_controller/compliant_start_requires_contact",
-                False,
-            )
-        )
-
-        rospy.set_param(
-            "/mission_supervisor/boost_after_preload_without_contact",
-            True,
-        )
-        rospy.set_param(
-            "/swing_leg_controller/compliant_start_requires_contact",
-            False,
-        )
-        rospy.loginfo(
-            "[test_crawl_gait] set crawl sync params (requires node restart to take effect): "
-            "boost_after_preload_without_contact=True  "
-            "compliant_start_requires_contact=False"
-        )
-        if (not current_boost_after_preload) or current_compliant_requires_contact:
-            rospy.logwarn(
-                "[test_crawl_gait] crawl fan/admittance sync params changed at runtime. "
-                "Already-running mission_supervisor / swing_leg_controller will keep their "
-                "startup values until the control stack is relaunched."
-            )
-
-    def _clear_swing_test_triggers(self):
-        """Ensure the swing-leg staged-test override is disabled.
-
-        The crawl gait requires the normal DETACH->...->ATTACHED swing sequence,
-        not the LIFT/PRESS test override used by test_swing_admittance.py.
-        """
-        rospy.set_param("/swing_leg_controller/test_force_support_reset_enable", False)
-        rospy.set_param("/swing_leg_controller/test_trigger_leg_name", "")
-        rospy.set_param("/swing_leg_controller/test_trigger_normal_travel_m", 0.0)
-        rospy.set_param("/swing_leg_controller/test_trigger_press_normal_travel_m", -0.003)
-        rospy.set_param("/swing_leg_controller/test_trigger_hold_at_lift", False)
-
-    # ---------- ROS plumbing ----------
-
-    def _setup_pubs_subs(self):
-        self.mission_start_pub = rospy.Publisher(
-            "/control/mission_start", Bool, queue_size=5, latch=True
-        )
-        self.mission_pause_pub = rospy.Publisher(
-            "/control/mission_pause", Bool, queue_size=5, latch=True
-        )
-        self.adhesion_pub = rospy.Publisher(
-            "/jetson/fan_serial_bridge/adhesion_command", AdhesionCommand, queue_size=20
-        )
-
+        # 订阅器
         rospy.Subscriber(
-            "/control/body_reference", BodyReference, self._body_reference_cb, queue_size=20
+            "/control/mission_state", String,
+            self._cb_mission_state, queue_size=10,
         )
         rospy.Subscriber(
-            "/state/estimated", EstimatedState, self._estimated_cb, queue_size=20
+            "/control/mission_active", Bool,
+            self._cb_mission_active, queue_size=10,
         )
         rospy.Subscriber(
-            "/jetson/dynamixel_bridge/joint_state", JointState, self._joint_state_cb, queue_size=20
+            "/control/body_reference", BodyReference,
+            self._cb_body_reference, queue_size=20,
         )
         rospy.Subscriber(
-            "/jetson/dynamixel_bridge/joint_currents",
-            Float32MultiArray,
-            self._joint_currents_cb,
-            queue_size=20,
+            "/state/estimated", EstimatedState,
+            self._cb_estimated_state, queue_size=20,
         )
         rospy.Subscriber(
-            "/jetson/fan_serial_bridge/fan_currents",
-            Float32MultiArray,
-            self._fan_current_cb,
-            queue_size=20,
+            "/control/swing_leg_target", LegCenterCommand,
+            self._cb_swing_target, queue_size=50,
         )
         rospy.Subscriber(
-            "/jetson/fan_serial_bridge/leg_rpm",
-            Float32MultiArray,
-            self._leg_rpm_cb,
-            queue_size=20,
+            "/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray,
+            self._cb_fan_rpm, queue_size=10,
         )
         rospy.Subscriber(
-            "/jetson/fan_serial_bridge/adhesion_command",
-            AdhesionCommand,
-            self._adhesion_cmd_cb,
-            queue_size=40,
-        )
-        rospy.Subscriber(
-            "/control/swing_leg_target",
-            LegCenterCommand,
-            self._leg_target_cb,
-            queue_size=200,
-        )
-        for leg_name in LEG_NAMES:
-            rospy.Subscriber(
-                "/control/swing_leg_diag/" + leg_name,
-                Float32MultiArray,
-                self._diag_cb_factory(leg_name),
-                queue_size=50,
-            )
-            rospy.Subscriber(
-                "/control/stance_wrench/" + leg_name,
-                StanceWrenchCommand,
-                self._stance_wrench_cb_factory(leg_name),
-                queue_size=20,
-            )
-        rospy.Subscriber(
-            "/control/mission_state", String, self._mission_state_cb, queue_size=10
-        )
-        rospy.Subscriber(
-            "/control/mission_active", Bool, self._mission_active_cb, queue_size=10
-        )
-        rospy.Subscriber(
-            "/jetson/local_safety_supervisor/safe_mode",
-            Bool,
-            self._safe_mode_cb,
-            queue_size=10,
+            "/jetson/fan_serial_bridge/fan_currents", Float32MultiArray,
+            self._cb_fan_currents, queue_size=10,
         )
 
-    def _body_reference_cb(self, msg):
-        with self._state_lock:
-            self.latest_body_reference = msg
+        # CSV 字段表与文件句柄, 在 _open_csv 中初始化
+        self._csv_path = None
+        self._csv_file = None
+        self._csv_writer = None
+        self._csv_columns = self._build_csv_columns()
+        self._sample_count = 0
+        self._t_zero_wall = None
+        self._t_zero_ros = None
 
-    def _estimated_cb(self, msg):
-        with self._state_lock:
-            self.latest_estimated = msg
+        # 摆动周期计数 (用于总结)
+        self._prev_support = {leg: None for leg in LEG_NAMES}
+        self._swing_count = {leg: 0 for leg in LEG_NAMES}
 
-    def _joint_state_cb(self, msg):
-        with self._state_lock:
-            self.latest_joint_state = msg
-
-    def _joint_currents_cb(self, msg):
-        with self._state_lock:
-            self.latest_joint_currents = list(msg.data) if msg.data else []
-
-    def _fan_current_cb(self, msg):
-        with self._state_lock:
-            self.latest_fan_currents = list(msg.data) if msg.data else []
-
-    def _leg_rpm_cb(self, msg):
-        with self._state_lock:
-            self.latest_leg_rpm = list(msg.data) if msg.data else []
-
-    def _adhesion_cmd_cb(self, msg):
+    # ------------------------------------------------------------------ #
+    # ROS 回调
+    # ------------------------------------------------------------------ #
+    def _cb_mission_state(self, msg):
         try:
-            leg_index = int(msg.leg_index)
-        except Exception:
+            value = str(msg.data)
+        except (TypeError, ValueError):
             return
-        if leg_index < 0 or leg_index >= len(LEG_NAMES):
-            return
-        leg_name = LEG_NAMES[leg_index]
-        with self._state_lock:
-            self.latest_leg_adhesion_cmd[leg_name] = msg
-            if self.test_started_at is not None:
-                self._fan_cmd_history[leg_name].append(
-                    (
-                        time.time() - self.test_started_at,
-                        int(msg.mode),
-                        float(msg.target_rpm),
-                    )
-                )
-
-    def _leg_target_cb(self, msg):
-        name = str(msg.leg_name)
-        if name not in self.latest_leg_command:
-            return
-        with self._state_lock:
-            self.latest_leg_command[name] = msg
-
-    def _diag_cb_factory(self, leg_name):
-        def _cb(msg):
-            data = list(msg.data) if msg.data else []
-            with self._state_lock:
-                self.latest_leg_diag[leg_name] = data
-                self.latest_leg_diag_stamp[leg_name] = rospy.Time.now()
-        return _cb
-
-    def _stance_wrench_cb_factory(self, leg_name):
-        def _cb(msg):
-            with self._state_lock:
-                self.latest_stance_wrench[leg_name] = msg
-        return _cb
-
-    def _mission_state_cb(self, msg):
-        value = str(msg.data)
-        with self._state_lock:
-            previous = self.latest_mission_state
-            self.latest_mission_state = value
+        with self._lock:
+            previous = self._latest_mission_state
+            self._latest_mission_state = value
             if previous != value:
-                if self.test_started_at is not None:
-                    self._mission_state_history.append(
-                        (time.time() - self.test_started_at, value)
-                    )
+                rel = self._rel_now()
+                self._state_history.append((rel, value))
+                if value == STATE_FAULT:
+                    self._fault_seen = True
 
-    def _mission_active_cb(self, msg):
-        with self._state_lock:
-            self.latest_mission_active = bool(msg.data)
+    def _cb_mission_active(self, msg):
+        with self._lock:
+            self._latest_mission_active = bool(msg.data)
 
-    def _safe_mode_cb(self, msg):
-        with self._state_lock:
-            self.latest_safe_mode = bool(msg.data)
+    def _cb_body_reference(self, msg):
+        with self._lock:
+            self._latest_body_reference = msg
 
-    # ---------- Signal & shutdown ----------
+    def _cb_estimated_state(self, msg):
+        with self._lock:
+            self._latest_estimated_state = msg
 
-    def _handle_sigint(self, signum, frame):
-        del signum, frame
-        rospy.loginfo(
-            "[test_crawl_gait] SIGINT received, flagging stop_requested and letting the "
-            "main loop wind down cleanly (will pause mission and save CSV)."
-        )
-        self._stop_requested = True
+    def _cb_swing_target(self, msg):
+        if msg.leg_name not in LEG_NAMES:
+            return
+        with self._lock:
+            self._latest_swing_targets[msg.leg_name] = msg
 
-    def _handle_ros_shutdown(self):
-        self._stop_requested = True
+    def _cb_fan_rpm(self, msg):
+        values = [float(value) for value in msg.data[:4]]
+        while len(values) < 4:
+            values.append(0.0)
+        with self._lock:
+            self._latest_fan_rpm = values
 
-    # ---------- Helpers ----------
+    def _cb_fan_currents(self, msg):
+        values = [float(value) for value in msg.data[:4]]
+        while len(values) < 4:
+            values.append(0.0)
+        with self._lock:
+            self._latest_fan_currents = values
 
-    def _release_all_fans(self):
-        for idx in range(len(LEG_NAMES)):
-            msg = AdhesionCommand()
-            msg.header.stamp = rospy.Time.now()
-            msg.leg_index = idx
-            msg.mode = FAN_MODE_RELEASE
-            msg.target_rpm = 0.0
-            msg.normal_force_limit = 0.0
-            msg.required_adhesion_force = 0.0
-            self.adhesion_pub.publish(msg)
+    # ------------------------------------------------------------------ #
+    # 时序 / 工具
+    # ------------------------------------------------------------------ #
+    def _rel_now(self):
+        if self._t_zero_ros is None:
+            return 0.0
+        return (rospy.Time.now() - self._t_zero_ros).to_sec()
 
-    def _wait_for_streams(self, timeout_s=8.0):
+    def _wait_streams(self, timeout_s):
+        """阻塞等待所有关键订阅都至少收到一次. 超时返回 False."""
         deadline = time.time() + timeout_s
-        while time.time() < deadline and not rospy.is_shutdown():
-            with self._state_lock:
-                have_body_ref = self.latest_body_reference is not None
-                have_est = self.latest_estimated is not None
-                have_js = self.latest_joint_state is not None
-                have_diag = any(v is not None for v in self.latest_leg_diag.values())
-            if have_body_ref and have_est and have_js and have_diag:
+        rospy.loginfo("test_crawl_gait: waiting for upstream streams (timeout=%.1fs)...",
+                      timeout_s)
+        while not rospy.is_shutdown():
+            with self._lock:
+                ok_state = self._latest_mission_state is not None
+                ok_body = self._latest_body_reference is not None
+                ok_est = self._latest_estimated_state is not None
+                ok_swing = all(
+                    self._latest_swing_targets[leg] is not None
+                    for leg in LEG_NAMES
+                )
+            if ok_state and ok_body and ok_est and ok_swing:
+                rospy.loginfo("test_crawl_gait: all streams ready.")
                 return True
-            time.sleep(0.05)
-        with self._state_lock:
-            body_ref = self.latest_body_reference is not None
-            est = self.latest_estimated is not None
-            js = self.latest_joint_state is not None
-            diag = {k: (v is not None) for k, v in self.latest_leg_diag.items()}
-        rospy.logwarn(
-            "[test_crawl_gait] required streams not all ready after %.1fs "
-            "(body_reference=%s estimated=%s joint_state=%s diag=%s). "
-            "Proceeding anyway; CSV columns may be blank where streams are missing.",
-            timeout_s,
-            body_ref,
-            est,
-            js,
-            diag,
-        )
+            if time.time() >= deadline:
+                rospy.logerr(
+                    "test_crawl_gait: stream readiness timeout. "
+                    "state=%s body=%s estimated=%s swing=%s",
+                    ok_state, ok_body, ok_est, ok_swing,
+                )
+                return False
+            rospy.sleep(0.1)
         return False
 
-    def _pretest_health_check(self, timeout_s=2.0):
-        """Fail fast if the controller does not start from a clean all-support state."""
-        deadline = time.time() + max(float(timeout_s), 0.1)
-        last_reason = "no data yet"
-        while time.time() < deadline and not rospy.is_shutdown():
-            with self._state_lock:
-                estimated = self.latest_estimated
-                per_leg_cmd = dict(self.latest_leg_command)
-                per_leg_diag = {k: list(v) if v else [] for k, v in self.latest_leg_diag.items()}
+    # ------------------------------------------------------------------ #
+    # INIT 稳定性检查
+    # ------------------------------------------------------------------ #
+    def _verify_init_hold(self):
+        """在 INIT 阶段连续 hold_check_s 内验证四腿处于位置保持模式."""
+        check_s = max(0.5, float(self.args.hold_check_s))
+        tol_m = max(0.001, float(self.args.hold_tol_mm) / 1000.0)
+        rate = rospy.Rate(20.0)
+        end_t = time.time() + check_s
+        violations = []
+        rospy.loginfo(
+            "test_crawl_gait: verifying INIT hold for %.1fs "
+            "(operating_z=%.4f m, tol=%.4f m)...",
+            check_s, self._operating_z_m, tol_m,
+        )
+        while not rospy.is_shutdown() and time.time() < end_t:
+            with self._lock:
+                state = self._latest_mission_state
+                est = self._latest_estimated_state
+                swing = dict(self._latest_swing_targets)
 
-            reasons = []
-            for leg_name in LEG_NAMES:
-                cmd = per_leg_cmd.get(leg_name)
+            if state != STATE_INIT:
+                rospy.logwarn(
+                    "test_crawl_gait: mission_state=%s (expected INIT). "
+                    "脚本只在 INIT 启动. 请退出后确认.",
+                    state,
+                )
+                return False
+
+            for leg_index, leg in enumerate(LEG_NAMES):
+                cmd = swing.get(leg)
                 if cmd is None:
-                    reasons.append("%s:missing_cmd" % leg_name)
-                elif not bool(cmd.support_leg):
-                    reasons.append("%s:cmd_support=0" % leg_name)
-
-                diag = per_leg_diag.get(leg_name) or []
-                if PHASE_ID_FIELD_INDEX >= len(diag):
-                    reasons.append("%s:missing_phase" % leg_name)
-                else:
-                    phase_id = int(diag[PHASE_ID_FIELD_INDEX])
-                    if phase_id != SUPPORT_PHASE_ID:
-                        reasons.append(
-                            "%s:phase=%s" % (leg_name, PHASE_NAMES.get(phase_id, str(phase_id)))
-                        )
-
-            if estimated is None:
-                reasons.append("estimated_state_missing")
-            else:
-                support_mask = list(estimated.support_mask)
-                for idx, leg_name in enumerate(LEG_NAMES):
-                    if idx >= len(support_mask) or not bool(support_mask[idx]):
-                        reasons.append("%s:est_support=0" % leg_name)
-
-            if not reasons:
-                rospy.loginfo(
-                    "[test_crawl_gait] pretest health check passed: all legs in SUPPORT with support masks asserted."
+                    continue
+                # support_leg 必须为 False (我们刚加的 hold_position_states 修复)
+                if bool(cmd.support_leg):
+                    violations.append(
+                        "%s: cmd_support_leg=True (expected False)" % leg)
+                # UJC z 偏离 operating_z 不应超过 tol
+                if est is not None and len(est.universal_joint_center_positions) > leg_index:
+                    p = est.universal_joint_center_positions[leg_index]
+                    if abs(float(p.z) - self._operating_z_m) > tol_m:
+                        violations.append(
+                            "%s: ujc.z=%.4f m (operating=%.4f m, |delta|>%.4f)" % (
+                                leg, float(p.z), self._operating_z_m, tol_m))
+            if violations:
+                rospy.logerr(
+                    "test_crawl_gait: INIT hold check failed: %s",
+                    "; ".join(violations[:6]),
                 )
+                return False
+            rate.sleep()
+
+        rospy.loginfo("test_crawl_gait: INIT hold check passed.")
+        return True
+
+    # ------------------------------------------------------------------ #
+    # mission state 推进
+    # ------------------------------------------------------------------ #
+    def _wait_state(self, target, timeout_s):
+        deadline = time.time() + timeout_s
+        last_log = 0.0
+        while not rospy.is_shutdown():
+            with self._lock:
+                state = self._latest_mission_state
+            if state == target:
                 return True
-
-            last_reason = ", ".join(reasons)
-            time.sleep(0.05)
-
-        rospy.logerr(
-            "[test_crawl_gait] pretest health check failed (dirty start state): %s. "
-            "Refusing to start mission. Relaunch/clear control stack until all legs report "
-            "SUPPORT (cmd + diag + estimated support_mask).",
-            last_reason,
-        )
+            if state == STATE_FAULT:
+                rospy.logerr(
+                    "test_crawl_gait: entered FAULT while waiting for %s.", target)
+                return False
+            if time.time() >= deadline:
+                rospy.logerr(
+                    "test_crawl_gait: timeout (%ss) waiting for state %s; current=%s",
+                    timeout_s, target, state,
+                )
+                return False
+            now = time.time()
+            if now - last_log > 1.0:
+                rospy.loginfo(
+                    "test_crawl_gait: waiting for %s, current=%s "
+                    "(remain %.1fs)...",
+                    target, state, max(0.0, deadline - now),
+                )
+                last_log = now
+            rospy.sleep(0.1)
         return False
 
-    def _publish_mission_start(self):
-        msg = Bool(data=True)
-        for _ in range(5):
-            self.mission_start_pub.publish(msg)
-            time.sleep(0.05)
-        # Also make sure mission_pause is cleared.
-        self.mission_pause_pub.publish(Bool(data=False))
+    def _publish_start(self):
+        rospy.loginfo("test_crawl_gait: publishing /control/mission_start=true.")
+        for _ in range(3):
+            self._mission_start_pub.publish(Bool(data=True))
+            rospy.sleep(0.05)
 
-    def _publish_mission_pause(self):
-        msg = Bool(data=True)
-        for _ in range(5):
-            self.mission_pause_pub.publish(msg)
-            time.sleep(0.05)
+    def _publish_pause(self):
+        rospy.loginfo("test_crawl_gait: publishing /control/mission_pause=true.")
+        for _ in range(3):
+            self._mission_pause_pub.publish(Bool(data=True))
+            rospy.sleep(0.05)
 
-    # ---------- Snapshot ----------
+    # ------------------------------------------------------------------ #
+    # CSV
+    # ------------------------------------------------------------------ #
+    def _build_csv_columns(self):
+        cols = [
+            "wall_time", "ros_time", "elapsed_s",
+            "mission_state", "mission_active", "phase_label",
+            "body_x", "body_y", "body_z",
+            "body_vx", "body_vy", "body_vz",
+        ]
+        for leg in LEG_NAMES:
+            cols.extend([
+                "%s_phase" % leg,
+                "%s_phase_id" % leg,
+                "%s_cmd_x" % leg,
+                "%s_cmd_y" % leg,
+                "%s_cmd_z" % leg,
+                "%s_cmd_support" % leg,
+                "%s_ujc_z" % leg,
+                "%s_attachment_ready" % leg,
+                "%s_adhesion" % leg,
+                "%s_measured_contact" % leg,
+                "%s_fan_rpm" % leg,
+                "%s_fan_current_a" % leg,
+            ])
+        return cols
 
-    def _snapshot(self, wall_time):
-        with self._state_lock:
-            body_ref = self.latest_body_reference
-            estimated = self.latest_estimated
-            joint_state = self.latest_joint_state
-            joint_currents_vec = (
-                list(self.latest_joint_currents)
-                if self.latest_joint_currents is not None
-                else None
-            )
-            fan_currents = list(self.latest_fan_currents) if self.latest_fan_currents else []
-            leg_rpm = list(self.latest_leg_rpm) if self.latest_leg_rpm else []
-            per_leg_cmd = dict(self.latest_leg_command)
-            per_leg_diag = {k: list(v) if v else [] for k, v in self.latest_leg_diag.items()}
-            per_leg_fan_cmd = dict(self.latest_leg_adhesion_cmd)
-            per_leg_stance = dict(self.latest_stance_wrench)
-            mission_state = self.latest_mission_state
-            mission_active = self.latest_mission_active
-            safe_mode = self.latest_safe_mode
+    def _open_csv(self):
+        out_dir = os.path.expanduser(str(self.args.output_dir))
+        if not os.path.isdir(out_dir):
+            os.makedirs(out_dir)
+        timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(out_dir, "crawl_gait_%s.csv" % timestamp)
+        f = open(path, "w")
+        writer = csv.writer(f)
+        writer.writerow(self._csv_columns)
+        self._csv_path = path
+        self._csv_file = f
+        self._csv_writer = writer
+        rospy.loginfo("test_crawl_gait: writing CSV -> %s", path)
 
-        row = {
-            "wall_time": wall_time,
-            "ros_time": rospy.get_time(),
-            "test_phase": self.test_phase,
-            "mission_state": mission_state if mission_state is not None else "",
-            "mission_active": bool(mission_active),
-            "safe_mode": bool(safe_mode),
-        }
+    def _close_csv(self):
+        if self._csv_file is not None:
+            try:
+                self._csv_file.flush()
+                self._csv_file.close()
+            except (IOError, OSError):
+                pass
+            self._csv_file = None
+            self._csv_writer = None
 
-        # ---------- body reference ----------
-        if body_ref is not None:
-            row["body_ref_pose_x"] = float(body_ref.pose.position.x)
-            row["body_ref_pose_y"] = float(body_ref.pose.position.y)
-            row["body_ref_pose_z"] = float(body_ref.pose.position.z)
-            row["body_ref_quat_x"] = float(body_ref.pose.orientation.x)
-            row["body_ref_quat_y"] = float(body_ref.pose.orientation.y)
-            row["body_ref_quat_z"] = float(body_ref.pose.orientation.z)
-            row["body_ref_quat_w"] = float(body_ref.pose.orientation.w)
-            row["body_ref_linear_x"] = float(body_ref.twist.linear.x)
-            row["body_ref_linear_y"] = float(body_ref.twist.linear.y)
-            row["body_ref_linear_z"] = float(body_ref.twist.linear.z)
-            row["body_ref_angular_x"] = float(body_ref.twist.angular.x)
-            row["body_ref_angular_y"] = float(body_ref.twist.angular.y)
-            row["body_ref_angular_z"] = float(body_ref.twist.angular.z)
-            row["body_ref_gait_mode"] = int(body_ref.gait_mode)
-            support_mask = list(body_ref.support_mask)
-            for idx, leg_name in enumerate(LEG_NAMES):
-                row["body_ref_support_" + leg_name] = bool(
-                    support_mask[idx] if idx < len(support_mask) else True
-                )
-        else:
-            for key in (
-                "body_ref_pose_x body_ref_pose_y body_ref_pose_z "
-                "body_ref_quat_x body_ref_quat_y body_ref_quat_z body_ref_quat_w "
-                "body_ref_linear_x body_ref_linear_y body_ref_linear_z "
-                "body_ref_angular_x body_ref_angular_y body_ref_angular_z "
-                "body_ref_gait_mode"
-            ).split():
-                row[key] = None
-            for leg_name in LEG_NAMES:
-                row["body_ref_support_" + leg_name] = None
+    def _phase_label_from_swing(self, leg_index, swing_msg):
+        # LegCenterCommand 没有 phase 字段; 用 support_leg 与 normal_force_limit
+        # 推断粗粒度 phase, 仅作 CSV 标注. 详细 phase 在 swing_leg_diag, 这里精简版
+        # 不订阅, 避免列爆炸.
+        if swing_msg is None:
+            return "UNKNOWN", -1
+        if bool(swing_msg.support_leg):
+            return "SUPPORT", PHASE_ID_MAP["SUPPORT"]
+        # 非 support: 进入 swing 序列
+        normal_limit = float(getattr(swing_msg, "desired_normal_force_limit", 0.0))
+        if normal_limit > 0.5:
+            # PRELOAD/COMPLIANT 阶段都给了 normal_force_limit
+            return "PRELOAD_OR_COMPLIANT", PHASE_ID_MAP["PRELOAD_COMPRESS"]
+        skirt = float(getattr(swing_msg, "skirt_compression_target", 0.0))
+        if skirt < 0.05:
+            return "DETACH_OR_LIFT", PHASE_ID_MAP["DETACH_SLIDE"]
+        return "TANGENTIAL_ALIGN", PHASE_ID_MAP["TANGENTIAL_ALIGN"]
 
-        # ---------- estimated global body ----------
-        if estimated is not None:
-            row["body_est_pose_x"] = float(estimated.pose.position.x)
-            row["body_est_pose_y"] = float(estimated.pose.position.y)
-            row["body_est_pose_z"] = float(estimated.pose.position.z)
-            row["body_est_quat_x"] = float(estimated.pose.orientation.x)
-            row["body_est_quat_y"] = float(estimated.pose.orientation.y)
-            row["body_est_quat_z"] = float(estimated.pose.orientation.z)
-            row["body_est_quat_w"] = float(estimated.pose.orientation.w)
-            row["body_est_linear_x"] = float(estimated.twist.linear.x)
-            row["body_est_linear_y"] = float(estimated.twist.linear.y)
-            row["body_est_linear_z"] = float(estimated.twist.linear.z)
-            row["body_est_angular_x"] = float(estimated.twist.angular.x)
-            row["body_est_angular_y"] = float(estimated.twist.angular.y)
-            row["body_est_angular_z"] = float(estimated.twist.angular.z)
-        else:
-            for key in (
-                "body_est_pose_x body_est_pose_y body_est_pose_z "
-                "body_est_quat_x body_est_quat_y body_est_quat_z body_est_quat_w "
-                "body_est_linear_x body_est_linear_y body_est_linear_z "
-                "body_est_angular_x body_est_angular_y body_est_angular_z"
-            ).split():
-                row[key] = None
+    def _sample_row(self, phase_label):
+        with self._lock:
+            state = self._latest_mission_state or ""
+            mission_active = self._latest_mission_active
+            body = self._latest_body_reference
+            est = self._latest_estimated_state
+            swings = dict(self._latest_swing_targets)
+            fan_rpm = list(self._latest_fan_rpm)
+            fan_curr = list(self._latest_fan_currents)
 
-        # Joint-name map is needed for per-leg aggregates.
-        joint_name_map = {}
-        if joint_state is not None:
-            joint_name_map = {
-                str(int(name)): index for index, name in enumerate(joint_state.name)
-            }
+        wall_time = time.time()
+        ros_time = rospy.Time.now().to_sec()
+        elapsed = self._rel_now()
 
-        # ---------- per-leg rows ----------
-        for idx, leg_name in enumerate(LEG_NAMES):
-            cmd = per_leg_cmd.get(leg_name)
-            diag = per_leg_diag.get(leg_name) or []
-            fan_cmd = per_leg_fan_cmd.get(leg_name)
-            stance = per_leg_stance.get(leg_name)
+        body_x = body_y = body_z = 0.0
+        body_vx = body_vy = body_vz = 0.0
+        if body is not None:
+            body_x = float(body.pose.position.x)
+            body_y = float(body.pose.position.y)
+            body_z = float(body.pose.position.z)
+            body_vx = float(body.twist.linear.x)
+            body_vy = float(body.twist.linear.y)
+            body_vz = float(body.twist.linear.z)
 
+        row = [
+            "%.6f" % wall_time, "%.6f" % ros_time, "%.4f" % elapsed,
+            state, int(bool(mission_active)), phase_label,
+            "%.4f" % body_x, "%.4f" % body_y, "%.4f" % body_z,
+            "%.4f" % body_vx, "%.4f" % body_vy, "%.4f" % body_vz,
+        ]
+
+        for leg_index, leg in enumerate(LEG_NAMES):
+            cmd = swings.get(leg)
+            phase_name, phase_id = self._phase_label_from_swing(leg_index, cmd)
+            cmd_x = cmd_y = cmd_z = 0.0
+            cmd_support = 0
             if cmd is not None:
-                row["%s_cmd_center_x" % leg_name] = float(cmd.center.x)
-                row["%s_cmd_center_y" % leg_name] = float(cmd.center.y)
-                row["%s_cmd_center_z" % leg_name] = float(cmd.center.z)
-                row["%s_cmd_vel_x" % leg_name] = float(cmd.center_velocity.x)
-                row["%s_cmd_vel_y" % leg_name] = float(cmd.center_velocity.y)
-                row["%s_cmd_vel_z" % leg_name] = float(cmd.center_velocity.z)
-                row["%s_cmd_skirt_target" % leg_name] = float(cmd.skirt_compression_target)
-                row["%s_cmd_support_leg" % leg_name] = bool(cmd.support_leg)
-                row["%s_cmd_normal_force_limit" % leg_name] = float(
-                    cmd.desired_normal_force_limit
-                )
-            else:
-                for key_suffix in (
-                    "cmd_center_x",
-                    "cmd_center_y",
-                    "cmd_center_z",
-                    "cmd_vel_x",
-                    "cmd_vel_y",
-                    "cmd_vel_z",
-                    "cmd_skirt_target",
-                    "cmd_support_leg",
-                    "cmd_normal_force_limit",
-                ):
-                    row["%s_%s" % (leg_name, key_suffix)] = None
+                cmd_x = float(cmd.center.x)
+                cmd_y = float(cmd.center.y)
+                cmd_z = float(cmd.center.z)
+                cmd_support = int(bool(cmd.support_leg))
 
-            # Unpack diag by field name (matches swing_leg_controller layout).
-            for field_index, field_name in enumerate(DIAG_FIELDS):
-                column = "%s_diag_%s" % (leg_name, field_name)
-                row[column] = (
-                    float(diag[field_index]) if field_index < len(diag) else None
-                )
-            phase_id = row.get("%s_diag_phase_id" % leg_name)
-            row["%s_phase_name" % leg_name] = (
-                PHASE_NAMES.get(int(phase_id), "UNKNOWN") if phase_id is not None else None
-            )
+            ujc_z = 0.0
+            if est is not None and len(est.universal_joint_center_positions) > leg_index:
+                ujc_z = float(est.universal_joint_center_positions[leg_index].z)
 
-            # Fan command (what mission_supervisor / the test emits to the fan bridge).
-            if fan_cmd is not None:
-                row["%s_fan_cmd_mode" % leg_name] = int(fan_cmd.mode)
-                row["%s_fan_cmd_mode_name" % leg_name] = FAN_MODE_NAMES.get(
-                    int(fan_cmd.mode), "UNK"
-                )
-                row["%s_fan_cmd_rpm" % leg_name] = float(fan_cmd.target_rpm)
-                row["%s_fan_cmd_normal_force_limit" % leg_name] = float(
-                    fan_cmd.normal_force_limit
-                )
-                row["%s_fan_cmd_required_adhesion_force" % leg_name] = float(
-                    fan_cmd.required_adhesion_force
-                )
-            else:
-                for key_suffix in (
-                    "fan_cmd_mode",
-                    "fan_cmd_mode_name",
-                    "fan_cmd_rpm",
-                    "fan_cmd_normal_force_limit",
-                    "fan_cmd_required_adhesion_force",
-                ):
-                    row["%s_%s" % (leg_name, key_suffix)] = None
+            def mask(name):
+                if est is None:
+                    return 0
+                values = getattr(est, name, [])
+                if leg_index >= len(values):
+                    return 0
+                return int(bool(values[leg_index]))
 
-            # Fan feedback.
-            row["%s_fan_current_a" % leg_name] = (
-                float(fan_currents[idx]) if idx < len(fan_currents) else None
-            )
-            row["%s_fan_rpm_fb" % leg_name] = (
-                float(leg_rpm[idx]) if idx < len(leg_rpm) else None
-            )
+            row.extend([
+                phase_name, phase_id,
+                "%.4f" % cmd_x, "%.4f" % cmd_y, "%.4f" % cmd_z,
+                cmd_support,
+                "%.4f" % ujc_z,
+                mask("attachment_ready_mask"),
+                mask("adhesion_mask"),
+                mask("measured_contact_mask"),
+                "%.2f" % float(fan_rpm[leg_index]),
+                "%.4f" % float(fan_curr[leg_index]),
+            ])
 
-            # Stance-wrench planner output (normal force, friction use, etc.).
-            if stance is not None:
-                row["%s_stance_fx" % leg_name] = float(stance.wrench.force.x)
-                row["%s_stance_fy" % leg_name] = float(stance.wrench.force.y)
-                row["%s_stance_fz" % leg_name] = float(stance.wrench.force.z)
-                row["%s_stance_tx" % leg_name] = float(stance.wrench.torque.x)
-                row["%s_stance_ty" % leg_name] = float(stance.wrench.torque.y)
-                row["%s_stance_tz" % leg_name] = float(stance.wrench.torque.z)
-                row["%s_stance_normal_force_limit" % leg_name] = float(
-                    stance.normal_force_limit
-                )
-                row["%s_stance_tangential_magnitude" % leg_name] = float(
-                    stance.tangential_force_magnitude
-                )
-                row["%s_stance_required_adhesion_force" % leg_name] = float(
-                    stance.required_adhesion_force
-                )
-                row["%s_stance_planned_support" % leg_name] = bool(stance.planned_support)
-                row["%s_stance_actual_contact" % leg_name] = bool(stance.actual_contact)
-                row["%s_stance_active" % leg_name] = bool(stance.active)
-            else:
-                for key_suffix in (
-                    "stance_fx",
-                    "stance_fy",
-                    "stance_fz",
-                    "stance_tx",
-                    "stance_ty",
-                    "stance_tz",
-                    "stance_normal_force_limit",
-                    "stance_tangential_magnitude",
-                    "stance_required_adhesion_force",
-                    "stance_planned_support",
-                    "stance_actual_contact",
-                    "stance_active",
-                ):
-                    row["%s_%s" % (leg_name, key_suffix)] = None
+            # swing 周期统计 (cmd_support: True->False->True 计一次)
+            prev = self._prev_support.get(leg)
+            if prev is not None and prev is True and cmd_support == 0:
+                # 进入 swing
+                pass
+            elif prev is not None and prev is False and cmd_support == 1:
+                # 回到 support, 计为完成一次 swing
+                self._swing_count[leg] += 1
+            self._prev_support[leg] = bool(cmd_support)
 
-            # Estimated per-leg state.
-            if estimated is not None:
-                row["%s_skirt_compression_est" % leg_name] = _safe_index(
-                    estimated.skirt_compression_estimate, idx
-                )
-                row["%s_slip_risk" % leg_name] = _safe_index(estimated.slip_risk, idx)
-                row["%s_contact_confidence" % leg_name] = _safe_index(
-                    estimated.contact_confidence, idx
-                )
-                row["%s_seal_confidence" % leg_name] = _safe_index(
-                    estimated.seal_confidence, idx
-                )
-                row["%s_leg_torque_sum" % leg_name] = _safe_index(
-                    estimated.leg_torque_sum, idx
-                )
-                row["%s_est_fan_current" % leg_name] = _safe_index(
-                    estimated.fan_current, idx
-                )
-                row["%s_wall_touch" % leg_name] = bool(
-                    _safe_index(estimated.wall_touch_mask, idx, False)
-                )
-                row["%s_measured_contact" % leg_name] = bool(
-                    _safe_index(estimated.measured_contact_mask, idx, False)
-                )
-                row["%s_early_contact" % leg_name] = bool(
-                    _safe_index(estimated.early_contact_mask, idx, False)
-                )
-                row["%s_contact_mask" % leg_name] = bool(
-                    _safe_index(estimated.contact_mask, idx, False)
-                )
-                row["%s_support_mask" % leg_name] = bool(
-                    _safe_index(estimated.support_mask, idx, False)
-                )
-                row["%s_adhesion_mask" % leg_name] = bool(
-                    _safe_index(estimated.adhesion_mask, idx, False)
-                )
-                row["%s_attachment_ready" % leg_name] = bool(
-                    _safe_index(estimated.attachment_ready_mask, idx, False)
-                )
-                row["%s_plan_support" % leg_name] = bool(
-                    _safe_index(estimated.plan_support_mask, idx, False)
-                )
-                if idx < len(estimated.universal_joint_center_positions):
-                    ujc = estimated.universal_joint_center_positions[idx]
-                    row["%s_ujc_x" % leg_name] = float(ujc.x)
-                    row["%s_ujc_y" % leg_name] = float(ujc.y)
-                    row["%s_ujc_z" % leg_name] = float(ujc.z)
-                else:
-                    row["%s_ujc_x" % leg_name] = None
-                    row["%s_ujc_y" % leg_name] = None
-                    row["%s_ujc_z" % leg_name] = None
-            else:
-                for key_suffix in (
-                    "skirt_compression_est",
-                    "slip_risk",
-                    "contact_confidence",
-                    "seal_confidence",
-                    "leg_torque_sum",
-                    "est_fan_current",
-                    "wall_touch",
-                    "measured_contact",
-                    "early_contact",
-                    "contact_mask",
-                    "support_mask",
-                    "adhesion_mask",
-                    "attachment_ready",
-                    "plan_support",
-                    "ujc_x",
-                    "ujc_y",
-                    "ujc_z",
-                ):
-                    row["%s_%s" % (leg_name, key_suffix)] = None
-
-            # Per-leg aggregated joint torque/current (mirrors state_estimator).
-            row["%s_leg_current_sum_a" % leg_name] = None
-            row["%s_leg_current_count" % leg_name] = None
-            row["%s_leg_torque_sum_nm" % leg_name] = None
-            row["%s_leg_torque_count" % leg_name] = None
-            if joint_state is not None and self._leg_motor_ids.get(leg_name):
-                efforts = list(joint_state.effort) if joint_state.effort else []
-                torque_sum, torque_count = _aggregate_leg_scalar(
-                    self._leg_motor_ids[leg_name], efforts, joint_name_map
-                )
-                if torque_count > 0:
-                    row["%s_leg_torque_sum_nm" % leg_name] = float(torque_sum)
-                    row["%s_leg_torque_count" % leg_name] = int(torque_count)
-                if joint_currents_vec is not None:
-                    cur_sum, cur_count = _aggregate_leg_scalar(
-                        self._leg_motor_ids[leg_name],
-                        joint_currents_vec,
-                        joint_name_map,
-                    )
-                    if cur_count > 0:
-                        row["%s_leg_current_sum_a" % leg_name] = float(cur_sum)
-                        row["%s_leg_current_count" % leg_name] = int(cur_count)
         return row
 
-    # ---------- Swing event tracking ----------
-
-    def _update_swing_events(self, row, now_rel):
-        """Track per-leg swing cycles and record fan-synchronization metrics.
-
-        A "swing" is bracketed by the `_cmd_support_leg` flag on swing_leg_target
-        transitioning True -> False (swing start) and False -> True (swing end).
-        Fan-synchronization metrics captured per swing event:
-          * swing_start_time / swing_end_time (rel-to-test)
-          * phase_id trajectory: first time each phase id was observed
-          * first_fan_release_time  (first fan_cmd_mode==0 after swing start)
-          * first_fan_boost_time    (first fan_cmd_mode==2 after swing start)
-          * first_fan_attach_time   (first fan_cmd_mode==1 after swing start)
-          * first_wall_touch_time / first_measured_contact_time /
-            first_attachment_ready_time / first_adhesion_time (rel to swing start)
-        """
-        for leg_name in LEG_NAMES:
-            support_flag = row.get("%s_cmd_support_leg" % leg_name)
-            last_support = self._last_support_leg.get(leg_name)
-            if support_flag is None:
-                continue
-            support_flag = bool(support_flag)
-
-            # Swing start: support -> !support
-            if last_support is not False and support_flag is False:
-                event = {
-                    "leg_name": leg_name,
-                    "swing_start_time": now_rel,
-                    "swing_end_time": None,
-                    "phase_first_time": {},
-                    "first_fan_release_time": None,
-                    "first_fan_boost_time": None,
-                    "first_fan_attach_time": None,
-                    "first_wall_touch_time": None,
-                    "first_measured_contact_time": None,
-                    "first_attachment_ready_time": None,
-                    "first_adhesion_time": None,
-                    "max_est_normal_force_n": 0.0,
-                    "max_compliant_offset_m": 0.0,
-                    "max_skirt_compression": 0.0,
-                    "fan_rpm_at_attach_ready": None,
-                    "fan_current_at_attach_ready": None,
-                    "phase_seq": [],
-                }
-                self._current_swing_event[leg_name] = event
-                self._swing_events[leg_name].append(event)
-
-            event = self._current_swing_event.get(leg_name)
-            if event is not None:
-                # Track phase first-seen times while the leg is in swing.
-                phase_id = row.get("%s_diag_phase_id" % leg_name)
-                if phase_id is not None:
-                    pid = int(phase_id)
-                    if pid not in event["phase_first_time"]:
-                        event["phase_first_time"][pid] = now_rel
-                        event["phase_seq"].append(pid)
-
-                # Fan command bookkeeping relative to swing start.
-                fan_mode = row.get("%s_fan_cmd_mode" % leg_name)
-                rel = now_rel - event["swing_start_time"]
-                if fan_mode is not None:
-                    fm = int(fan_mode)
-                    if fm == FAN_MODE_RELEASE and event["first_fan_release_time"] is None:
-                        event["first_fan_release_time"] = rel
-                    if fm == FAN_MODE_BOOST and event["first_fan_boost_time"] is None:
-                        event["first_fan_boost_time"] = rel
-                    if fm == FAN_MODE_ATTACH and event["first_fan_attach_time"] is None:
-                        event["first_fan_attach_time"] = rel
-
-                # Contact/adhesion progression relative to swing start.
-                if bool(row.get("%s_wall_touch" % leg_name)) and event["first_wall_touch_time"] is None:
-                    event["first_wall_touch_time"] = rel
-                if bool(row.get("%s_measured_contact" % leg_name)) and event["first_measured_contact_time"] is None:
-                    event["first_measured_contact_time"] = rel
-                if bool(row.get("%s_attachment_ready" % leg_name)) and event["first_attachment_ready_time"] is None:
-                    event["first_attachment_ready_time"] = rel
-                    event["fan_rpm_at_attach_ready"] = row.get("%s_fan_rpm_fb" % leg_name)
-                    event["fan_current_at_attach_ready"] = row.get("%s_fan_current_a" % leg_name)
-                if bool(row.get("%s_adhesion_mask" % leg_name)) and event["first_adhesion_time"] is None:
-                    event["first_adhesion_time"] = rel
-
-                est_force = row.get("%s_diag_estimated_leg_normal_force_n" % leg_name)
-                if est_force is not None:
-                    event["max_est_normal_force_n"] = max(
-                        event["max_est_normal_force_n"], abs(float(est_force))
-                    )
-                offset = row.get("%s_diag_compliant_normal_offset_m" % leg_name)
-                if offset is not None:
-                    event["max_compliant_offset_m"] = max(
-                        event["max_compliant_offset_m"], abs(float(offset))
-                    )
-                skirt = row.get("%s_skirt_compression_est" % leg_name)
-                if skirt is not None:
-                    event["max_skirt_compression"] = max(
-                        event["max_skirt_compression"], float(skirt)
-                    )
-
-            # Swing end: !support -> support
-            if last_support is False and support_flag is True and event is not None:
-                event["swing_end_time"] = now_rel
-                self._current_swing_event[leg_name] = None
-
-            self._last_support_leg[leg_name] = support_flag
-
-    # ---------- Main loop ----------
-
+    # ------------------------------------------------------------------ #
+    # 主流程
+    # ------------------------------------------------------------------ #
     def run(self):
-        try:
-            self._run_inner()
-        finally:
-            self._shutdown_cleanup()
+        self._t_zero_wall = time.time()
+        self._t_zero_ros = rospy.Time.now()
 
-    def _run_inner(self):
-        rospy.loginfo(
-            "[test_crawl_gait] waiting for body_reference / state / swing diag streams..."
-        )
-        self._wait_for_streams(timeout_s=8.0)
-        if not self._pretest_health_check(timeout_s=2.5):
-            self.test_phase = "PRECHECK_FAILED"
-            return
+        if not self._wait_streams(self.args.stream_timeout_s):
+            return 2
 
-        # Log a startup snapshot so the operator can see what the robot looked
-        # like before the mission was started.
-        rospy.loginfo(
-            "[test_crawl_gait] configured nominal UJC z = %.4f m (requested %.4f m). "
-            "Starting mission in %.2fs.",
-            self.configured_ujc_z_m,
-            self.ujc_z_mm / 1000.0,
-            self.warmup_s,
-        )
+        if not self._verify_init_hold():
+            return 3
 
-        self.test_phase = "WARMUP"
-        self.test_started_at = time.time()
-
-        logger_thread = threading.Thread(target=self._log_loop, name="crawl_log_loop")
-        logger_thread.daemon = True
-        logger_thread.start()
-        status_thread = threading.Thread(target=self._status_loop, name="crawl_status_loop")
-        status_thread.daemon = True
-        status_thread.start()
-
-        warmup_end = self.test_started_at + self.warmup_s
-        while time.time() < warmup_end and not self._stop_requested and not rospy.is_shutdown():
-            time.sleep(0.05)
-        if self._stop_requested or rospy.is_shutdown():
-            return
-
-        rospy.loginfo(
-            "[test_crawl_gait] publishing /control/mission_start=True; expect "
-            "INIT -> STICK -> CLIMB transitions."
-        )
-        self.test_phase = "CLIMB_REQUESTED"
-        self._publish_mission_start()
-
-        deadline = time.time() + self.test_duration_s
-        rate = rospy.Rate(self.control_rate_hz)
-        while not self._stop_requested and not rospy.is_shutdown() and time.time() < deadline:
-            # The test script itself does not publish BodyReference / AdhesionCommand
-            # during a crawl test: body_planner drives the gait and mission_supervisor
-            # owns the fans. We just monitor and keep the mission start flag latched.
-            if self.latest_mission_state == "FAULT":
-                rospy.logerr(
-                    "[test_crawl_gait] mission_supervisor entered FAULT state; aborting test loop."
+        if not bool(self.args.no_confirm):
+            try:
+                # 阻塞等用户回车
+                input(
+                    "\n>>> 请确认机器人已贴墙 (或在测试台上稳定就位), "
+                    "随后按回车开始 STICK -> CLIMB. (Ctrl+C 取消)\n>>> "
                 )
-                self.test_phase = "FAULTED"
+            except (EOFError, KeyboardInterrupt):
+                rospy.loginfo("test_crawl_gait: user cancelled before start.")
+                return 0
+
+        self._open_csv()
+
+        self._publish_start()
+        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s):
+            self._publish_pause()
+            return 4
+        if not self._wait_state(STATE_CLIMB, self.args.climb_timeout_s):
+            self._publish_pause()
+            return 5
+
+        rospy.loginfo(
+            "test_crawl_gait: CLIMB reached. recording for %.1fs at %.1f Hz...",
+            float(self.args.duration), float(self.args.log_rate_hz),
+        )
+
+        rate = rospy.Rate(max(1.0, float(self.args.log_rate_hz)))
+        end_t = time.time() + max(0.0, float(self.args.duration))
+        last_status_log = 0.0
+        while not rospy.is_shutdown() and time.time() < end_t:
+            with self._lock:
+                state = self._latest_mission_state
+            if state == STATE_FAULT:
+                rospy.logerr("test_crawl_gait: FAULT during CLIMB; aborting.")
                 break
+            row = self._sample_row(state or "")
+            try:
+                self._csv_writer.writerow(row)
+            except (IOError, ValueError):
+                pass
+            self._sample_count += 1
+
+            now = time.time()
+            if now - last_status_log > 5.0:
+                with self._lock:
+                    swing_summary = ", ".join(
+                        "%s=%d" % (leg, self._swing_count[leg])
+                        for leg in LEG_NAMES
+                    )
+                rospy.loginfo(
+                    "test_crawl_gait: t=%.1fs samples=%d swings(%s)",
+                    self._rel_now(), self._sample_count, swing_summary,
+                )
+                last_status_log = now
             rate.sleep()
 
-        rospy.loginfo("[test_crawl_gait] test window ended (stop_requested=%s)", self._stop_requested)
-        self.test_phase = "COOLDOWN"
-        self._publish_mission_pause()
-        cooldown_end = time.time() + self.cooldown_s
-        while time.time() < cooldown_end and not rospy.is_shutdown():
-            time.sleep(0.05)
-
-        self.test_phase = "TERMINATE"
-
-    def _log_loop(self):
-        rate = rospy.Rate(self.log_rate_hz)
-        while not rospy.is_shutdown():
-            if self.test_started_at is None:
-                rate.sleep()
-                continue
-            wall_time = time.time() - self.test_started_at
-            row = self._snapshot(wall_time)
-            self.samples.append(row)
-            self._update_swing_events(row, wall_time)
-            if self.test_phase == "TERMINATE":
-                break
-            rate.sleep()
-
-    def _status_loop(self):
-        rate = rospy.Rate(2.0)
-        while not rospy.is_shutdown():
-            if self.test_started_at is None:
-                rate.sleep()
-                continue
-            if not self.verbose_status:
-                rate.sleep()
-                if self.test_phase == "TERMINATE":
+        self._publish_pause()
+        # 给 mission_supervisor 一点时间转 PAUSE
+        wait_pause_until = time.time() + 3.0
+        while not rospy.is_shutdown() and time.time() < wait_pause_until:
+            with self._lock:
+                if not self._latest_mission_active:
                     break
-                continue
-            wall_time = time.time() - self.test_started_at
-            self._print_live_status(wall_time)
-            if self.test_phase == "TERMINATE":
-                break
-            rate.sleep()
+            rospy.sleep(0.1)
 
-    def _print_live_status(self, wall_time):
-        with self._state_lock:
-            mission_state = self.latest_mission_state
-            mission_active = self.latest_mission_active
-            body_ref = self.latest_body_reference
-            estimated = self.latest_estimated
-            fan_currents = list(self.latest_fan_currents) if self.latest_fan_currents else []
-            fan_rpm = list(self.latest_leg_rpm) if self.latest_leg_rpm else []
-            per_leg_diag = {k: list(v) if v else [] for k, v in self.latest_leg_diag.items()}
-            per_leg_fan_cmd = dict(self.latest_leg_adhesion_cmd)
+        self._close_csv()
+        self._print_summary()
+        return 0 if not self._fault_seen else 6
 
-        parts = []
-        for idx, leg_name in enumerate(LEG_NAMES):
-            diag = per_leg_diag.get(leg_name) or []
-            phase_id = None
-            if DIAG_FIELDS.index("phase_id") < len(diag):
-                phase_id = int(diag[DIAG_FIELDS.index("phase_id")])
-            phase_name = PHASE_NAMES.get(phase_id, "?") if phase_id is not None else "?"
-            support_cmd = None
-            cmd_fan = per_leg_fan_cmd.get(leg_name)
-            mode = int(cmd_fan.mode) if cmd_fan is not None else -1
-            mode_name = FAN_MODE_NAMES.get(mode, "--")
-            fan_cur = fan_currents[idx] if idx < len(fan_currents) else float("nan")
-            fan_rpm_fb = fan_rpm[idx] if idx < len(fan_rpm) else float("nan")
-            support = None
-            adh = None
-            if estimated is not None:
-                support = bool(_safe_index(estimated.support_mask, idx, False))
-                adh = bool(_safe_index(estimated.adhesion_mask, idx, False))
-            parts.append(
-                "%s[ph=%s sup=%s adh=%s fan=%s rpm=%.0f i=%.2f]" % (
-                    leg_name,
-                    phase_name,
-                    ("1" if support else "0") if support is not None else "?",
-                    ("1" if adh else "0") if adh is not None else "?",
-                    mode_name,
-                    fan_rpm_fb,
-                    fan_cur,
-                )
-            )
-        rospy.loginfo_throttle(
-            0.5,
-            "[test_crawl_gait t=%6.2fs] mission=%s active=%s %s",
-            wall_time,
-            mission_state,
-            mission_active,
-            " ".join(parts),
-        )
-
-    def _shutdown_cleanup(self):
-        rospy.loginfo("[test_crawl_gait] cleanup: pausing mission")
-        try:
-            self._publish_mission_pause()
-        except Exception as exc:
-            rospy.logwarn("[test_crawl_gait] failed to publish mission_pause: %s", exc)
-
-        if self.auto_release_fans_on_exit:
-            rospy.loginfo(
-                "[test_crawl_gait] releasing all fans on exit (--release-fans-on-exit=True)."
-            )
-            for _ in range(10):
-                if rospy.is_shutdown():
-                    break
-                self._release_all_fans()
-                rospy.sleep(0.05)
-        else:
-            rospy.loginfo(
-                "[test_crawl_gait] leaving fans under mission_supervisor control "
-                "(use --release-fans-on-exit to zero them at the end)."
-            )
-
-    # ---------- CSV output ----------
-
-    def _build_csv_fieldnames(self):
-        fieldnames = [
-            "wall_time",
-            "ros_time",
-            "test_phase",
-            "mission_state",
-            "mission_active",
-            "safe_mode",
-            "body_ref_pose_x",
-            "body_ref_pose_y",
-            "body_ref_pose_z",
-            "body_ref_quat_x",
-            "body_ref_quat_y",
-            "body_ref_quat_z",
-            "body_ref_quat_w",
-            "body_ref_linear_x",
-            "body_ref_linear_y",
-            "body_ref_linear_z",
-            "body_ref_angular_x",
-            "body_ref_angular_y",
-            "body_ref_angular_z",
-            "body_ref_gait_mode",
-        ]
-        for leg_name in LEG_NAMES:
-            fieldnames.append("body_ref_support_" + leg_name)
-        fieldnames += [
-            "body_est_pose_x",
-            "body_est_pose_y",
-            "body_est_pose_z",
-            "body_est_quat_x",
-            "body_est_quat_y",
-            "body_est_quat_z",
-            "body_est_quat_w",
-            "body_est_linear_x",
-            "body_est_linear_y",
-            "body_est_linear_z",
-            "body_est_angular_x",
-            "body_est_angular_y",
-            "body_est_angular_z",
-        ]
-        for leg_name in LEG_NAMES:
-            fieldnames.append("%s_phase_name" % leg_name)
-            fieldnames += [
-                "%s_cmd_center_x" % leg_name,
-                "%s_cmd_center_y" % leg_name,
-                "%s_cmd_center_z" % leg_name,
-                "%s_cmd_vel_x" % leg_name,
-                "%s_cmd_vel_y" % leg_name,
-                "%s_cmd_vel_z" % leg_name,
-                "%s_cmd_skirt_target" % leg_name,
-                "%s_cmd_support_leg" % leg_name,
-                "%s_cmd_normal_force_limit" % leg_name,
-            ]
-            for field_name in DIAG_FIELDS:
-                fieldnames.append("%s_diag_%s" % (leg_name, field_name))
-            fieldnames += [
-                "%s_fan_cmd_mode" % leg_name,
-                "%s_fan_cmd_mode_name" % leg_name,
-                "%s_fan_cmd_rpm" % leg_name,
-                "%s_fan_cmd_normal_force_limit" % leg_name,
-                "%s_fan_cmd_required_adhesion_force" % leg_name,
-                "%s_fan_current_a" % leg_name,
-                "%s_fan_rpm_fb" % leg_name,
-                "%s_stance_fx" % leg_name,
-                "%s_stance_fy" % leg_name,
-                "%s_stance_fz" % leg_name,
-                "%s_stance_tx" % leg_name,
-                "%s_stance_ty" % leg_name,
-                "%s_stance_tz" % leg_name,
-                "%s_stance_normal_force_limit" % leg_name,
-                "%s_stance_tangential_magnitude" % leg_name,
-                "%s_stance_required_adhesion_force" % leg_name,
-                "%s_stance_planned_support" % leg_name,
-                "%s_stance_actual_contact" % leg_name,
-                "%s_stance_active" % leg_name,
-                "%s_skirt_compression_est" % leg_name,
-                "%s_slip_risk" % leg_name,
-                "%s_contact_confidence" % leg_name,
-                "%s_seal_confidence" % leg_name,
-                "%s_leg_torque_sum" % leg_name,
-                "%s_est_fan_current" % leg_name,
-                "%s_wall_touch" % leg_name,
-                "%s_measured_contact" % leg_name,
-                "%s_early_contact" % leg_name,
-                "%s_contact_mask" % leg_name,
-                "%s_support_mask" % leg_name,
-                "%s_adhesion_mask" % leg_name,
-                "%s_attachment_ready" % leg_name,
-                "%s_plan_support" % leg_name,
-                "%s_ujc_x" % leg_name,
-                "%s_ujc_y" % leg_name,
-                "%s_ujc_z" % leg_name,
-                "%s_leg_current_sum_a" % leg_name,
-                "%s_leg_current_count" % leg_name,
-                "%s_leg_torque_sum_nm" % leg_name,
-                "%s_leg_torque_count" % leg_name,
-            ]
-        return fieldnames
-
-    def save_log(self):
-        if not self.samples:
-            rospy.logwarn("[test_crawl_gait] no samples captured; skip log")
-            return None
-        os.makedirs(self.output_dir, exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(
-            self.output_dir,
-            "crawl_gait_%s.csv" % stamp,
-        )
-        fieldnames = self._build_csv_fieldnames()
-        with open(filename, "w") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            for row in self.samples:
-                serialized = {}
-                for key in fieldnames:
-                    value = row.get(key)
-                    if value is None:
-                        serialized[key] = ""
-                    elif isinstance(value, bool):
-                        serialized[key] = "1" if value else "0"
-                    elif isinstance(value, float):
-                        if math.isnan(value) or math.isinf(value):
-                            serialized[key] = ""
-                        else:
-                            serialized[key] = "%.6f" % value
-                    else:
-                        serialized[key] = value
-                writer.writerow(serialized)
-        rospy.loginfo(
-            "[test_crawl_gait] log saved to %s (%d rows, %d columns)",
-            filename,
-            len(self.samples),
-            len(fieldnames),
-        )
-        return filename
-
-    # ---------- Summary ----------
-
-    def print_summary(self):
-        print()
-        print("=" * 78)
-        print(" Whole-body crawl gait test summary")
-        print("=" * 78)
-        print("  UJC z configured (param/m): %.4f" % self.configured_ujc_z_m)
-        print("  UJC z requested  (cli /mm ): %.3f" % self.ujc_z_mm)
-        print("  test_duration_s           : %.2f" % self.test_duration_s)
-        print("  samples captured          : %d" % len(self.samples))
-
-        if self._mission_state_history:
-            print()
-            print("  Mission state transitions:")
-            for t_rel, state in self._mission_state_history:
-                print("    t=%6.3fs  %s" % (t_rel, state))
-
-        if not self.samples:
-            print("=" * 78)
-            return
-
-        duration = self.samples[-1]["wall_time"] - self.samples[0]["wall_time"]
-        print()
-        print("  Recorded window: %.2fs  (samples: %d, avg rate: %.1f Hz)" % (
-            duration,
-            len(self.samples),
-            len(self.samples) / max(duration, 1e-3),
-        ))
-
-        # Per-leg swing-event analysis
-        print()
-        print("  --- Per-leg swing / fan coordination ---")
-        for leg_name in LEG_NAMES:
-            events = [e for e in self._swing_events[leg_name] if e["swing_end_time"] is not None]
-            incomplete = [e for e in self._swing_events[leg_name] if e["swing_end_time"] is None]
-            print(
-                "  %s: complete_swings=%d  open_swings_at_cutoff=%d"
-                % (leg_name, len(events), len(incomplete))
-            )
-            if not events:
-                if incomplete:
-                    ev = incomplete[-1]
-                    print(
-                        "    last open swing started at t=%.3fs; phases seen so far: %s"
-                        % (
-                            ev["swing_start_time"],
-                            ", ".join(
-                                PHASE_NAMES.get(p, str(p)) for p in ev["phase_seq"]
-                            ) or "(none)",
-                        )
-                    )
-                continue
-
-            swing_durations = [
-                e["swing_end_time"] - e["swing_start_time"] for e in events
-            ]
-            mm = _min_max_mean(swing_durations)
-            if mm is not None:
-                lo, hi, mid = mm
-                print(
-                    "    swing duration  (s) min=%.3f  max=%.3f  mean=%.3f"
-                    % (lo, hi, mid)
-                )
-
-            def _collect(field):
-                values = [e[field] for e in events if e[field] is not None]
-                return _min_max_mean(values)
-
-            for field in (
-                "first_fan_release_time",
-                "first_fan_boost_time",
-                "first_fan_attach_time",
-                "first_wall_touch_time",
-                "first_measured_contact_time",
-                "first_attachment_ready_time",
-                "first_adhesion_time",
-            ):
-                mm = _collect(field)
-                label = field.replace("first_", "first ").replace("_time", "").replace("_", " ")
-                if mm is None:
-                    print("    %s: (never asserted)" % label)
-                else:
-                    lo, hi, mid = mm
-                    print(
-                        "    %s (s since swing start): min=%.3f max=%.3f mean=%.3f "
-                        "(n=%d / %d)"
-                        % (
-                            label,
-                            lo,
-                            hi,
-                            mid,
-                            sum(1 for e in events if e[field] is not None),
-                            len(events),
-                        )
-                    )
-
-            max_force = _collect("max_est_normal_force_n")
-            if max_force is not None:
-                lo, hi, mid = max_force
-                print(
-                    "    peak |normal force| per swing (N): min=%.2f max=%.2f mean=%.2f"
-                    % (lo, hi, mid)
-                )
-
-            max_offset = _collect("max_compliant_offset_m")
-            if max_offset is not None:
-                lo, hi, mid = max_offset
-                print(
-                    "    peak admittance travel per swing (m): min=%.4f max=%.4f mean=%.4f"
-                    % (lo, hi, mid)
-                )
-
-            max_skirt = _collect("max_skirt_compression")
-            if max_skirt is not None:
-                lo, hi, mid = max_skirt
-                print(
-                    "    peak skirt compression (unitless): min=%.3f max=%.3f mean=%.3f"
-                    % (lo, hi, mid)
-                )
-
-            # Fan coordination window: time from first_fan_boost to first_adhesion (per swing).
-            boost_to_adhesion = []
-            for ev in events:
-                if ev["first_fan_boost_time"] is not None and ev["first_adhesion_time"] is not None:
-                    boost_to_adhesion.append(
-                        ev["first_adhesion_time"] - ev["first_fan_boost_time"]
-                    )
-            mm = _min_max_mean(boost_to_adhesion)
-            if mm is not None:
-                lo, hi, mid = mm
-                print(
-                    "    fan_boost -> adhesion latency (s): min=%.3f max=%.3f mean=%.3f"
-                    % (lo, hi, mid)
-                )
-
-            # Coordination check: the fan boost should normally happen after the leg is
-            # past PRELOAD (phase 5) / around COMPLIANT_SETTLE (phase 6). Count how many
-            # swings had boost land on or after phase 5.
-            in_phase = {"boost_before_phase5": 0, "boost_on_or_after_phase5": 0}
-            for ev in events:
-                t_boost = ev["first_fan_boost_time"]
-                t_p5 = ev["phase_first_time"].get(5)
-                if t_boost is None:
-                    continue
-                if t_p5 is None or t_boost < t_p5:
-                    in_phase["boost_before_phase5"] += 1
-                else:
-                    in_phase["boost_on_or_after_phase5"] += 1
-            print(
-                "    fan-boost vs swing phase: on_or_after_PRELOAD=%d  before_PRELOAD=%d "
-                "(lower 'before' is better)"
-                % (
-                    in_phase["boost_on_or_after_phase5"],
-                    in_phase["boost_before_phase5"],
-                )
-            )
-
-        # Gait-level: average cycle time across legs using body_ref support-mask edges.
-        print()
-        print("  --- Gait cycle timing (from body_ref_support_* edges) ---")
-        for leg_name in LEG_NAMES:
-            edges = []
-            last = None
-            for row in self.samples:
-                s = row.get("body_ref_support_" + leg_name)
-                if s is None:
-                    continue
-                if last is None:
-                    last = s
-                    continue
-                if bool(s) != bool(last):
-                    edges.append((row["wall_time"], bool(s)))
-                    last = bool(s)
-            starts = [t for t, s in edges if not s]  # True -> False (swing start)
-            if len(starts) >= 2:
-                periods = [b - a for a, b in zip(starts, starts[1:])]
-                mm = _min_max_mean(periods)
-                lo, hi, mid = mm
-                print(
-                    "  %s: cycle_period(s)  n=%d  min=%.3f  max=%.3f  mean=%.3f"
-                    % (leg_name, len(periods), lo, hi, mid)
-                )
-            else:
-                print("  %s: (no full cycle observed in recording)" % leg_name)
-
-        print("=" * 78)
+    def _print_summary(self):
+        rospy.loginfo("=" * 70)
+        rospy.loginfo("test_crawl_gait: summary")
+        rospy.loginfo("  csv: %s", self._csv_path)
+        rospy.loginfo("  samples: %d", self._sample_count)
+        rospy.loginfo("  state transitions:")
+        for rel, state in self._state_history:
+            rospy.loginfo("    t=+%.2fs  -> %s", rel, state)
+        rospy.loginfo("  completed swing cycles per leg:")
+        for leg in LEG_NAMES:
+            rospy.loginfo("    %s: %d", leg, self._swing_count[leg])
+        rospy.loginfo("=" * 70)
 
 
-def parse_args(argv=None):
+def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description="整机 crawl 步态半交互测试",
     )
     parser.add_argument(
-        "--ujc-z-mm",
-        type=float,
-        default=-80.0,
-        help=(
-            "Override /gait_controller/nominal_universal_joint_center_z (millimetres). "
-            "Default: -80.0 mm. NOTE: consumed at node startup; if the control stack "
-            "is already running it must be relaunched to pick up a new value."
-        ),
+        "--duration", type=float, default=60.0,
+        help="CLIMB 阶段记录时长 (s, 默认 60)",
     )
     parser.add_argument(
-        "--test-duration-s",
-        type=float,
-        default=30.0,
-        help="Recording window after mission_start is published (default: 30s).",
+        "--log-rate-hz", type=float, default=50.0,
+        help="CSV 采样率 (Hz, 默认 50)",
     )
     parser.add_argument(
-        "--warmup-s",
-        type=float,
-        default=1.5,
-        help="Delay after the test script starts logging before /control/mission_start "
-             "is published (default: 1.5s). Gives a clean pre-mission baseline in the CSV.",
+        "--hold-check-s", type=float, default=3.0,
+        help="INIT 稳定性观察时长 (s, 默认 3)",
     )
     parser.add_argument(
-        "--cooldown-s",
-        type=float,
-        default=1.0,
-        help="Delay after /control/mission_pause is published before CSV is saved "
-             "(default: 1.0s). Captures the PAUSE transient in the log.",
+        "--hold-tol-mm", type=float, default=5.0,
+        help="INIT 阶段 UJC z 偏离 operating 的允许误差 (mm, 默认 5)",
     )
     parser.add_argument(
-        "--control-rate-hz",
-        type=float,
-        default=50.0,
-        help="Outer monitoring loop rate (default: 50Hz).",
+        "--stick-timeout-s", type=float, default=15.0,
+        help="STICK 等待超时 (s, 默认 15)",
     )
     parser.add_argument(
-        "--log-rate-hz",
-        type=float,
-        default=50.0,
-        help="Rate at which samples are captured to the log (default: 50Hz).",
+        "--climb-timeout-s", type=float, default=30.0,
+        help="CLIMB 等待超时 (s, 默认 30)",
     )
     parser.add_argument(
-        "--linear-velocity-mps",
-        nargs=3,
-        metavar=("X", "Y", "Z"),
-        default=[0.0, 0.0, 0.0],
-        help="Desired body linear velocity (m/s) pushed to body_planner params. "
-             "Requires body_planner restart to take effect (default: in-place crawl).",
+        "--stream-timeout-s", type=float, default=10.0,
+        help="上游话题就绪超时 (s, 默认 10)",
     )
     parser.add_argument(
-        "--angular-velocity-rps",
-        nargs=3,
-        metavar=("X", "Y", "Z"),
-        default=[0.0, 0.0, 0.0],
-        help="Desired body angular velocity (rad/s) pushed to body_planner params. "
-             "Requires body_planner restart (default: 0 0 0).",
+        "--output-dir", type=str,
+        default=os.path.expanduser("~/climbing_ws/test_logs"),
+        help="CSV 输出目录",
     )
     parser.add_argument(
-        "--output-dir",
-        default=_default_test_logs_dir(),
-        help="Where to write the CSV log (default: <workspace>/test_logs).",
-    )
-    parser.add_argument(
-        "--verbose-status",
-        action="store_true",
-        help="Print a throttled live per-leg status line while the test runs.",
-    )
-    parser.add_argument(
-        "--release-fans-on-exit",
-        action="store_true",
-        help="Explicitly command all fans to mode=RELEASE rpm=0 during cleanup. "
-             "Default: leave fans under mission_supervisor PAUSE-state control.",
+        "--no-confirm", action="store_true",
+        help="跳过手动回车确认 (用于无人值守批量测试)",
     )
     return parser.parse_args(argv)
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    tester = CrawlGaitTest(args)
+def main():
+    # 先解析参数 (使用 rospy.myargv 过滤 ROS remap), 这样 --help 不会触发
+    # rospy.init_node 去连 ROS master.
+    cli_args = rospy.myargv(argv=sys.argv)[1:]
+    args = parse_args(cli_args)
+    rospy.init_node("test_crawl_gait", anonymous=False)
+    tester = CrawlGaitTester(args)
+    code = 0
     try:
-        tester.run()
+        code = tester.run()
     except rospy.ROSInterruptException:
-        pass
-    tester.save_log()
-    tester.print_summary()
+        code = 130
+    except KeyboardInterrupt:
+        code = 130
+        try:
+            tester._publish_pause()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        tester._close_csv()
+    finally:
+        # 确保 CSV 关掉
+        tester._close_csv()
+    sys.exit(code)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:] if len(sys.argv) > 1 else None)
+    main()
