@@ -46,6 +46,20 @@ class LegIkExecutor(object):
         self.nominal_universal_joint_center_z = float(
             get_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z + abs(self.l_d6 + self.l_d7))
         )
+        self.startup_target_enabled = bool(get_cfg("startup_target_enabled", False))
+        self.startup_target_x = float(get_cfg("startup_target_x", self.nominal_x))
+        self.startup_target_y = float(get_cfg("startup_target_y", self.nominal_y))
+        self.startup_target_universal_joint_center_z = float(
+            get_cfg(
+                "startup_target_universal_joint_center_z",
+                self.nominal_universal_joint_center_z,
+            )
+        )
+        self.startup_target_hold_s = max(float(get_cfg("startup_target_hold_s", 0.0)), 0.0)
+        self.startup_target_move_duration_s = max(
+            float(get_cfg("startup_target_move_duration_s", 0.0)),
+            0.0,
+        )
         self.gear_ratio_joint2 = float(get_cfg("gear_ratio_joint2", 1.0))
         self.gear_ratio_joint3 = float(get_cfg("gear_ratio_joint3", 4.421))
         self.joint_limit_deg = get_cfg(
@@ -87,6 +101,10 @@ class LegIkExecutor(object):
         ]
         self.last_joint_deg_by_leg = {name: list(self.nominal_joint_deg) for name in self.leg_order}
         self._initialize_startup_pose_mode()
+        self.startup_time_sec = rospy.Time.now().to_sec()
+        self.external_command_received = False
+        self.startup_move_started = False
+        self.startup_move_completed = False
 
         self.targets_m = {name: Point(0.0, 0.0, self.nominal_universal_joint_center_z / 1000.0) for name in self.leg_order}
         self.last_ticks = self.compute_all_ticks()
@@ -98,6 +116,11 @@ class LegIkExecutor(object):
     @staticmethod
     def _clamp(value, lo, hi):
         return max(lo, min(hi, value))
+
+    @staticmethod
+    def _smoothstep5(phase):
+        phase = max(0.0, min(1.0, float(phase)))
+        return phase * phase * phase * (10.0 + phase * (-15.0 + 6.0 * phase))
 
     def _load_board_configs(self):
         board_configs = {}
@@ -282,19 +305,8 @@ class LegIkExecutor(object):
         ticks = home + direction * ((output_deg - nominal_output_deg) * ratio) * unit
         return self._normalize_target_for_mode(motor_id, ticks)
 
-    def _target_to_leg_deltas_mm(self, point_m):
-        if self.input_mode == "delta_from_nominal_m":
-            return point_m.x * 1000.0, point_m.y * 1000.0, point_m.z * 1000.0
-        return point_m.x * 1000.0, point_m.y * 1000.0, point_m.z * 1000.0 - self.nominal_universal_joint_center_z
-
-    def compute_leg_ticks(self, leg_name, point_m):
+    def _compute_leg_ticks_from_leg_frame_mm(self, leg_name, tx_mm, ty_mm, tz_mm):
         leg = self.legs[leg_name]
-        dx_base_mm, dy_base_mm, dz_delta_base_mm = self._target_to_leg_deltas_mm(point_m)
-        dx_leg_mm, dy_leg_mm = self._base_delta_to_leg_delta(dx_base_mm, dy_base_mm, leg)
-
-        tx_mm = self.nominal_x + dx_leg_mm
-        ty_mm = self.nominal_y + dy_leg_mm
-        tz_mm = self.nominal_universal_joint_center_z + dz_delta_base_mm
         reference_deg = self.last_joint_deg_by_leg.get(leg_name, self.nominal_joint_deg)
         q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg)
         self.last_joint_deg_by_leg[leg_name] = [q1_deg, q2_deg, q3_deg]
@@ -309,22 +321,82 @@ class LegIkExecutor(object):
             ticks.append(self._output_deg_to_ticks(motor_id, cmd_deg[joint_index], joint_index))
         return ticks
 
+    def _target_to_leg_deltas_mm(self, point_m):
+        if self.input_mode == "delta_from_nominal_m":
+            return point_m.x * 1000.0, point_m.y * 1000.0, point_m.z * 1000.0
+        return point_m.x * 1000.0, point_m.y * 1000.0, point_m.z * 1000.0 - self.nominal_universal_joint_center_z
+
+    def compute_leg_ticks(self, leg_name, point_m):
+        dx_base_mm, dy_base_mm, dz_delta_base_mm = self._target_to_leg_deltas_mm(point_m)
+        leg = self.legs[leg_name]
+        dx_leg_mm, dy_leg_mm = self._base_delta_to_leg_delta(dx_base_mm, dy_base_mm, leg)
+
+        tx_mm = self.nominal_x + dx_leg_mm
+        ty_mm = self.nominal_y + dy_leg_mm
+        tz_mm = self.nominal_universal_joint_center_z + dz_delta_base_mm
+        return self._compute_leg_ticks_from_leg_frame_mm(leg_name, tx_mm, ty_mm, tz_mm)
+
     def compute_all_ticks(self):
         ordered_ticks = []
         for leg_name in self.leg_order:
             ordered_ticks.extend(self.compute_leg_ticks(leg_name, self.targets_m[leg_name]))
         return ordered_ticks
 
+    def _startup_move_progress(self, now_sec):
+        if not self.startup_target_enabled or self.external_command_received:
+            return None
+        elapsed = max(0.0, float(now_sec) - self.startup_time_sec)
+        if elapsed <= self.startup_target_hold_s:
+            return 0.0
+        if self.startup_target_move_duration_s <= 1e-6:
+            return 1.0
+        return self._smoothstep5(
+            (elapsed - self.startup_target_hold_s) / self.startup_target_move_duration_s
+        )
+
+    def _compute_startup_move_ticks(self, now_sec):
+        progress = self._startup_move_progress(now_sec)
+        if progress is None:
+            return None
+        if self.startup_target_enabled and progress > 0.0 and not self.startup_move_started:
+            rospy.loginfo(
+                "leg_ik_executor startup move: nominal UJC -> target (%.2f, %.2f, %.2f) mm in leg frame 0",
+                self.startup_target_x,
+                self.startup_target_y,
+                self.startup_target_universal_joint_center_z,
+            )
+            self.startup_move_started = True
+        if self.startup_target_enabled and progress >= 1.0 and not self.startup_move_completed:
+            rospy.loginfo("leg_ik_executor startup move completed")
+            self.startup_move_completed = True
+
+        tx_mm = self.nominal_x + progress * (self.startup_target_x - self.nominal_x)
+        ty_mm = self.nominal_y + progress * (self.startup_target_y - self.nominal_y)
+        tz_mm = self.nominal_universal_joint_center_z + progress * (
+            self.startup_target_universal_joint_center_z - self.nominal_universal_joint_center_z
+        )
+
+        ordered_ticks = []
+        for leg_name in self.leg_order:
+            ordered_ticks.extend(
+                self._compute_leg_ticks_from_leg_frame_mm(leg_name, tx_mm, ty_mm, tz_mm)
+            )
+        return ordered_ticks
+
     def command_callback(self, msg):
         if msg.leg_name not in self.targets_m:
             rospy.logwarn_throttle(2.0, "Unknown leg name for IK executor: %s", msg.leg_name)
             return
+        self.external_command_received = True
         self.targets_m[msg.leg_name] = Point(msg.center.x, msg.center.y, msg.center.z)
         self.last_ticks = self.compute_all_ticks()
 
     def publish_ticks(self, _event):
         if not self.enable_auto_position_commands:
             return
+        startup_ticks = self._compute_startup_move_ticks(rospy.Time.now().to_sec())
+        if startup_ticks is not None:
+            self.last_ticks = startup_ticks
         ticks_msg = JointState()
         ticks_msg.header.stamp = rospy.Time.now()
         ticks_msg.name = [str(motor_id) for motor_id in self.motor_index]

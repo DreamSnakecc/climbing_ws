@@ -114,6 +114,8 @@ DIAG_FIELDS = [
     "press_current_delta_a",
     "press_contact_confirmed",
 ]
+PHASE_ID_FIELD_INDEX = DIAG_FIELDS.index("phase_id")
+SUPPORT_PHASE_ID = 0
 
 
 def _default_test_logs_dir():
@@ -540,6 +542,59 @@ class CrawlGaitTest(object):
             est,
             js,
             diag,
+        )
+        return False
+
+    def _pretest_health_check(self, timeout_s=2.0):
+        """Fail fast if the controller does not start from a clean all-support state."""
+        deadline = time.time() + max(float(timeout_s), 0.1)
+        last_reason = "no data yet"
+        while time.time() < deadline and not rospy.is_shutdown():
+            with self._state_lock:
+                estimated = self.latest_estimated
+                per_leg_cmd = dict(self.latest_leg_command)
+                per_leg_diag = {k: list(v) if v else [] for k, v in self.latest_leg_diag.items()}
+
+            reasons = []
+            for leg_name in LEG_NAMES:
+                cmd = per_leg_cmd.get(leg_name)
+                if cmd is None:
+                    reasons.append("%s:missing_cmd" % leg_name)
+                elif not bool(cmd.support_leg):
+                    reasons.append("%s:cmd_support=0" % leg_name)
+
+                diag = per_leg_diag.get(leg_name) or []
+                if PHASE_ID_FIELD_INDEX >= len(diag):
+                    reasons.append("%s:missing_phase" % leg_name)
+                else:
+                    phase_id = int(diag[PHASE_ID_FIELD_INDEX])
+                    if phase_id != SUPPORT_PHASE_ID:
+                        reasons.append(
+                            "%s:phase=%s" % (leg_name, PHASE_NAMES.get(phase_id, str(phase_id)))
+                        )
+
+            if estimated is None:
+                reasons.append("estimated_state_missing")
+            else:
+                support_mask = list(estimated.support_mask)
+                for idx, leg_name in enumerate(LEG_NAMES):
+                    if idx >= len(support_mask) or not bool(support_mask[idx]):
+                        reasons.append("%s:est_support=0" % leg_name)
+
+            if not reasons:
+                rospy.loginfo(
+                    "[test_crawl_gait] pretest health check passed: all legs in SUPPORT with support masks asserted."
+                )
+                return True
+
+            last_reason = ", ".join(reasons)
+            time.sleep(0.05)
+
+        rospy.logerr(
+            "[test_crawl_gait] pretest health check failed (dirty start state): %s. "
+            "Refusing to start mission. Relaunch/clear control stack until all legs report "
+            "SUPPORT (cmd + diag + estimated support_mask).",
+            last_reason,
         )
         return False
 
@@ -978,6 +1033,9 @@ class CrawlGaitTest(object):
             "[test_crawl_gait] waiting for body_reference / state / swing diag streams..."
         )
         self._wait_for_streams(timeout_s=8.0)
+        if not self._pretest_health_check(timeout_s=2.5):
+            self.test_phase = "PRECHECK_FAILED"
+            return
 
         # Log a startup snapshot so the operator can see what the robot looked
         # like before the mission was started.
