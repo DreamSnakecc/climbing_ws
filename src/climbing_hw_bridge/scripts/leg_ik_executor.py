@@ -46,13 +46,29 @@ class LegIkExecutor(object):
         self.nominal_universal_joint_center_z = float(
             get_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z + abs(self.l_d6 + self.l_d7))
         )
+        self.operating_universal_joint_center_x = float(
+            get_cfg("operating_universal_joint_center_x", self.nominal_x)
+        )
+        self.operating_universal_joint_center_y = float(
+            get_cfg("operating_universal_joint_center_y", self.nominal_y)
+        )
+        self.operating_universal_joint_center_z = float(
+            get_cfg(
+                "operating_universal_joint_center_z",
+                self.nominal_universal_joint_center_z,
+            )
+        )
         self.startup_target_enabled = bool(get_cfg("startup_target_enabled", False))
-        self.startup_target_x = float(get_cfg("startup_target_x", self.nominal_x))
-        self.startup_target_y = float(get_cfg("startup_target_y", self.nominal_y))
+        self.startup_target_x = float(
+            get_cfg("startup_target_x", self.operating_universal_joint_center_x)
+        )
+        self.startup_target_y = float(
+            get_cfg("startup_target_y", self.operating_universal_joint_center_y)
+        )
         self.startup_target_universal_joint_center_z = float(
             get_cfg(
                 "startup_target_universal_joint_center_z",
-                self.nominal_universal_joint_center_z,
+                self.operating_universal_joint_center_z,
             )
         )
         self.startup_target_hold_s = max(float(get_cfg("startup_target_hold_s", 0.0)), 0.0)

@@ -139,6 +139,24 @@ class StanceForceOptimizer(object):
                 + abs(float(rospy.get_param("/gait_controller/link_d6", -13.5)) + float(rospy.get_param("/gait_controller/link_d7", -106.7))),
             )
         ) / 1000.0
+        operating_x = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_x",
+                nominal_x * 1000.0,
+            )
+        ) / 1000.0
+        operating_y = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_y",
+                nominal_y * 1000.0,
+            )
+        ) / 1000.0
+        operating_z = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_z",
+                nominal_z * 1000.0,
+            )
+        ) / 1000.0
         legs = rospy.get_param("/legs", {})
 
         positions = {}
@@ -150,7 +168,7 @@ class StanceForceOptimizer(object):
             sin_yaw = math.sin(hip_yaw)
 
             hip_origin = np.array([base_radius * cos_yaw, base_radius * sin_yaw, 0.0], dtype=float)
-            local_nominal = np.array([nominal_x, nominal_y, nominal_z], dtype=float)
+            local_nominal = np.array([operating_x, operating_y, operating_z], dtype=float)
             rotation = np.array(
                 [
                     [cos_yaw, -sin_yaw, 0.0],

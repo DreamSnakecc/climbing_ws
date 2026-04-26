@@ -196,6 +196,24 @@ class StateEstimator(object):
                 (self.legacy_nominal_control_point_z_m + abs(self.l_d6 + self.l_d7)) * 1000.0,
             )
         ) / 1000.0
+        self.operating_universal_joint_center_x_m = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_x",
+                self.nominal_x_m * 1000.0,
+            )
+        ) / 1000.0
+        self.operating_universal_joint_center_y_m = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_y",
+                self.nominal_y_m * 1000.0,
+            )
+        ) / 1000.0
+        self.operating_universal_joint_center_z_m = float(
+            rospy.get_param(
+                "/gait_controller/operating_universal_joint_center_z",
+                self.nominal_universal_joint_center_z_m * 1000.0,
+            )
+        ) / 1000.0
         self.skirt_height_uncompressed_m = float(rospy.get_param("/robot/skirt_height_uncompressed_mm", 20.0)) / 1000.0
         self.skirt_height_compressed_min_m = float(rospy.get_param("/robot/skirt_height_compressed_min_mm", 8.0)) / 1000.0
         self.skirt_height_compressed_max_m = float(rospy.get_param("/robot/skirt_height_compressed_max_mm", 10.0)) / 1000.0
@@ -530,9 +548,9 @@ class StateEstimator(object):
         sin_yaw = math.sin(hip_yaw)
         hip_origin = [self.base_radius_m * cos_yaw, self.base_radius_m * sin_yaw, 0.0]
         return [
-            hip_origin[0] + cos_yaw * self.nominal_x_m - sin_yaw * self.nominal_y_m,
-            hip_origin[1] + sin_yaw * self.nominal_x_m + cos_yaw * self.nominal_y_m,
-            self.nominal_universal_joint_center_z_m,
+            hip_origin[0] + cos_yaw * self.operating_universal_joint_center_x_m - sin_yaw * self.operating_universal_joint_center_y_m,
+            hip_origin[1] + sin_yaw * self.operating_universal_joint_center_x_m + cos_yaw * self.operating_universal_joint_center_y_m,
+            self.operating_universal_joint_center_z_m,
         ]
 
     def _foot_center_from_universal_joint_center(self, universal_joint_center, compression_estimate):
