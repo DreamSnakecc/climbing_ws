@@ -7,7 +7,7 @@ import numpy as np
 import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout, String
 
 
 def clamp(value, lower_bound, upper_bound):
@@ -214,6 +214,12 @@ class SwingLegController(object):
         self.compliant_force_limit_n = max(float(get_cfg("compliant_force_limit_n", 80.0)), self.compliant_force_deadband_n)
         self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
         self.compliant_start_requires_contact = bool(get_cfg("compliant_start_requires_contact", False))
+        # 当 mission_state 处于这些状态时，强制将 LegCenterCommand.support_leg 报为 False，
+        # 阻止 dynamixel_bridge 把电机切到电流(支撑)模式；用于 PC 启动初期(INIT)避免位置环失效导致腿失稳。
+        # 默认仅在 INIT 状态生效，STICK/CLIMB/PAUSE/FAULT 仍按上层逻辑发布原始 support_leg 标志。
+        self.hold_position_states = set(
+            str(value) for value in get_cfg("hold_position_states", ["INIT"])
+        )
         self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
         # PRESS-phase delta-contact detector: baseline (sum|joint effort|, sum|joint current|) is
         # captured on the first PRESS tick (leg just came off static LIFT hold, still in free air),
@@ -278,6 +284,8 @@ class SwingLegController(object):
         self.have_body_reference = False
         self.have_estimated_state = False
         self.last_update_time = None
+        # 默认 INIT：在收到 latched /control/mission_state 之前按"未启动"处理，电机不切电流模式。
+        self.mission_state = "INIT"
         self.swing_phase_start = {}
         self.swing_states = {}
         for leg_name in self.leg_names:
@@ -363,6 +371,15 @@ class SwingLegController(object):
         ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
+        rospy.Subscriber("/control/mission_state", String, self._mission_state_callback, queue_size=10)
+
+    def _mission_state_callback(self, msg):
+        try:
+            value = str(msg.data)
+        except (TypeError, ValueError):
+            return
+        if value:
+            self.mission_state = value
 
     def _build_leg_yaw_map(self):
         leg_cfg = rospy.get_param("/legs", {})
@@ -1195,7 +1212,13 @@ class SwingLegController(object):
         msg.center = Point(position[0], position[1], position[2])
         msg.center_velocity = Vector3(velocity[0], velocity[1], velocity[2])
         msg.skirt_compression_target = float(skirt_compression_target)
-        msg.support_leg = bool(support_leg)
+        # 在 hold_position_states (默认 INIT) 期间，把 support_leg 报为 False，
+        # 防止 dynamixel_bridge 把电机切到电流模式而失去位置环。
+        # 中心命令仍正常发布，IK 端继续维持 operating UJC 目标。
+        if self.mission_state in self.hold_position_states:
+            msg.support_leg = False
+        else:
+            msg.support_leg = bool(support_leg)
         msg.desired_normal_force_limit = float(normal_force_limit)
         return msg
 

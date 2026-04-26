@@ -239,6 +239,11 @@ swing_leg_controller:
   # OR by default: a single well-behaved channel is enough to declare contact. Set true to
   # require both torque and current channels to trip simultaneously (more conservative).
   press_contact_require_both: false
+  # 在这些 mission_state 下，swing_leg_controller 发布的 LegCenterCommand.support_leg 强制为 false，
+  # 阻止 dynamixel_bridge 在 PC 启动初期(机器人还没贴墙时) 把电机切到电流(支撑)模式。
+  # IK 端仍照常接收 operating UJC 目标，电机保持位置模式以稳定持位。
+  # 默认仅在 INIT 持位；进入 STICK/CLIMB 后恢复正常 support_leg 语义。可加入 PAUSE/FAULT 等以扩展行为。
+  hold_position_states: ["INIT"]
 
 jetson:
   command_rate_hz: 100.0
