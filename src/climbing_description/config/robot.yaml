@@ -22,7 +22,7 @@ body_planner:
   com_shift_gain_m: [0.025, 0.03, 0.0]
   orientation_shift_gain_deg: [6.0, 4.0, 0.0]
   slip_pause_threshold: 0.92
-  slip_hold_all_support: true
+  slip_hold_all_support: false
 
 mission_supervisor:
   publish_rate_hz: 20.0
@@ -31,8 +31,8 @@ mission_supervisor:
   init_duration_s: 1.0
   stick_timeout_s: 3.0
   pause_on_safe_mode: true
-  pause_on_high_slip: true
-  pause_on_adhesion_loss: true
+  pause_on_high_slip: false
+  pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 4
   attach_rpm: 35000.0
@@ -56,7 +56,7 @@ fan_controller:
   port: /dev/ttyUSB_fan
   baudrate: 115200
   float_endianness: ">"
-  protocol: indexed_leg_rpm   # Options: total_rpm, indexed_leg_rpm
+  protocol: total_rpm   # Options: total_rpm, indexed_leg_rpm
   telemetry_protocol: stm32_rpm_current_frame
   leg_count: 4
   command_leg_order: [lf, rf, rr, lr]
