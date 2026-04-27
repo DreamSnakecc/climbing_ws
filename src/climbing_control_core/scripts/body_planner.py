@@ -107,7 +107,10 @@ class BodyPlanner(object):
         self.has_estimated_state = True
 
     def mission_active_callback(self, msg):
-        self.mission_active = bool(msg.data)
+        now_active = bool(msg.data)
+        if now_active and not self.mission_active:
+            self.start_time = rospy.Time.now().to_sec()
+        self.mission_active = now_active
 
     def _gait_mode_id(self):
         if self.gait == "trot":
