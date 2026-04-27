@@ -1,34 +1,34 @@
 #!/usr/bin/env python3
 """
-整机 crawl 步态集成测试 (半交互流程)
+Whole-body crawl gait integration test (semi-interactive)
 
-预设运行环境 (调用本脚本前必须就绪):
-  - Jetson 侧已起 jetson_bringup.launch, leg_ik_executor 已把四条腿
-    平滑送至 operating UJC (270.21, 0, -100) [mm].
-  - PC 侧已起 test_crawl_gait.launch (mission_auto_start=false). 此时
-    mission_state == "INIT", swing_leg_controller 在 INIT 状态强制
-    LegCenterCommand.support_leg=false, dynamixel_bridge 不切电流模式,
-    四腿在位置模式下静止保持 operating UJC.
+Prerequisites:
+  - Jetson: roslaunch climbing_bringup jetson_bringup.launch started
+    Legs at operating UJC (270.21, 0, -100) mm.
+  - PC: test_crawl_gait.launch running (mission_auto_start=false).
+    mission_state==INIT, swing_leg_controller forces
+    support_leg=false, no current mode switch
+    Position mode hold at operating UJC.
 
-本脚本流程:
-  1. 等关键话题就绪 (mission_state, body_reference, estimated_state,
+Flow:
+  1. 1. Wait for topics
      swing_leg_target, fan_rpm, fan_currents).
-  2. 在 INIT 阶段做一段稳定性观察 (--hold-check-s, 默认 3s):
-       - 所有腿 cmd_support_leg 必须为 false
-       - 所有腿 UJC z 与 operating_z 偏差 < --hold-tol-mm (默认 5mm)
-     未通过则中止 (避免后续盲飞).
-  3. 提示用户回车确认 "机器人已贴墙, 风机控制就位" (除非 --no-confirm).
-  4. 发布 /control/mission_start=true:
-       - 等到 mission_state == STICK (--stick-timeout-s, 默认 15s)
-       - 等到 mission_state == CLIMB (--climb-timeout-s, 默认 30s)
-  5. CLIMB 状态下持续 --duration 秒 (默认 60), 实时按 --log-rate-hz
-     采样 CSV. 中途如出现 FAULT 立即退出.
-  6. 发布 /control/mission_pause=true 收尾, 写入 CSV, 打印总结.
+  2. 2. INIT stability check --hold-check-s (default 3s)
+       - 2a. All cmd_support_leg must be false
+       - 2b. UJC z delta < --hold-tol-mm (default 5mm)
+     Fail = abort (prevents blind flight).
+  3. 3. User confirm robot ready (unless --no-confirm).
+  4. 4. Publish start
+       - 4a. Wait STICK (--stick-timeout-s, default 15s)
+       - 4b. Wait CLIMB (--climb-timeout-s, default 30s)
+  5. 5. CLIMB for --duration s (default 60), log at --log-rate-hz
+     Log CSV. FAULT during CLIMB = immediate exit
+  6. 6. Pause, write CSV, print summary
 
-记录字段精简版 (约 60 列):
-  通用 (6):    wall_time, ros_time, elapsed_s, mission_state, mission_active, phase_label
+CSV fields compact (~60 cols):
+  Common (6):    wall_time, ros_time, elapsed_s, mission_state, mission_active, phase_label
   body  (6):   body_x, body_y, body_z, body_vx, body_vy, body_vz
-  腿 ×4(12):   {leg}_phase, {leg}_phase_id,
+  Legs x4 (12):   {leg}_phase, {leg}_phase_id,
                {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
                {leg}_ujc_z, {leg}_attachment_ready, {leg}_adhesion,
                {leg}_measured_contact, {leg}_fan_rpm, {leg}_fan_current_a
@@ -79,7 +79,7 @@ class CrawlGaitTester(object):
     def __init__(self, args):
         self.args = args
 
-        # 最近一次收到的各话题数据, 全部用 lock 保护读写
+        # latest data, protected by lock
         self._lock = threading.Lock()
         self._latest_mission_state = None
         self._latest_mission_active = False
@@ -89,18 +89,18 @@ class CrawlGaitTester(object):
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
 
-        # 状态机切换时间线, 用于最后总结
+        # state timeline for summary
         self._state_history = []  # list of (rel_time, state)
         self._fault_seen = False
 
-        # operating UJC 用于 INIT 稳定性判定
+        # operating UJC for INIT hold check
         operating_z_mm = float(rospy.get_param(
             "/gait_controller/operating_universal_joint_center_z",
             -100.0,
         ))
         self._operating_z_m = operating_z_mm / 1000.0
 
-        # 发布器, latch=False (不需要保持最后状态)
+        # publishers, latch=False
         self._mission_start_pub = rospy.Publisher(
             "/control/mission_start", Bool, queue_size=2,
         )
@@ -108,7 +108,7 @@ class CrawlGaitTester(object):
             "/control/mission_pause", Bool, queue_size=2,
         )
 
-        # 订阅器
+        # subscribers
         rospy.Subscriber(
             "/control/mission_state", String,
             self._cb_mission_state, queue_size=10,
@@ -138,7 +138,7 @@ class CrawlGaitTester(object):
             self._cb_fan_currents, queue_size=10,
         )
 
-        # CSV 字段表与文件句柄, 在 _open_csv 中初始化
+        # CSV setup, initialized in _open_csv
         self._csv_path = None
         self._csv_file = None
         self._csv_writer = None
@@ -147,12 +147,12 @@ class CrawlGaitTester(object):
         self._t_zero_wall = None
         self._t_zero_ros = None
 
-        # 摆动周期计数 (用于总结)
+        # swing cycle counter for summary
         self._prev_support = {leg: None for leg in LEG_NAMES}
         self._swing_count = {leg: 0 for leg in LEG_NAMES}
 
     # ------------------------------------------------------------------ #
-    # ROS 回调
+    # ROS callbacks
     # ------------------------------------------------------------------ #
     def _cb_mission_state(self, msg):
         try:
@@ -201,7 +201,7 @@ class CrawlGaitTester(object):
             self._latest_fan_currents = values
 
     # ------------------------------------------------------------------ #
-    # 时序 / 工具
+    # timing / utilities
     # ------------------------------------------------------------------ #
     def _rel_now(self):
         if self._t_zero_ros is None:
@@ -209,7 +209,7 @@ class CrawlGaitTester(object):
         return (rospy.Time.now() - self._t_zero_ros).to_sec()
 
     def _wait_streams(self, timeout_s):
-        """阻塞等待所有关键订阅都至少收到一次. 超时返回 False."""
+        """Block until all subscriptions received once. Returns False on timeout"""
         deadline = time.time() + timeout_s
         rospy.loginfo("test_crawl_gait: waiting for upstream streams (timeout=%.1fs)...",
                       timeout_s)
@@ -236,10 +236,10 @@ class CrawlGaitTester(object):
         return False
 
     # ------------------------------------------------------------------ #
-    # INIT 稳定性检查
+    # INIT hold check
     # ------------------------------------------------------------------ #
     def _snapshot_init_state(self):
-        """单帧抓取 mission_state, swing_target, estimated UJC; 用于诊断打印."""
+        """One-shot snapshot of state, targets, UJC for diagnostic printout"""
         with self._lock:
             state = self._latest_mission_state
             est = self._latest_estimated_state
@@ -265,7 +265,7 @@ class CrawlGaitTester(object):
         return state, legs_info
 
     def _format_init_table(self, legs_info, tol_m):
-        """生成可读性好的 INIT 状态表 (按腿一行)."""
+        """Generate readable INIT state table (one row per leg)"""
         lines = [
             "  leg  cmd_support |     cmd_xyz (m)            |     ujc_xyz (m)            |  dz_to_op (mm)  status",
         ]
@@ -300,10 +300,10 @@ class CrawlGaitTester(object):
         return "\n".join(lines)
 
     def _verify_init_hold(self):
-        """在 INIT 阶段连续 hold_check_s 内验证四腿处于位置保持模式.
+        """Verify all legs in position-hold mode for hold_check_s.
 
-        失败时打印 4 条腿的完整 INIT 状态表, 用户能直接看到哪条偏多少, 是机械
-        误差还是真异常. 可以通过 --allow-init-mismatch 强制继续.
+        Print full INIT table on failure to show which leg deviates and by how much
+        Helps distinguish calibration error from true fault. Use --allow-init-mismatch to skip
         """
         check_s = max(0.5, float(self.args.hold_check_s))
         tol_m = max(0.001, float(self.args.hold_tol_mm) / 1000.0)
@@ -325,7 +325,7 @@ class CrawlGaitTester(object):
             if state != STATE_INIT:
                 rospy.logwarn(
                     "test_crawl_gait: mission_state=%s (expected INIT). "
-                    "脚本只在 INIT 启动. 请退出后确认.",
+                    "Test only starts from INIT. Please exit and verify.",
                     state,
                 )
                 rospy.loginfo("INIT snapshot:\n%s",
@@ -360,8 +360,8 @@ class CrawlGaitTester(object):
                     )
                     return True
                 rospy.logwarn(
-                    "test_crawl_gait: hint - lr 大幅偏差通常是 startup_move 未完成 / 电机零点错位; "
-                    "12 mm 量级常见于机械校准误差, 可加大 --hold-tol-mm 放宽."
+                    "test_crawl_gait: hint - large lr offset likely startup_move incomplete or motor zero misalignment; "
+                    "12mm typical for mechanical calibration error; increase --hold-tol-mm to relax."
                 )
                 return False
             rate.sleep()
@@ -373,7 +373,7 @@ class CrawlGaitTester(object):
         return True
 
     # ------------------------------------------------------------------ #
-    # mission state 推进
+    # mission state machine
     # ------------------------------------------------------------------ #
     def _mission_diagnostic_lines(self):
         """Return compact per-leg adhesion/fan diagnostics for STICK failures."""
@@ -506,17 +506,17 @@ class CrawlGaitTester(object):
             self._csv_writer = None
 
     def _phase_label_from_swing(self, leg_index, swing_msg):
-        # LegCenterCommand 没有 phase 字段; 用 support_leg 与 normal_force_limit
-        # 推断粗粒度 phase, 仅作 CSV 标注. 详细 phase 在 swing_leg_diag, 这里精简版
-        # 不订阅, 避免列爆炸.
+        # LegCenterCommand has no phase field; infer from support_leg and force_limit
+        # Infer coarse phase for CSV only. Detailed phase in swing_leg_diag
+        # Not subscribed to avoid column explosion.
         if swing_msg is None:
             return "UNKNOWN", -1
         if bool(swing_msg.support_leg):
             return "SUPPORT", PHASE_ID_MAP["SUPPORT"]
-        # 非 support: 进入 swing 序列
+        # not support: enter swing sequence
         normal_limit = float(getattr(swing_msg, "desired_normal_force_limit", 0.0))
         if normal_limit > 0.5:
-            # PRELOAD/COMPLIANT 阶段都给了 normal_force_limit
+            # Both PRELOAD and COMPLIANT set normal_force_limit
             return "PRELOAD_OR_COMPLIANT", PHASE_ID_MAP["PRELOAD_COMPRESS"]
         skirt = float(getattr(swing_msg, "skirt_compression_target", 0.0))
         if skirt < 0.05:
@@ -589,20 +589,20 @@ class CrawlGaitTester(object):
                 "%.4f" % float(fan_curr[leg_index]),
             ])
 
-            # swing 周期统计 (cmd_support: True->False->True 计一次)
+            # swing cycle: count True->False->True transitions
             prev = self._prev_support.get(leg)
             if prev is not None and prev is True and cmd_support == 0:
-                # 进入 swing
+                # enter swing
                 pass
             elif prev is not None and prev is False and cmd_support == 1:
-                # 回到 support, 计为完成一次 swing
+                # Return to support = one swing completed
                 self._swing_count[leg] += 1
             self._prev_support[leg] = bool(cmd_support)
 
         return row
 
     # ------------------------------------------------------------------ #
-    # 主流程
+    # main flow
     # ------------------------------------------------------------------ #
     def run(self):
         self._t_zero_wall = time.time()
@@ -616,10 +616,10 @@ class CrawlGaitTester(object):
 
         if not bool(self.args.no_confirm):
             try:
-                # 阻塞等用户回车
+                # block until user presses Enter
                 input(
-                    "\n>>> 请确认机器人已贴墙 (或在测试台上稳定就位), "
-                    "随后按回车开始 STICK -> CLIMB. (Ctrl+C 取消)\n>>> "
+                    "\n>>> Confirm robot is on wall (or test stand), "
+                    "then press Enter to start STICK -> CLIMB. (Ctrl+C to cancel)\n>>> "
                 )
             except (EOFError, KeyboardInterrupt):
                 rospy.loginfo("test_crawl_gait: user cancelled before start.")
@@ -671,7 +671,7 @@ class CrawlGaitTester(object):
             rate.sleep()
 
         self._publish_pause()
-        # 给 mission_supervisor 一点时间转 PAUSE
+        # give mission_supervisor time to transition to PAUSE
         wait_pause_until = time.time() + 3.0
         while not rospy.is_shutdown() and time.time() < wait_pause_until:
             with self._lock:
@@ -699,57 +699,57 @@ class CrawlGaitTester(object):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="整机 crawl 步态半交互测试",
+        description="Whole-body crawl gait semi-interactive test",
     )
     parser.add_argument(
         "--duration", type=float, default=60.0,
-        help="CLIMB 阶段记录时长 (s, 默认 60)",
+        help="CLIMB recording duration (s, default 60)",
     )
     parser.add_argument(
         "--log-rate-hz", type=float, default=50.0,
-        help="CSV 采样率 (Hz, 默认 50)",
+        help="CSV sample rate (Hz, default 50)",
     )
     parser.add_argument(
         "--hold-check-s", type=float, default=3.0,
-        help="INIT 稳定性观察时长 (s, 默认 3)",
+        help="INIT hold check duration (s, default 3)",
     )
     parser.add_argument(
         "--hold-tol-mm", type=float, default=20.0,
-        help="INIT 阶段 UJC z 偏离 operating 的允许误差 (mm, 默认 20). "
-             "经验值: <10 mm 通常需要良好的机械校准; 实机 ~12 mm 误差常见.",
+        help="INIT UJC z deviation tolerance (mm, default 20). "
+             "Typical: <10mm needs good calibration; real hw ~12mm common.",
     )
     parser.add_argument(
         "--allow-init-mismatch", action="store_true",
-        help="即使 INIT hold 检查失败 (UJC 偏差 / support_leg 异常) 也继续, "
-             "仅打印警告. 用于已知机械误差场景的强制测试.",
+        help="Proceed even if INIT hold check fails (UJC offset / support_leg error). "
+             "Print warning only. For forced test with known mechanical errors.",
     )
     parser.add_argument(
         "--stick-timeout-s", type=float, default=15.0,
-        help="STICK 等待超时 (s, 默认 15)",
+        help="STICK wait timeout (s, default 15)",
     )
     parser.add_argument(
         "--climb-timeout-s", type=float, default=30.0,
-        help="CLIMB 等待超时 (s, 默认 30)",
+        help="CLIMB wait timeout (s, default 30)",
     )
     parser.add_argument(
         "--stream-timeout-s", type=float, default=10.0,
-        help="上游话题就绪超时 (s, 默认 10)",
+        help="Stream readiness timeout (s, default 10)",
     )
     parser.add_argument(
         "--output-dir", type=str,
         default=os.path.expanduser("~/climbing_ws/test_logs"),
-        help="CSV 输出目录",
+        help="CSV output directory",
     )
     parser.add_argument(
         "--no-confirm", action="store_true",
-        help="跳过手动回车确认 (用于无人值守批量测试)",
+        help="Skip manual confirmation (unattended batch mode)",
     )
     return parser.parse_args(argv)
 
 
 def main():
-    # 先解析参数 (使用 rospy.myargv 过滤 ROS remap), 这样 --help 不会触发
-    # rospy.init_node 去连 ROS master.
+    # Parse args first (rospy.myargv filters ROS remap) so --help
+    # does not try to contact ROS master.
     cli_args = rospy.myargv(argv=sys.argv)[1:]
     args = parse_args(cli_args)
     rospy.init_node("test_crawl_gait", anonymous=False)
@@ -767,7 +767,7 @@ def main():
             pass
         tester._close_csv()
     finally:
-        # 确保 CSV 关掉
+        # ensure CSV is closed
         tester._close_csv()
     sys.exit(code)
 

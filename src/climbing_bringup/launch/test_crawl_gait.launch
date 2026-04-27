@@ -1,28 +1,19 @@
 <launch>
   <!--
-    整机 crawl 步态测试 PC 控制栈启动文件.
+    PC-side launch for whole-body crawl gait test.
 
-    使用约定:
-      - Jetson 侧 jetson_bringup.launch 已在另一台机器/终端启动并完成
-        leg_ik_executor 的 startup_move (四腿停在 operating UJC).
-      - 本 launch 只负责 PC 侧:
-          * 加载 robot.yaml
-          * 覆盖 nominal_universal_joint_center_z 为 ujc_z_mm
-          * 给 mission_supervisor / swing_leg_controller 设置测试期参数
-          * include pc_bringup.launch (mission_auto_start=false)
-      - 测试脚本本身 (test_crawl_gait.py) 由外部 (tools/test_crawl_gait.sh
-        或人工 rosrun) 启动, 不在 launch 内集成, 方便交互式确认.
+    Prereqs:
+      - Jetson: roslaunch climbing_bringup jetson_bringup.launch
+        (leg_ik_executor completes startup move to operating UJC)
 
-    重要参数说明:
-      ujc_z_mm
-        覆盖 /gait_controller/nominal_universal_joint_center_z. operating UJC
-        (270.21, 0, -100) 仍由 robot.yaml 提供, 这里给 nominal 一个与之兼容的
-        值; 默认 -195.5 mm 与 robot.yaml 名义位一致.
-      enable_auto_adhesion_commands
-        true 时 mission_supervisor 自动驱动风机 (crawl 测试默认行为).
-      boost_after_preload_without_contact
-        true 时, 当 PRELOAD_COMPRESS 完成 (normal_force_limit 跨越 attach 阈值)
-        即 BOOST 风机, 不依赖接触判定. crawl + 风机协同测试需要为 true.
+    This launch loads robot.yaml, overrides UJC z and test params,
+    then includes pc_bringup.launch (mission_auto_start=false).
+
+    Params:
+      ujc_z_mm                        nominal UJC z (default -195.5)
+      linear_velocity_x               body planner x velocity (default 0.02 m/s)
+      use_contact_feedback            false=trajectory+time only (default false)
+      enable_auto_adhesion_commands   true=mission drives fans (default true)
   -->
 
   <arg name="ujc_z_mm" default="-195.5" />
@@ -31,6 +22,8 @@
   <arg name="boost_after_preload_without_contact" default="true" />
   <arg name="compliant_start_requires_contact" default="false" />
   <arg name="enable_state_logger" default="false" />
+  <arg name="linear_velocity_x" default="0.02" />
+  <arg name="use_contact_feedback" default="false" />
 
   <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
 
@@ -40,6 +33,10 @@
          value="$(arg boost_after_preload_without_contact)" type="bool" />
   <param name="/swing_leg_controller/compliant_start_requires_contact"
          value="$(arg compliant_start_requires_contact)" type="bool" />
+  <param name="/swing_leg_controller/use_contact_feedback"
+         value="$(arg use_contact_feedback)" type="bool" />
+  <param name="/body_planner/linear_velocity_world_mps"
+         value="[$(arg linear_velocity_x), 0.0, 0.0]" />
 
   <include file="$(find climbing_bringup)/launch/pc_bringup.launch">
     <arg name="mission_auto_start" value="$(arg mission_auto_start)" />

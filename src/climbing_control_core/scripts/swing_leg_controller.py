@@ -214,13 +214,20 @@ class SwingLegController(object):
         self.compliant_force_limit_n = max(float(get_cfg("compliant_force_limit_n", 80.0)), self.compliant_force_deadband_n)
         self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
         self.compliant_start_requires_contact = bool(get_cfg("compliant_start_requires_contact", False))
-        # 当 mission_state 处于这些状态时，强制将 LegCenterCommand.support_leg 报为 False，
-        # 阻止 dynamixel_bridge 把电机切到电流(支撑)模式；用于 PC 启动初期(INIT)避免位置环失效导致腿失稳。
-        # 默认仅在 INIT 状态生效，STICK/CLIMB/PAUSE/FAULT 仍按上层逻辑发布原始 support_leg 标志。
+        # Force support_leg=False when mission_state is INIT.
+        # Prevent dynamixel_bridge from switching motors to current mode on PC startup.
+        # Only enforced in INIT; stick/climb/pause/fault follow original support_leg.
         self.hold_position_states = set(
             str(value) for value in get_cfg("hold_position_states", ["INIT"])
         )
+        # Global contact feedback switch. When false, all contact/adhesion metrics
+        # are treated as false; swing sequence driven purely by trajectory+time
+        # Useful when contact thresholds are uncalibrated
+        self.use_contact_feedback = bool(get_cfg("use_contact_feedback", True))
         self.contact_hold_min_s = max(float(get_cfg("contact_hold_min_s", 0.04)), 0.0)
+        # Lift above the support plane during TANGENTIAL_ALIGN
+        # Default matches clearance_m; override via swing_lift_normal_m.
+        self.swing_lift_normal_m = max(float(get_cfg("swing_lift_normal_m", self.clearance_m)), 0.0)
         # PRESS-phase delta-contact detector: baseline (sum|joint effort|, sum|joint current|) is
         # captured on the first PRESS tick (leg just came off static LIFT hold, still in free air),
         # then contact is confirmed when either aggregate rises above its per-motor threshold x N.
@@ -284,7 +291,7 @@ class SwingLegController(object):
         self.have_body_reference = False
         self.have_estimated_state = False
         self.last_update_time = None
-        # 默认 INIT：在收到 latched /control/mission_state 之前按"未启动"处理，电机不切电流模式。
+        # Default INIT: before first mission_state treat as idle, motors stay in position mode
         self.mission_state = "INIT"
         self.swing_phase_start = {}
         self.swing_states = {}
@@ -944,9 +951,15 @@ class SwingLegController(object):
         start = list(state["position"])
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
+
+        # DETACH: Slight retract from contact surface
         light_contact_target = self._compose_tangent_and_normal(start, start_normal - self.detach_contact_offset_m)
-        tangential_target = self._compose_tangent_and_normal(target, start_normal - self.detach_contact_offset_m)
+        # TANGENTIAL: Move to target XY while lifting clearance_m along normal for obstacle clearance
+        tang_normal = start_normal + self.swing_lift_normal_m
+        tangential_target = self._compose_tangent_and_normal(target, tang_normal)
+        # PRELOAD: Press back to surface from lifted position
         preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
+        # ATTACH: Sink additional fan attach amount on top of PRELOAD
         attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m)
 
         state["start"] = list(start)
@@ -1082,6 +1095,13 @@ class SwingLegController(object):
         adhesion_ready = self._leg_mask_value(self.estimated_state.adhesion_mask, leg_index, attachment_ready)
         measured_contact = self._leg_mask_value(self.estimated_state.measured_contact_mask, leg_index, False)
         early_contact = self._leg_mask_value(self.estimated_state.early_contact_mask, leg_index, False)
+        # Contact switch disabled: ignore all feedback, trajectory+time only
+        if not self.use_contact_feedback:
+            wall_touch = False
+            attachment_ready = False
+            adhesion_ready = False
+            measured_contact = False
+            early_contact = False
         clamp_center = state.get("support_target", self._operating_center_command(leg_name))
 
         if phase == self.PHASE_TEST_LIFT_CLEARANCE:
@@ -1177,6 +1197,13 @@ class SwingLegController(object):
                 self._set_phase(state, self.PHASE_ATTACHED_HOLD, now_sec)
                 cmd_position = list(state["attach_target"])
                 cmd_velocity = [0.0, 0.0, 0.0]
+            # When contact off, use compliant_settle_timeout_s as COMPLIANT_SETTLE->ATTACHED_HOLD
+            # fallback to avoid stall without contact feedback
+            elif not self.use_contact_feedback and phase_elapsed >= self.compliant_settle_timeout_s:
+                self._freeze_compliant_state(state, cmd_position)
+                self._set_phase(state, self.PHASE_ATTACHED_HOLD, now_sec)
+                cmd_position = list(state["attach_target"])
+                cmd_velocity = [0.0, 0.0, 0.0]
             skirt_target = self.preload_skirt_compression_target
             normal_force_limit = self.attach_normal_force_limit_n
             support_leg = False
@@ -1212,9 +1239,9 @@ class SwingLegController(object):
         msg.center = Point(position[0], position[1], position[2])
         msg.center_velocity = Vector3(velocity[0], velocity[1], velocity[2])
         msg.skirt_compression_target = float(skirt_compression_target)
-        # 在 hold_position_states (默认 INIT) 期间，把 support_leg 报为 False，
-        # 防止 dynamixel_bridge 把电机切到电流模式而失去位置环。
-        # 中心命令仍正常发布，IK 端继续维持 operating UJC 目标。
+        # During hold_position_states (INIT), set support_leg=False.
+        # Prevent dynamixel_bridge switching to current mode and losing position hold
+        # Center command still published; IK continues holding operating UJC target
         if self.mission_state in self.hold_position_states:
             msg.support_leg = False
         else:
@@ -1377,20 +1404,33 @@ class SwingLegController(object):
                         now_sec,
                     )
                     continue
+                # Contact off: after compliant_settle_timeout_s in ATTACHED_HOLD, unconditionally return to SUPPORT
+                if state["phase"] == self.PHASE_ATTACHED_HOLD and desired_support and not self.use_contact_feedback:
+                    elapsed = self._phase_elapsed(state, now_sec)
+                    if elapsed >= self.compliant_settle_timeout_s:
+                        self.swing_phase_start[leg_name] = None
+                        support_msg = self._support_command(leg_name, leg_index)
+                        self.pub.publish(support_msg)
+                        self._publish_leg_diagnostic(
+                            leg_name,
+                            leg_index,
+                            [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                            now_sec,
+                        )
+                        continue
 
-                # 在 INIT 等 hold_position_states 期间，即使误入摆腿状态机也强制回退
-                # 到 operating center 的 support 模式，不执行摆腿阶段机。
-                if self.mission_state in self.hold_position_states and self.swing_phase_start[leg_name] is not None:
-                    self.swing_phase_start[leg_name] = None
-                    support_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(support_msg)
-                    self._publish_leg_diagnostic(
-                        leg_name,
-                        leg_index,
-                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        now_sec,
-                    )
-                    continue
+                
+                # if self.mission_state in self.hold_position_states and self.swing_phase_start[leg_name] is not None:
+                #     self.swing_phase_start[leg_name] = None
+                #     support_msg = self._support_command(leg_name, leg_index)
+                #     self.pub.publish(support_msg)
+                #     self._publish_leg_diagnostic(
+                #         leg_name,
+                #         leg_index,
+                #         [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                #         now_sec,
+                #     )
+                #     continue
 
                 cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
                 self._publish_leg_diagnostic(leg_name, leg_index, cmd_position, now_sec)

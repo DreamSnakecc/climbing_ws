@@ -49,6 +49,7 @@ class MissionSupervisor(object):
         self.attach_normal_force_limit_n = float(
             get_cfg("attach_normal_force_limit_n", rospy.get_param("/swing_leg_controller/attach_normal_force_limit_n", 25.0))
         )
+        self.release_on_swing = bool(get_cfg("release_on_swing", True))
         self.contact_hold_min_s = max(
             float(get_cfg("contact_hold_min_s", rospy.get_param("/swing_leg_controller/contact_hold_min_s", 0.04))),
             0.0,
@@ -225,6 +226,11 @@ class MissionSupervisor(object):
 
         support_leg = bool(self.leg_support_state.get(leg_name, True))
         elapsed = self._leg_support_elapsed(leg_name)
+
+        # Release fan during swing unconditionally
+        if not support_leg and self.release_on_swing:
+            return 0, self.swing_release_rpm
+
         if support_leg:
             if elapsed <= self.touchdown_boost_duration_s:
                 return 2, self._scale_rpm_by_required_adhesion(self.touchdown_rpm, leg_name)

@@ -17,7 +17,7 @@ body_planner:
   step_transition_margin: 0.08
   nominal_position_m: [0.0, 0.0, 0.0]
   nominal_rpy_deg: [0.0, 0.0, 0.0]
-  linear_velocity_world_mps: [0.0, 0.0, 0.0]
+  linear_velocity_world_mps: [0.01, 0.0, 0.0]
   angular_velocity_world_rps: [0.0, 0.0, 0.0]
   com_shift_gain_m: [0.025, 0.03, 0.0]
   orientation_shift_gain_deg: [6.0, 4.0, 0.0]
@@ -29,7 +29,7 @@ mission_supervisor:
   auto_start: true
   auto_resume: false
   init_duration_s: 1.0
-  stick_timeout_s: 3.0
+  stick_timeout_s: 6.0
   pause_on_safe_mode: true
   pause_on_high_slip: false
   pause_on_adhesion_loss: false
@@ -45,6 +45,8 @@ mission_supervisor:
   touchdown_boost_duration_s: 0.25
   pre_attach_time_s: 0.12
   default_normal_force_limit: 150.0
+  # Release fan when support_leg=false, bypass attachment_ready gate.
+  release_on_swing: true
   adhesion_force_reference_n: 100.0
   adhesion_rpm_min_scale: 0.85
   adhesion_rpm_max_scale: 1.35
@@ -163,6 +165,8 @@ swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
   clearance_m: 0.035
+  # Lift along wall_normal during swing; default=clearance_m. 0=no lift
+  swing_lift_normal_m: 0.035
   retraction_m: 0.015
   touchdown_extension_m: 0.008
   slip_clearance_gain: 0.5
@@ -239,11 +243,10 @@ swing_leg_controller:
   # OR by default: a single well-behaved channel is enough to declare contact. Set true to
   # require both torque and current channels to trip simultaneously (more conservative).
   press_contact_require_both: false
-  # 在这些 mission_state 下，swing_leg_controller 发布的 LegCenterCommand.support_leg 强制为 false，
-  # 阻止 dynamixel_bridge 在 PC 启动初期(机器人还没贴墙时) 把电机切到电流(支撑)模式。
-  # IK 端仍照常接收 operating UJC 目标，电机保持位置模式以稳定持位。
-  # 默认仅在 INIT 持位；进入 STICK/CLIMB 后恢复正常 support_leg 语义。可加入 PAUSE/FAULT 等以扩展行为。
   hold_position_states: ["INIT"]
+  # Global contact feedback. false=ignore all contact metrics,
+  # Swing sequence pure time+trajectory driven. For uncalibrated contact testing
+  use_contact_feedback: true
 
 jetson:
   command_rate_hz: 100.0
