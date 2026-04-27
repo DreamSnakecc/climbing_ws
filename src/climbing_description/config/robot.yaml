@@ -56,7 +56,7 @@ fan_controller:
   port: /dev/ttyUSB_fan
   baudrate: 115200
   float_endianness: ">"
-  protocol: indexed_leg_rpm   # Options: total_rpm, indexed_leg_rpm
+  protocol: total_rpm   # Options: total_rpm, indexed_leg_rpm
   telemetry_protocol: stm32_rpm_current_frame
   leg_count: 4
   command_leg_order: [lf, rf, rr, lr]
