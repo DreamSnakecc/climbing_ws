@@ -384,7 +384,7 @@ class LegIkExecutor(object):
         if self.external_command_received:
             return None
         if not self.startup_target_enabled:
-            return 1.0  # stay at nominal -- treated the same as "move complete"
+            return 1.0  # stay at nominal -- treated the same as move complete
         elapsed = max(0.0, float(now_sec) - self.startup_time_sec)
         if elapsed <= self.startup_target_hold_s:
             return 0.0

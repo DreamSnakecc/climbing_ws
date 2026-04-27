@@ -1378,6 +1378,20 @@ class SwingLegController(object):
                     )
                     continue
 
+                # 在 INIT 等 hold_position_states 期间，即使误入摆腿状态机也强制回退
+                # 到 operating center 的 support 模式，不执行摆腿阶段机。
+                if self.mission_state in self.hold_position_states and self.swing_phase_start[leg_name] is not None:
+                    self.swing_phase_start[leg_name] = None
+                    support_msg = self._support_command(leg_name, leg_index)
+                    self.pub.publish(support_msg)
+                    self._publish_leg_diagnostic(
+                        leg_name,
+                        leg_index,
+                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
+                        now_sec,
+                    )
+                    continue
+
                 cmd_position, cmd_velocity, support_leg, skirt_target, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
                 self._publish_leg_diagnostic(leg_name, leg_index, cmd_position, now_sec)
                 self.pub.publish(

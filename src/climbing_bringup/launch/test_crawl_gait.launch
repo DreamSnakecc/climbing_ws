@@ -46,4 +46,5 @@
     <arg name="enable_auto_adhesion_commands" value="$(arg enable_auto_adhesion_commands)" />
     <arg name="enable_state_logger" value="$(arg enable_state_logger)" />
   </include>
+  <param name="/mission_supervisor/auto_start" value="false" />
 </launch>
