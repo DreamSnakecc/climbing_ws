@@ -9,7 +9,12 @@ robot:
 
 body_planner:
   publish_rate_hz: 50.0
-  gait: crawl    # crawl or trot
+  gait: sequential    # sequential, crawl, or trot
+  # Sequential gait parameters
+  gait_sequence: [lf, rf, rr, lr]
+  swing_timeout_s: 3.0
+  all_hold_dwell_s: 0.2
+  # Timed gait parameters (crawl/trot)
   gait_frequency_hz: 0.25
   crawl_swing_ratio: 0.25
   trot_swing_ratio: 0.50
@@ -166,7 +171,7 @@ swing_leg_controller:
   swing_duration_s: 0.65
   clearance_m: 0.035
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.035
+  swing_lift_normal_m: 0.02
   retraction_m: 0.015
   touchdown_extension_m: 0.008
   slip_clearance_gain: 0.5
@@ -194,7 +199,7 @@ swing_leg_controller:
   preload_duration_s: 0.16
   compliant_settle_timeout_s: 0.40
   preload_extra_normal_m: 0.003
-  fan_attach_sink_m: 0.008
+  fan_attach_sink_m: 0.002
   tangential_alignment_tolerance_m: 0.008
   normal_alignment_tolerance_m: 0.004
   light_contact_skirt_compression_target: 0.20
@@ -244,8 +249,8 @@ swing_leg_controller:
   # require both torque and current channels to trip simultaneously (more conservative).
   press_contact_require_both: false
   hold_position_states: ["INIT"]
-  # Global contact feedback. false=ignore all contact metrics,
-  # Swing sequence pure time+trajectory driven. For uncalibrated contact testing
+  # Global contact feedback. false=suppress only wall_touch and measured_contact
+  # (these thresholds are uncalibrated). attachment_ready/adhesion_ready/early_contact are preserved.
   use_contact_feedback: true
 
 jetson:
@@ -399,18 +404,18 @@ gait_controller:
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
-    "1": 2086
-    "2": 3604
-    "3": 2029
-    "4": 5926
-    "5": 2190
-    "6": 2893
-    "7": 2046
-    "8": 287
-    "11": 2035
-    "12": 1881
-    "13": 2034
-    "14": 1035
+    "1": 2052
+    "2": 3643
+    "3": 2043
+    "4": 661
+    "5": 2162
+    "6": 3274
+    "7": 2022
+    "8": 7
+    "11": 2022
+    "12": 1896
+    "13": 2027
+    "14": 1027
   motor_dir:
     "1": 1
     "2": 1
