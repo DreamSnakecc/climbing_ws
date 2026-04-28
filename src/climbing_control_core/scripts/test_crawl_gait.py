@@ -628,7 +628,7 @@ class CrawlGaitTester(object):
         self._open_csv()
 
         self._publish_start()
-        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s):
+        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s) and self._latest_mission_state != STATE_CLIMB:
             self._publish_pause()
             return 4
         if not self._wait_state(STATE_CLIMB, self.args.climb_timeout_s):

@@ -46,6 +46,20 @@ class BodyPlanner(object):
     GAIT_TROT = 2
     GAIT_SEQUENTIAL = 3
 
+    @staticmethod
+    def _parse_float_list(value, default):
+        """Parse a list of floats that may be a Python list or a string like '[0.02, 0.0, 0.0]'."""
+        if isinstance(value, str):
+            import ast
+            try:
+                parsed = ast.literal_eval(value)
+                if isinstance(parsed, (list, tuple)):
+                    return [float(v) for v in parsed]
+            except (ValueError, SyntaxError):
+                pass
+            return list(default)
+        return [float(v) for v in value]
+
     def __init__(self):
         rospy.init_node("body_planner", anonymous=False)
 
@@ -60,13 +74,13 @@ class BodyPlanner(object):
         self.trot_swing_ratio = float(get_cfg("trot_swing_ratio", rospy.get_param("/gait_controller/trot_swing_ratio", 0.50)))
         self.startup_hold_s = max(float(get_cfg("startup_hold_s", 1.0)), 0.0)
         self.step_transition_margin = float(get_cfg("step_transition_margin", 0.08))
-        self.nominal_position = [float(value) for value in get_cfg("nominal_position_m", [0.0, 0.0, 0.0])]
-        self.nominal_rpy = [math.radians(float(value)) for value in get_cfg("nominal_rpy_deg", [0.0, 0.0, 0.0])]
-        self.linear_velocity_world = [float(value) for value in get_cfg("linear_velocity_world_mps", [0.0, 0.0, 0.0])]
-        self.angular_velocity_world = [float(value) for value in get_cfg("angular_velocity_world_rps", [0.0, 0.0, 0.0])]
-        self.com_shift_gain = [float(value) for value in get_cfg("com_shift_gain_m", [0.025, 0.03, 0.0])]
+        self.nominal_position = self._parse_float_list(get_cfg("nominal_position_m", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])
+        self.nominal_rpy = [math.radians(v) for v in self._parse_float_list(get_cfg("nominal_rpy_deg", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])]
+        self.linear_velocity_world = self._parse_float_list(get_cfg("linear_velocity_world_mps", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])
+        self.angular_velocity_world = self._parse_float_list(get_cfg("angular_velocity_world_rps", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])
+        self.com_shift_gain = self._parse_float_list(get_cfg("com_shift_gain_m", [0.025, 0.03, 0.0]), [0.025, 0.03, 0.0])
         self.orientation_shift_gain = [
-            math.radians(float(value)) for value in get_cfg("orientation_shift_gain_deg", [6.0, 4.0, 0.0])
+            math.radians(v) for v in self._parse_float_list(get_cfg("orientation_shift_gain_deg", [6.0, 4.0, 0.0]), [6.0, 4.0, 0.0])
         ]
         self.slip_pause_threshold = float(get_cfg("slip_pause_threshold", 0.92))
         self.slip_hold_all_support = bool(get_cfg("slip_hold_all_support", True))
