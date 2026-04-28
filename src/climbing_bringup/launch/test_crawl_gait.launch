@@ -1,6 +1,9 @@
 <launch>
   <!--
-    PC-side launch for whole-body crawl gait test.
+    PC-side launch for whole-body gait test (flat-ground mode).
+
+    Flat-ground mode: adhesion_required_count=0 and enable_auto_adhesion_commands=false
+    so no fan adhesion is required. The sequential gait advances by dwell time only.
 
     Prereqs:
       - Jetson: roslaunch climbing_bringup jetson_bringup.launch
@@ -13,12 +16,12 @@
       ujc_z_mm                        nominal UJC z (default -195.5)
       linear_velocity_x               body planner x velocity (default 0.02 m/s)
       use_contact_feedback            false=trajectory+time only (default false)
-      enable_auto_adhesion_commands   true=mission drives fans (default true)
+      enable_auto_adhesion_commands   false=no fan commands (default false for flat ground)
   -->
 
   <arg name="ujc_z_mm" default="-195.5" />
   <arg name="mission_auto_start" default="false" />
-  <arg name="enable_auto_adhesion_commands" default="true" />
+  <arg name="enable_auto_adhesion_commands" default="false" />
   <arg name="boost_after_preload_without_contact" default="true" />
   <arg name="compliant_start_requires_contact" default="false" />
   <arg name="enable_state_logger" default="false" />
@@ -37,6 +40,9 @@
          value="$(arg use_contact_feedback)" type="bool" />
   <param name="/body_planner/linear_velocity_world_mps"
          value="[$(arg linear_velocity_x), 0.0, 0.0]" />
+
+  <!-- Flat ground: no fan adhesion required -->
+  <param name="/mission_supervisor/adhesion_required_count" value="0" type="int" />
 
   <include file="$(find climbing_bringup)/launch/pc_bringup.launch">
     <arg name="mission_auto_start" value="$(arg mission_auto_start)" />
