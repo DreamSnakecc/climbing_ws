@@ -11,16 +11,19 @@
 
     Prereqs:
       - Jetson: roslaunch climbing_bringup jetson_bringup.launch
-        (leg_ik_executor completes startup move to operating UJC)
+        enable_auto_current_control:=false
+        (leg_ik_executor completes startup move to operating UJC;
+         dynamixel_bridge current control disabled so supporting legs stay static.)
 
     This launch loads robot.yaml (via pc_bringup.launch), overrides UJC z and test params,
     then includes pc_bringup.launch (mission_auto_start=false).
 
     Params:
       ujc_z_mm                        nominal UJC z (default -195.5)
-      linear_velocity_x               body planner x velocity (default 0.02 m/s)
+      linear_velocity_x               body planner x velocity (default 0.01 m/s)
       use_contact_feedback            false=trajectory+time only (default false)
       enable_auto_adhesion_commands   false=no fan commands (default false for flat ground)
+      (additional overrides: all_hold_dwell_s=1.0, swing_duration_s=1.0, clearance_m=0.02)
   -->
 
   <arg name="ujc_z_mm" default="-195.5" />
@@ -29,7 +32,7 @@
   <arg name="boost_after_preload_without_contact" default="true" />
   <arg name="compliant_start_requires_contact" default="false" />
   <arg name="enable_state_logger" default="false" />
-  <arg name="linear_velocity_x" default="0.02" />
+  <arg name="linear_velocity_x" default="0.01" />
   <arg name="use_contact_feedback" default="false" />
 
   <!-- pc_bringup.launch does rosparam load robot.yaml internally.
@@ -52,6 +55,16 @@
          value="$(arg use_contact_feedback)" type="bool" />
   <param name="/body_planner/linear_velocity_world_mps"
          value="[$(arg linear_velocity_x), 0.0, 0.0]" type="str" />
+  <param name="/body_planner/all_hold_dwell_s" value="1.0" type="double" />
+  <param name="/swing_leg_controller/swing_duration_s" value="1.0" type="double" />
+  <param name="/swing_leg_controller/clearance_m" value="0.02" type="double" />
   <param name="/mission_supervisor/adhesion_required_count" value="0" type="int" />
   <param name="/mission_supervisor/auto_start" value="false" />
+  <!-- Disable current-force control on dynamixel_bridge so supporting legs
+       stay in position mode and don't move in response to stance_force_optimizer.
+       NOTE: This global param is for documentation ONLY -- the dynamixel_bridge
+       node on Jetson reads this at startup, so it must be passed as a launch arg:
+         roslaunch climbing_bringup jetson_bringup.launch enable_auto_current_control:=false
+  -->
+  <param name="/jetson/dynamixel_bridge/enable_auto_current_control" value="false" type="bool" />
 </launch>

@@ -464,6 +464,7 @@ class SwingLegController(object):
     def _set_phase(self, state, phase_name, now_sec):
         state["phase"] = phase_name
         state["phase_started_at"] = now_sec
+        state["phase_start_pos"] = list(state.get("position", [0.0, 0.0, 0.0]))
         # Hold/aligned flags only describe the LIFT phase; clear them on any other transition
         # so the diagnostic vector doesn't report stale values.
         if phase_name != self.PHASE_TEST_LIFT_CLEARANCE:
@@ -483,6 +484,20 @@ class SwingLegController(object):
             next_position.append(position)
             next_velocity.append(velocity)
         return self._clamp_position(next_position, clamp_center), next_velocity
+
+    def _bezier_interp(self, start_pos, target_pos, duration_s, phase_elapsed):
+        """Bezier4 position interpolation from start to target over given duration.
+
+        Returns [pos_x, pos_y, pos_z], [0, 0, 0].
+        The Bezier control points are [start, start, target, target, target]
+        so motion starts and ends smoothly at zero velocity.
+        """
+        phase = min(phase_elapsed / max(duration_s, 1e-3), 1.0)
+        pos = [0.0, 0.0, 0.0]
+        for axis in [0, 1, 2]:
+            cp = [start_pos[axis], start_pos[axis], target_pos[axis], target_pos[axis], target_pos[axis]]
+            pos[axis] = bezier4(cp, phase)
+        return pos
 
     def _clamp_position(self, position, center=None):
         if center is None:
@@ -959,8 +974,9 @@ class SwingLegController(object):
         tangential_target = self._compose_tangent_and_normal(target, tang_normal)
         # PRELOAD: Press back to surface from lifted position
         preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
-        # ATTACH: Sink additional fan attach amount on top of PRELOAD
-        attach_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m + self.fan_attach_sink_m)
+        # ATTACH: Same XY as preload; COMPLIANT_SETTLE admittance will
+        # drive deeper normal based on contact force sensing.
+        attach_target = list(preload_target)
 
         state["start"] = list(start)
         state["target"] = list(target)
@@ -1154,21 +1170,43 @@ class SwingLegController(object):
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_DETACH_SLIDE:
-            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["light_contact_target"], self.detach_velocity_limit, dt, clamp_center)
+            # Bezier smooth retract from surface (fixed start position).
+            start_pos = list(state["phase_start_pos"])
+            cmd_position = self._bezier_interp(start_pos, list(state["light_contact_target"]), self.detach_slide_duration_s, phase_elapsed)
+            cmd_velocity = [0.0, 0.0, 0.0]
             if abs(self._normal_error(state["light_contact_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.detach_slide_duration_s:
                 self._set_phase(state, self.PHASE_TANGENTIAL_ALIGN, now_sec)
             skirt_target = self.light_contact_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_TANGENTIAL_ALIGN:
-            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["tangential_target"], self.tangential_velocity_limit, dt, clamp_center)
-            if self._tangential_error_norm(state["tangential_target"], cmd_position) <= self.tangential_alignment_tolerance_m or phase_elapsed >= self.tangential_align_duration_s:
+            # Bezier smooth swing to target with clearance.
+            tang_duration = max(self.tangential_align_duration_s, 0.05)
+            phase_progress = min(phase_elapsed / tang_duration, 1.0)
+            swing_clearance = self.clearance_m * (1.0 + self.slip_clearance_gain * self._leg_slip_risk(leg_index))
+            start_pos = list(state["phase_start_pos"])
+            target_xy = list(state["target"])
+            ref_pos = [0.0, 0.0, 0.0]
+            for axis in [0, 1]:
+                cp = [start_pos[axis], start_pos[axis], target_xy[axis], target_xy[axis], target_xy[axis]]
+                ref_pos[axis] = bezier4(cp, phase_progress)
+            z_start = start_pos[2]
+            z_target = state["tangential_target"][2]
+            lift_height = z_start + swing_clearance
+            z_cp = [z_start, lift_height, lift_height + swing_clearance, z_target, z_target]
+            ref_pos[2] = bezier4(z_cp, phase_progress)
+            cmd_position = ref_pos
+            cmd_velocity = [0.0, 0.0, 0.0]
+            if phase_elapsed >= tang_duration:
                 self._set_phase(state, self.PHASE_PRELOAD_COMPRESS, now_sec)
             skirt_target = self.light_contact_skirt_compression_target
             normal_force_limit = 0.0
             support_leg = False
         elif phase == self.PHASE_PRELOAD_COMPRESS:
-            cmd_position, cmd_velocity = self._step_toward_target(state["position"], state["preload_target"], self.preload_velocity_limit, dt, clamp_center)
+            # Bezier smooth press to preload target (fixed start position).
+            start_pos = list(state["phase_start_pos"])
+            cmd_position = self._bezier_interp(start_pos, list(state["preload_target"]), self.preload_duration_s, phase_elapsed)
+            cmd_velocity = [0.0, 0.0, 0.0]
             if abs(self._normal_error(state["preload_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
                 self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_COMPLIANT_SETTLE, now_sec)
