@@ -472,6 +472,8 @@ class CrawlGaitTester(object):
                 "%s_cmd_y" % leg,
                 "%s_cmd_z" % leg,
                 "%s_cmd_support" % leg,
+                "%s_ujc_x" % leg,
+                "%s_ujc_y" % leg,
                 "%s_ujc_z" % leg,
                 "%s_attachment_ready" % leg,
                 "%s_adhesion" % leg,
@@ -565,9 +567,9 @@ class CrawlGaitTester(object):
                 cmd_z = float(cmd.center.z)
                 cmd_support = int(bool(cmd.support_leg))
 
-            ujc_z = 0.0
+            ujc = None
             if est is not None and len(est.universal_joint_center_positions) > leg_index:
-                ujc_z = float(est.universal_joint_center_positions[leg_index].z)
+                ujc = est.universal_joint_center_positions[leg_index]
 
             def mask(name):
                 if est is None:
@@ -581,7 +583,9 @@ class CrawlGaitTester(object):
                 phase_name, phase_id,
                 "%.4f" % cmd_x, "%.4f" % cmd_y, "%.4f" % cmd_z,
                 cmd_support,
-                "%.4f" % ujc_z,
+                "%.4f" % (float(ujc.x) if ujc is not None else 0.0),
+                "%.4f" % (float(ujc.y) if ujc is not None else 0.0),
+                "%.4f" % (float(ujc.z) if ujc is not None else 0.0),
                 mask("attachment_ready_mask"),
                 mask("adhesion_mask"),
                 mask("measured_contact_mask"),
