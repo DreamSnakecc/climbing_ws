@@ -320,7 +320,7 @@ class LegIkExecutor(object):
         elif q3_1 < 0.0 and q3_0 >= 0.0:
             chosen_idx = 1  # cand2 is knee-backward, cand1 is knee-forward
         else:
-            # Both have same q3 sign — use cost with knee-backward-biased reference
+            
             ref = list(reference_deg)
             if ref[2] > 0.0:
                 ref[2] = 0.0  # prevent forward-bias lock-in
