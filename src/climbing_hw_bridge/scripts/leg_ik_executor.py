@@ -313,7 +313,7 @@ class LegIkExecutor(object):
         costs = [self._ik_solution_cost(c, reference_deg) for c in candidates]
         chosen_idx = 0 if costs[0] <= costs[1] else 1
         # Log branch switching risk when both candidates have similar cost
-        # (cost is squared-distance in deg^2, so diff < 100 ≈ 10 deg difference)
+       
         cost_diff = abs(costs[0] - costs[1])
         if cost_diff < 100.0:
             rospy.logwarn_throttle(
