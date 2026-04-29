@@ -28,7 +28,7 @@
 #define PROTOCOL_VERSION 2.0
 
 // Default setting
-#define BAUDRATE 57600
+#define BAUDRATE 1000000
 #define DEVICE_NAME "/dev/ttyUSB0"
 
 using namespace dynamixel;
