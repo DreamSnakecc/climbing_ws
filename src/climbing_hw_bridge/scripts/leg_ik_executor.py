@@ -310,10 +310,28 @@ class LegIkExecutor(object):
         candidates = [self._clamp_joint_solution_deg(candidate) for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm)]
         if reference_deg is None:
             reference_deg = [0.0, 0.0, 0.0]
+
+        q3_0 = candidates[0][2]
+        q3_1 = candidates[1][2]
+
+        # Primary tiebreaker: strongly prefer knee-forward (q3 >= 0) branch.
+        # The RRR leg has two IK solutions (q3>0 = knee forward, q3<0 = knee backward).
+        # Using reference_deg alone (from last_joint_deg_by_leg) is insufficient because
+        # once q3 drifts negative in the reference, the backward branch becomes self-locking.
+        if q3_0 >= 0.0 and q3_1 < 0.0:
+            chosen_idx = 0  # cand1 is knee-forward, cand2 is knee-backward
+        elif q3_1 >= 0.0 and q3_0 < 0.0:
+            chosen_idx = 1  # cand2 is knee-forward, cand1 is knee-backward
+        else:
+            # Both have same q3 sign or both are ~0 — use cost with knee-forward-biased reference
+            ref = list(reference_deg)
+            if ref[2] < 0.0:
+                ref[2] = 0.0  # prevent backward-bias lock-in
+            costs = [self._ik_solution_cost(c, ref) for c in candidates]
+            chosen_idx = 0 if costs[0] <= costs[1] else 1
+
+        # Log branch switching risk
         costs = [self._ik_solution_cost(c, reference_deg) for c in candidates]
-        chosen_idx = 0 if costs[0] <= costs[1] else 1
-        # Log branch switching risk when both candidates have similar cost
-       
         cost_diff = abs(costs[0] - costs[1])
         if cost_diff < 100.0:
             rospy.logwarn_throttle(
@@ -321,11 +339,12 @@ class LegIkExecutor(object):
                 "IK branch switching risk (cost_diff=%.1f): "
                 "cand1=[%.1f, %.1f, %.1f](cost=%.1f) "
                 "cand2=[%.1f, %.1f, %.1f](cost=%.1f) "
-                "reference=[%.1f, %.1f, %.1f] chosen=%d",
+                "reference=[%.1f, %.1f, %.1f] q3_forward=%d chosen=%d",
                 cost_diff,
                 candidates[0][0], candidates[0][1], candidates[0][2], costs[0],
                 candidates[1][0], candidates[1][1], candidates[1][2], costs[1],
                 reference_deg[0], reference_deg[1], reference_deg[2],
+                0 if q3_0 >= q3_1 else 1,
                 chosen_idx,
             )
         return tuple(candidates[chosen_idx])

@@ -646,11 +646,30 @@ class SwingLegController(object):
         candidates = self._ik_candidates_rad(target_x, target_y, target_z)
         if reference_rad is None:
             reference_rad = [0.0, math.radians(90.0), math.radians(60.0)]  # prefer knee-forward (q3>0) branch
+
+        q3_0 = candidates[0][2]
+        q3_1 = candidates[1][2]
+
+        # Primary tiebreaker: strongly prefer knee-forward (q3 >= 0) branch.
+        # The two IK solutions correspond to q3>0 (knee forward) and q3<0 (knee backward).
+        # Using reference_rad alone is insufficient once q3 drifts negative — the
+        # backward branch becomes self-locking. Always break ties by q3 sign.
+        if q3_0 >= 0.0 and q3_1 < 0.0:
+            chosen_idx = 0
+        elif q3_1 >= 0.0 and q3_0 < 0.0:
+            chosen_idx = 1
+        else:
+            # Both have same q3 sign — use cost with knee-forward-biased reference
+            ref = list(reference_rad)
+            if ref[2] < 0.0:
+                ref[2] = 0.0
+            costs = [self._solution_cost(c, ref) for c in candidates]
+            chosen_idx = 0 if costs[0] <= costs[1] else 1
+
+        # Log branch switching risk
         costs = [self._solution_cost(c, reference_rad) for c in candidates]
-        chosen_idx = 0 if costs[0] <= costs[1] else 1
-        # Log branch switching risk when both candidates have similar cost
         cost_diff_rad2 = abs(costs[0] - costs[1])
-        if cost_diff_rad2 < math.radians(10.0) ** 2:  # roughly 10 deg difference
+        if cost_diff_rad2 < math.radians(10.0) ** 2:
             rospy.logwarn_throttle(
                 2.0,
                 "IK branch switching risk (leg=%s cost_diff=%.4f): "
