@@ -80,6 +80,8 @@ class DynamixelBridge(object):
         self.last_command_ticks = {motor_id: 0 for motor_id in self.motor_ids}
         self.last_position_rad = {motor_id: 0.0 for motor_id in self.motor_ids}
         self.last_sample_time = None
+        self.left_board_ticks = None  # JointState from left_board/joint_state (C++ telemetry)
+        self.right_board_ticks = None  # JointState from right_board/joint_state
         self.leg_support_mode = {leg_name: False for leg_name in self.leg_to_motors.keys()}
         self.current_operating_mode = {motor_id: self.default_operating_mode_marker for motor_id in self.motor_ids}
         self.leg_wrench = {
@@ -105,6 +107,9 @@ class DynamixelBridge(object):
 
         rospy.Subscriber(self.command_topic, JointState, self.command_callback, queue_size=20)
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self.swing_target_callback, queue_size=50)
+        # Subscribe to C++ telemetry from multi_dxl_node (direct SyncRead, no service overhead)
+        rospy.Subscriber("/jetson/left_board/joint_state", JointState, self._left_board_ticks_cb, queue_size=10)
+        rospy.Subscriber("/jetson/right_board/joint_state", JointState, self._right_board_ticks_cb, queue_size=10)
         for leg_name in sorted(self.leg_to_motors.keys()):
             rospy.Subscriber(
                 "/control/stance_wrench/" + leg_name,
@@ -448,6 +453,12 @@ class DynamixelBridge(object):
             self.leg_support_mode[msg.leg_name] = support_mode
             self._set_leg_mode(msg.leg_name, support_mode)
 
+    def _left_board_ticks_cb(self, msg):
+        self.left_board_ticks = msg
+
+    def _right_board_ticks_cb(self, msg):
+        self.right_board_ticks = msg
+
     def stance_wrench_callback(self, msg, leg_name):
         if not self.enable_auto_current_control:
             return
@@ -576,15 +587,23 @@ class DynamixelBridge(object):
 
     def publish_telemetry(self, _event):
         stamp = rospy.Time.now()
+
+        # Merge left + right board telemetry into motor_id -> value dicts
+        ticks_by_id = {}
+        currents_by_id = {}
+        for js in [self.left_board_ticks, self.right_board_ticks]:
+            if js is None:
+                continue
+            for i, motor_id_str in enumerate(js.name):
+                mid = int(motor_id_str)
+                ticks_by_id[mid] = int(round(js.position[i]))
+                if i < len(js.effort):
+                    currents_by_id[mid] = int(round(js.effort[i]))
+
         dt = None
         if self.last_sample_time is not None:
             dt = max((stamp - self.last_sample_time).to_sec(), 1e-6)
         self.last_sample_time = stamp
-
-        # Bulk read all positions in 1-2 serial transactions per board
-        bulk_positions = self._bulk_read_positions()
-        # Bulk read all currents in 1-2 serial transactions per board
-        bulk_currents = self._bulk_read_currents()
 
         positions = []
         velocities = []
@@ -592,7 +611,7 @@ class DynamixelBridge(object):
         currents = []
 
         for motor_id in self.motor_ids:
-            raw_position = bulk_positions.get(motor_id)
+            raw_position = ticks_by_id.get(motor_id)
             if raw_position is None:
                 raw_position = self.last_command_ticks.get(motor_id, 0)
             joint_position = self._ticks_to_joint_rad(motor_id, raw_position)
@@ -600,7 +619,7 @@ class DynamixelBridge(object):
             joint_velocity = 0.0 if dt is None else (joint_position - previous_position) / dt
             self.last_position_rad[motor_id] = joint_position
 
-            raw_current = bulk_currents.get(motor_id)
+            raw_current = currents_by_id.get(motor_id)
             current_amp = 0.0 if raw_current is None else self._current_raw_to_amp(raw_current)
             torque_nm = self._estimate_torque_nm(motor_id, current_amp)
 
@@ -617,16 +636,17 @@ class DynamixelBridge(object):
         joint_state.effort = torques
         self.telemetry_pub.publish(joint_state)
 
-        current_msg = Float32MultiArray()
-        current_msg.data = currents
-        self.current_pub.publish(current_msg)
-
-        # Publish raw ticks (original tick values from motors, not radians)
+        # Raw ticks
         ticks_msg = Int32MultiArray()
         ticks_msg.layout = MultiArrayLayout()
         ticks_msg.layout.data_offset = 0
-        ticks_msg.data = [bulk_positions.get(mid, 0) for mid in self.motor_ids]
+        ticks_msg.data = [ticks_by_id.get(mid, 0) for mid in self.motor_ids]
         self.ticks_pub.publish(ticks_msg)
+
+        # Raw currents (amps)
+        current_msg = Float32MultiArray()
+        current_msg.data = currents
+        self.current_pub.publish(current_msg)
 
     def publish_current_commands(self, _event):
         if not self.enable_auto_current_control:
