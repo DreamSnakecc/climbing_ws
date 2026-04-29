@@ -9,11 +9,13 @@
   <group ns="jetson">
     <node pkg="dynamixel_control" type="multi_dxl_node" name="multi_dxl_node_left" ns="left_board" output="screen">
       <param name="board_name" value="left_board" />
+      <param name="telemetry_rate_hz" value="50" />
       <remap from="set_position" to="/set_position" />
     </node>
 
     <node pkg="dynamixel_control" type="multi_dxl_node" name="multi_dxl_node_right" ns="right_board" output="screen">
       <param name="board_name" value="right_board" />
+      <param name="telemetry_rate_hz" value="50" />
       <remap from="set_position" to="/set_position" />
     </node>
 

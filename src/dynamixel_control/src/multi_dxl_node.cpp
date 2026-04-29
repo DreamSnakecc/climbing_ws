@@ -1,5 +1,7 @@
 #include <ros/ros.h>
 #include <std_msgs/Int32.h>
+#include <sensor_msgs/JointState.h>
+#include <std_msgs/Float32MultiArray.h>
 #include <dynamixel_sdk/dynamixel_sdk.h>
 #include <dynamixel_sdk/group_sync_read.h>
 #include "dynamixel_control/GetCurrent.h"
@@ -47,6 +49,12 @@ std::mutex serial_mutex;
 dynamixel::GroupSyncRead *group_sync_reader = nullptr;
 dynamixel::GroupSyncRead *current_group_sync_reader = nullptr;
 
+ros::Publisher joint_state_pub;
+ros::Publisher joint_currents_pub;
+std::map<uint8_t, int32_t> last_tick_positions;
+ros::Time last_telemetry_time;
+int telemetry_rate_hz = 50;
+
 std::vector<uint8_t> controlled_ids;
 std::set<uint8_t> multi_turn_ids;
 std::map<uint8_t, uint8_t> default_operating_modes;
@@ -93,11 +101,11 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     else
         ROS_INFO("[ID %d] Operating mode set to %d", id, static_cast<int>(mode));
 
-    // Set smooth motion profile: velocity=200 (~24rpm), acceleration=50
+    // Set smooth motion profile: velocity=350 (~80rpm), acceleration=50
     // Non-zero values enable internal trajectory interpolation, making leg
     // motion smooth despite irregular command arrival or serial bus contention.
     packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 50, &dxl_error);
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 200, &dxl_error);
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 350, &dxl_error);
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -348,6 +356,83 @@ bool getBulkCurrentsService(dynamixel_control::GetBulkCurrents::Request &req,
     return true;
 }
 
+void publishTelemetry(const ros::TimerEvent &event)
+{
+    ros::Time now = ros::Time::now();
+
+    // SyncRead positions
+    {
+        std::lock_guard<std::mutex> lock(serial_mutex);
+        int tx_result = group_sync_reader->txRxPacket();
+        if (tx_result != COMM_SUCCESS)
+        {
+            ROS_ERROR_THROTTLE(1.0, "Failed bulk pos read: %s", packetHandler->getTxRxResult(tx_result));
+        }
+    }
+
+    // SyncRead currents
+    {
+        std::lock_guard<std::mutex> lock(serial_mutex);
+        int tx_result = current_group_sync_reader->txRxPacket();
+        if (tx_result != COMM_SUCCESS)
+        {
+            ROS_ERROR_THROTTLE(1.0, "Failed bulk current read: %s", packetHandler->getTxRxResult(tx_result));
+        }
+    }
+
+    // Build JointState with raw ticks, velocities, currents
+    sensor_msgs::JointState js;
+    js.header.stamp = now;
+    for (auto id : controlled_ids)
+    {
+        js.name.push_back(std::to_string(static_cast<int>(id)));
+        if (group_sync_reader->isAvailable(id, ADDR_PRESENT_POSITION, 4))
+        {
+            int32_t tick = static_cast<int32_t>(group_sync_reader->getData(id, ADDR_PRESENT_POSITION, 4));
+            js.position.push_back(static_cast<double>(tick));
+
+            double dt = last_telemetry_time.isZero() ? 0.001 : (now - last_telemetry_time).toSec();
+            double prev_tick = last_tick_positions.count(id) ? last_tick_positions[id] : tick;
+            js.velocity.push_back((tick - prev_tick) / (dt > 0.0 ? dt : 0.001));
+            last_tick_positions[id] = tick;
+        }
+        else
+        {
+            js.position.push_back(0);
+            js.velocity.push_back(0);
+        }
+
+        if (current_group_sync_reader->isAvailable(id, ADDR_PRESENT_CURRENT, 2))
+        {
+            uint16_t raw = static_cast<uint16_t>(current_group_sync_reader->getData(id, ADDR_PRESENT_CURRENT, 2));
+            js.effort.push_back(static_cast<double>(static_cast<int16_t>(raw)));
+        }
+        else
+        {
+            js.effort.push_back(0);
+        }
+    }
+    last_telemetry_time = now;
+
+    joint_state_pub.publish(js);
+
+    // Publish raw currents separately
+    std_msgs::Float32MultiArray currents_msg;
+    for (auto id : controlled_ids)
+    {
+        if (current_group_sync_reader->isAvailable(id, ADDR_PRESENT_CURRENT, 2))
+        {
+            uint16_t raw = static_cast<uint16_t>(current_group_sync_reader->getData(id, ADDR_PRESENT_CURRENT, 2));
+            currents_msg.data.push_back(static_cast<float>(static_cast<int16_t>(raw)));
+        }
+        else
+        {
+            currents_msg.data.push_back(0.0f);
+        }
+    }
+    joint_currents_pub.publish(currents_msg);
+}
+
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "multi_dxl_node");
@@ -475,6 +560,12 @@ int main(int argc, char **argv)
     ros::ServiceServer current_srv = nh.advertiseService("get_current", getCurrentService);
     ros::ServiceServer bulk_srv = nh.advertiseService("get_bulk_positions", getBulkPositionsService);
     ros::ServiceServer bulk_current_srv = nh.advertiseService("get_bulk_currents", getBulkCurrentsService);
+
+    // Direct telemetry publisher (in C++, bypassing ROS service round-trips)
+    pnh.param("telemetry_rate_hz", telemetry_rate_hz, 50);
+    joint_state_pub = nh.advertise<sensor_msgs::JointState>("joint_state", 20);
+    joint_currents_pub = nh.advertise<std_msgs::Float32MultiArray>("joint_currents", 20);
+    ros::Timer telemetry_timer = nh.createTimer(ros::Duration(1.0 / telemetry_rate_hz), publishTelemetry);
 
     ros::AsyncSpinner spinner(2);  // 2 threads: one for serial writes, one for service reads
     spinner.start();
