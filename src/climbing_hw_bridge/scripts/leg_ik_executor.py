@@ -183,6 +183,7 @@ class LegIkExecutor(object):
             self.nominal_x,
             self.nominal_y,
             self.nominal_universal_joint_center_z,
+            reference_deg=[0.0, 90.0, 60.0],  # prefer knee-forward (q3>0) branch
         )
         return [q1_deg, q2_deg, q3_deg]
 

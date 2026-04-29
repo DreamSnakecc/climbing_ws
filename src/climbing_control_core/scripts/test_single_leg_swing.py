@@ -19,6 +19,7 @@ import argparse
 import csv
 import datetime
 import os
+import subprocess
 import time
 
 import rospy
@@ -124,6 +125,12 @@ class SingleLegSwingTest(object):
         if self.latest_estimated is None:
             rospy.logerr("No EstimatedState after 5s — is state_estimator running?")
             return 1
+
+        # Kill body_planner to prevent conflicting BodyReference publications
+        # (body_planner's sequential gait advances other legs during test)
+        subprocess.call(["rosnode", "kill", "/body_planner"], stderr=subprocess.DEVNULL)
+        rospy.sleep(0.3)
+        rospy.loginfo("body_planner killed (test-only mode)")
 
         # Open CSV
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -281,6 +288,7 @@ class SingleLegSwingTest(object):
 
         # Print per-cycle summary
         rospy.loginfo("Summary: leg=%s, cycles=%d", self.leg_name, self.cycles)
+        rospy.loginfo("Test finished. Restart the roslaunch to resume body_planner.")
         return 0
 
 
