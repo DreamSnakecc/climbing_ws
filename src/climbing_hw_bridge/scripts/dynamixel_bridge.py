@@ -9,6 +9,7 @@ from std_msgs.msg import Float32MultiArray
 from climbing_msgs.msg import LegCenterCommand, StanceWrenchCommand
 from dynamixel_control.msg import SetCurrent, SetOperatingMode, SetPosition
 from dynamixel_control.srv import GetCurrent, GetPosition, GetBulkPositions
+from std_msgs.msg import Int32MultiArray, MultiArrayLayout, MultiArrayDimension
 
 
 class DynamixelBridge(object):
@@ -90,6 +91,7 @@ class DynamixelBridge(object):
         self.current_cmd_pub = rospy.Publisher("/set_current", SetCurrent, queue_size=200)
         self.mode_cmd_pub = rospy.Publisher("/set_operating_mode", SetOperatingMode, queue_size=100)
         self.telemetry_pub = rospy.Publisher("~joint_state", JointState, queue_size=20)
+        self.ticks_pub = rospy.Publisher("~joint_ticks", Int32MultiArray, queue_size=20)
         self.current_pub = rospy.Publisher("~joint_currents", Float32MultiArray, queue_size=20)
 
         self.get_position = None
@@ -581,6 +583,13 @@ class DynamixelBridge(object):
         current_msg = Float32MultiArray()
         current_msg.data = currents
         self.current_pub.publish(current_msg)
+
+        # Publish raw ticks (original tick values from motors, not radians)
+        ticks_msg = Int32MultiArray()
+        ticks_msg.layout = MultiArrayLayout()
+        ticks_msg.layout.data_offset = 0
+        ticks_msg.data = [bulk_positions.get(mid, 0) for mid in self.motor_ids]
+        self.ticks_pub.publish(ticks_msg)
 
     def publish_current_commands(self, _event):
         if not self.enable_auto_current_control:

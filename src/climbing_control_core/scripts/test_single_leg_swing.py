@@ -25,7 +25,7 @@ import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Pose, Twist
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Int32MultiArray
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
 STATE_FAULT = "FAULT"
@@ -64,7 +64,7 @@ class SingleLegSwingTest(object):
         self.latest_mission_state = "INIT"
         self.latest_swing_target = {}  # leg_name -> LegCenterCommand
         self.latest_ticks_cmd = None   # JointState from leg_ik_executor
-        self.latest_ticks_actual = None  # JointState from dynamixel_bridge
+        self.latest_ticks_actual = None  # Int32MultiArray from dynamixel_bridge/joint_ticks
 
         self.body_ref_pub = rospy.Publisher("/control/body_reference", BodyReference, queue_size=10)
         self.mission_start_pub = rospy.Publisher("/control/mission_start", Bool, queue_size=10)
@@ -74,7 +74,7 @@ class SingleLegSwingTest(object):
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self._swing_cb, queue_size=10)
         rospy.Subscriber("/control/mission_state", String, self._state_cb, queue_size=10)
         rospy.Subscriber("/jetson/joint_position_ticks_cmd", JointState, self._ticks_cmd_cb, queue_size=10)
-        rospy.Subscriber("/jetson/dynamixel_bridge/joint_state", JointState, self._ticks_actual_cb, queue_size=10)
+        rospy.Subscriber("/jetson/dynamixel_bridge/joint_ticks", Int32MultiArray, self._ticks_actual_cb, queue_size=10)
 
         rospy.sleep(0.5)
 
@@ -91,9 +91,7 @@ class SingleLegSwingTest(object):
         self.latest_ticks_cmd = msg
 
     def _ticks_actual_cb(self, msg):
-        self.latest_ticks_actual = msg
-
-    def _make_body_ref(self, support_mask):
+        self.latest_ticks_actual = msg    def _make_body_ref(self, support_mask):
         msg = BodyReference()
         msg.header.stamp = rospy.Time.now()
         msg.pose = Pose()
@@ -228,19 +226,19 @@ class SingleLegSwingTest(object):
                     "%.0f" % (self.latest_ticks_cmd.position[9] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[10] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[11] if self.latest_ticks_cmd else 0),
-                    # actual ticks (dynamixel_bridge telemetry): same order
-                    "%.0f" % (self.latest_ticks_actual.position[0] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[1] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[2] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[3] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[4] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[5] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[6] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[7] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[8] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[9] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[10] if self.latest_ticks_actual else 0),
-                    "%.0f" % (self.latest_ticks_actual.position[11] if self.latest_ticks_actual else 0),
+                    # actual ticks (dynamixel_bridge joint_ticks raw values)
+                    "%.0f" % (self.latest_ticks_actual.data[0] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[1] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[2] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[3] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[4] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[5] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[6] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[7] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[8] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[9] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[10] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[11] if self.latest_ticks_actual else 0),
                 ])
 
                 # Detect swing started (cmd_support transitions False)
