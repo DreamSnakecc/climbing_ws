@@ -239,7 +239,7 @@ class DynamixelBridge(object):
 
     def _ik_transform_matrix_solve_deg(self, x_mm, y_mm, z_mm):
         candidates = self._ik_candidates_deg(x_mm, y_mm, z_mm)
-        return min(candidates, key=lambda candidate: self._solution_cost(candidate, [0.0, 0.0, 0.0]))
+        return min(candidates, key=lambda candidate: self._solution_cost(candidate, [0.0, 90.0, 60.0]))
 
     def _compute_nominal_output_deg_by_motor(self):
         nominal_joint_deg = self._ik_transform_matrix_solve_deg(

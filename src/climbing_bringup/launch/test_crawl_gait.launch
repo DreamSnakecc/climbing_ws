@@ -32,7 +32,7 @@
   <arg name="boost_after_preload_without_contact" default="true" />
   <arg name="compliant_start_requires_contact" default="false" />
   <arg name="enable_state_logger" default="false" />
-  <arg name="linear_velocity_x" default="0.01" />
+  <arg name="linear_velocity_x" default="0.005" />
   <arg name="use_contact_feedback" default="false" />
 
   <!-- pc_bringup.launch does rosparam load robot.yaml internally.
@@ -57,7 +57,7 @@
          value="[$(arg linear_velocity_x), 0.0, 0.0]" type="str" />
   <param name="/body_planner/all_hold_dwell_s" value="1.0" type="double" />
   <param name="/swing_leg_controller/swing_duration_s" value="1.0" type="double" />
-  <param name="/swing_leg_controller/clearance_m" value="0.02" type="double" />
+  <param name="/swing_leg_controller/clearance_m" value="0.01" type="double" />
   <param name="/mission_supervisor/adhesion_required_count" value="0" type="int" />
   <param name="/mission_supervisor/auto_start" value="false" />
   <!-- Disable current-force control on dynamixel_bridge so supporting legs

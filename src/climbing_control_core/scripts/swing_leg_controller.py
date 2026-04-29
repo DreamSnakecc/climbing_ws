@@ -645,7 +645,7 @@ class SwingLegController(object):
         target_z = position[2]
         candidates = self._ik_candidates_rad(target_x, target_y, target_z)
         if reference_rad is None:
-            reference_rad = [0.0, 0.0, 0.0]
+            reference_rad = [0.0, math.radians(90.0), math.radians(60.0)]  # prefer knee-forward (q3>0) branch
         return min(candidates, key=lambda candidate: self._solution_cost(candidate, reference_rad))
 
     def _forward_kinematics_leg(self, joint_vector):
