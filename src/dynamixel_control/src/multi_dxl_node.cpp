@@ -8,6 +8,7 @@
 #include "dynamixel_control/SetPosition.h"
 #include "dynamixel_control/GetPosition.h"
 #include "dynamixel_control/GetBulkPositions.h"
+#include "dynamixel_control/GetBulkCurrents.h"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -44,6 +45,7 @@ int16_t present_current = 0;
 std::mutex serial_mutex;
 
 dynamixel::GroupSyncRead *group_sync_reader = nullptr;
+dynamixel::GroupSyncRead *current_group_sync_reader = nullptr;
 
 std::vector<uint8_t> controlled_ids;
 std::set<uint8_t> multi_turn_ids;
@@ -277,6 +279,75 @@ bool getBulkPositionsService(dynamixel_control::GetBulkPositions::Request &req,
     return true;
 }
 
+bool getBulkCurrentsService(dynamixel_control::GetBulkCurrents::Request &req,
+                            dynamixel_control::GetBulkCurrents::Response &res)
+{
+    std::lock_guard<std::mutex> lock(serial_mutex);
+
+    if (current_group_sync_reader == nullptr)
+    {
+        ROS_ERROR("Current GroupSyncRead not initialized");
+        return false;
+    }
+
+    if (req.motor_ids.empty())
+    {
+        int tx_result = current_group_sync_reader->txRxPacket();
+        if (tx_result != COMM_SUCCESS)
+        {
+            ROS_ERROR("Failed bulk current read: %s", packetHandler->getTxRxResult(tx_result));
+            return false;
+        }
+        for (size_t i = 0; i < controlled_ids.size(); ++i)
+        {
+            uint8_t id = controlled_ids[i];
+            if (current_group_sync_reader->isAvailable(id, ADDR_PRESENT_CURRENT, 2))
+            {
+                uint16_t raw = static_cast<uint16_t>(current_group_sync_reader->getData(id, ADDR_PRESENT_CURRENT, 2));
+                res.currents.push_back(static_cast<int32_t>(static_cast<int16_t>(raw)));
+            }
+            else
+            {
+                ROS_WARN("Bulk current data not available for ID %d", id);
+                res.currents.push_back(0);
+            }
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < req.motor_ids.size(); ++i)
+        {
+            uint8_t id = static_cast<uint8_t>(req.motor_ids[i]);
+            if (!current_group_sync_reader->addParam(id))
+            {
+                ROS_WARN("Failed to add ID %d to bulk current read", id);
+            }
+        }
+        int tx_result = current_group_sync_reader->txRxPacket();
+        if (tx_result != COMM_SUCCESS)
+        {
+            ROS_ERROR("Failed bulk current read: %s", packetHandler->getTxRxResult(tx_result));
+            return false;
+        }
+        for (size_t i = 0; i < req.motor_ids.size(); ++i)
+        {
+            uint8_t id = static_cast<uint8_t>(req.motor_ids[i]);
+            if (current_group_sync_reader->isAvailable(id, ADDR_PRESENT_CURRENT, 2))
+            {
+                uint16_t raw = static_cast<uint16_t>(current_group_sync_reader->getData(id, ADDR_PRESENT_CURRENT, 2));
+                res.currents.push_back(static_cast<int32_t>(static_cast<int16_t>(raw)));
+            }
+            else
+            {
+                ROS_WARN("Bulk current data not available for ID %d", id);
+                res.currents.push_back(0);
+            }
+        }
+        current_group_sync_reader->clearParam();
+    }
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "multi_dxl_node");
@@ -387,12 +458,23 @@ int main(int argc, char **argv)
         }
     }
 
+    // Initialize GroupSyncRead for bulk current reads (2 bytes = 16-bit current)
+    current_group_sync_reader = new dynamixel::GroupSyncRead(portHandler, packetHandler, ADDR_PRESENT_CURRENT, 2);
+    for (auto id : controlled_ids)
+    {
+        if (!current_group_sync_reader->addParam(id))
+        {
+            ROS_WARN("Failed to add ID %d to current GroupSyncRead", id);
+        }
+    }
+
     ros::Subscriber sub = nh.subscribe("set_position", 100, setPositionCallback);
     ros::Subscriber current_sub = nh.subscribe("set_current", 100, setCurrentCallback);
     ros::Subscriber mode_sub = nh.subscribe("set_operating_mode", 100, setOperatingModeCallback);
     ros::ServiceServer srv = nh.advertiseService("get_position", getPositionService);
     ros::ServiceServer current_srv = nh.advertiseService("get_current", getCurrentService);
     ros::ServiceServer bulk_srv = nh.advertiseService("get_bulk_positions", getBulkPositionsService);
+    ros::ServiceServer bulk_current_srv = nh.advertiseService("get_bulk_currents", getBulkCurrentsService);
 
     ros::AsyncSpinner spinner(2);  // 2 threads: one for serial writes, one for service reads
     spinner.start();
@@ -408,6 +490,7 @@ int main(int argc, char **argv)
     }
     portHandler->closePort();
     delete group_sync_reader;
+    delete current_group_sync_reader;
 
     return 0;
 }
