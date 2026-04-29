@@ -62,7 +62,7 @@
   <param name="/mission_supervisor/auto_start" value="false" />
   <!-- Disable current-force control on dynamixel_bridge so supporting legs
        stay in position mode and don't move in response to stance_force_optimizer.
-       NOTE: This global param is for documentation ONLY -- the dynamixel_bridge
+       NOTE: This global param is for documentation ONLY. The dynamixel_bridge
        node on Jetson reads this at startup, so it must be passed as a launch arg:
          roslaunch climbing_bringup jetson_bringup.launch enable_auto_current_control:=false
   -->

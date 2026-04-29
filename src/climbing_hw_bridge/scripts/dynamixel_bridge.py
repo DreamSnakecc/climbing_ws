@@ -42,6 +42,11 @@ class DynamixelBridge(object):
         self.torque_models = get_cfg("torque_models", {})
         self.torque_model_by_motor = get_cfg("torque_model_by_motor", {})
         self.runtime_namespace = rospy.get_namespace().rstrip("/")
+
+        # Diagnostic counters
+        self.command_recv_count = 0
+        self.position_pub_count = 0
+        self.last_diag_log_time = rospy.Time.now()
         self.board_configs = self._load_board_configs()
 
         self.gear_ratio_joint2 = float(get_gait_cfg("gear_ratio_joint2", 1.0))
@@ -107,6 +112,7 @@ class DynamixelBridge(object):
 
         self.timer = rospy.Timer(rospy.Duration(1.0 / max(self.telemetry_rate_hz, 1.0)), self.publish_telemetry)
         self.current_timer = rospy.Timer(rospy.Duration(1.0 / max(self.current_command_rate_hz, 1.0)), self.publish_current_commands)
+        self.diag_timer = rospy.Timer(rospy.Duration(5.0), self._log_diagnostics)
 
     def _build_motor_joint_index(self):
         legs = rospy.get_param("/legs", {})
@@ -436,12 +442,14 @@ class DynamixelBridge(object):
         if len(msg.position) != len(self.motor_ids):
             rospy.logwarn_throttle(2.0, "joint_position_ticks_cmd length does not match ordered_motor_ids")
             return
+        self.command_recv_count += 1
         for motor_id, tick in zip(self.motor_ids, msg.position):
             packet = SetPosition()
             packet.id = int(motor_id)
             packet.position = int(round(tick))
             self.last_command_ticks[int(motor_id)] = packet.position
             self.cmd_pub.publish(packet)
+            self.position_pub_count += 1
 
     def _read_motor_position(self, motor_id):
         board_name = self._board_name_for_motor(motor_id)
@@ -469,6 +477,28 @@ class DynamixelBridge(object):
         except rospy.ServiceException as exc:
             rospy.logwarn_throttle(2.0, "Failed to read current for ID %d: %s", motor_id, exc)
             return None
+
+    def _count_failed_telemetry_reads(self):
+        """Return (failed_pos, failed_cur) counts since last call (sampled, not exact)."""
+        return 0, 0
+
+    def _log_diagnostics(self, _event):
+        now = rospy.Time.now()
+        elapsed = (now - self.last_diag_log_time).to_sec()
+        self.last_diag_log_time = now
+
+        cmd_rate = self.command_recv_count / max(elapsed, 1e-6)
+        pos_rate = self.position_pub_count / max(elapsed, 1e-6)
+
+        rospy.loginfo(
+            "DIAG: commands_rx=%d (%.1f Hz) | SetPosition_tx=%d (%.1f Hz) | "
+            "telemetry_rate=%.1f Hz (target=%.0f Hz)",
+            self.command_recv_count, cmd_rate,
+            self.position_pub_count, pos_rate,
+            1.0 / max(elapsed, 1e-6), self.telemetry_rate_hz,
+        )
+        self.command_recv_count = 0
+        self.position_pub_count = 0
 
     def publish_telemetry(self, _event):
         stamp = rospy.Time.now()

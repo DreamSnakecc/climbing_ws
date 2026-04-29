@@ -968,12 +968,12 @@ class SwingLegController(object):
         target_normal = vector_dot(target, self.wall_normal_body)
 
         # DETACH: Slight retract from contact surface
-        light_contact_target = self._compose_tangent_and_normal(start, start_normal - self.detach_contact_offset_m)
+        light_contact_target = self._compose_tangent_and_normal(start, start_normal + self.detach_contact_offset_m)
         # TANGENTIAL: Move to target XY while lifting clearance_m along normal for obstacle clearance
         tang_normal = start_normal + self.swing_lift_normal_m
         tangential_target = self._compose_tangent_and_normal(target, tang_normal)
         # PRELOAD: Press back to surface from lifted position
-        preload_target = self._compose_tangent_and_normal(target, target_normal + self.preload_extra_normal_m)
+        preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)
         # ATTACH: Same XY as preload; COMPLIANT_SETTLE admittance will
         # drive deeper normal based on contact force sensing.
         attach_target = list(preload_target)
