@@ -91,7 +91,9 @@ class SingleLegSwingTest(object):
         self.latest_ticks_cmd = msg
 
     def _ticks_actual_cb(self, msg):
-        self.latest_ticks_actual = msg    def _make_body_ref(self, support_mask):
+        self.latest_ticks_actual = msg
+
+    def _make_body_ref(self, support_mask):
         msg = BodyReference()
         msg.header.stamp = rospy.Time.now()
         msg.pose = Pose()

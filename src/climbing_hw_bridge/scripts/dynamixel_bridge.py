@@ -8,7 +8,7 @@ from std_msgs.msg import Float32MultiArray
 
 from climbing_msgs.msg import LegCenterCommand, StanceWrenchCommand
 from dynamixel_control.msg import SetCurrent, SetOperatingMode, SetPosition
-from dynamixel_control.srv import GetCurrent, GetPosition, GetBulkPositions
+from dynamixel_control.srv import GetCurrent, GetPosition, GetBulkPositions, GetBulkCurrents
 from std_msgs.msg import Int32MultiArray, MultiArrayLayout, MultiArrayDimension
 
 
@@ -99,6 +99,7 @@ class DynamixelBridge(object):
         self.position_clients = {}
         self.current_clients = {}
         self.bulk_clients = {}
+        self.bulk_current_clients = {}
         self._init_service_clients()
         self._initialize_startup_pose_mode()
 
@@ -168,6 +169,13 @@ class DynamixelBridge(object):
                     self.bulk_clients[board_name] = rospy.ServiceProxy(bulk_service, GetBulkPositions)
                 except (rospy.ROSException, rospy.ROSInterruptException):
                     rospy.logwarn("dynamixel_bridge could not find %s; will use per-motor reads", bulk_service)
+
+                bulk_current_service = self._qualify_service(board_name, "get_bulk_currents")
+                try:
+                    rospy.wait_for_service(bulk_current_service, timeout=3.0)
+                    self.bulk_current_clients[board_name] = rospy.ServiceProxy(bulk_current_service, GetBulkCurrents)
+                except (rospy.ROSException, rospy.ROSInterruptException):
+                    rospy.logwarn("dynamixel_bridge could not find %s; will use per-motor current reads", bulk_current_service)
             return
 
         rospy.wait_for_service(self.position_service_name)
@@ -539,6 +547,33 @@ class DynamixelBridge(object):
                 result[motor_id] = self._read_motor_position(motor_id)
         return result
 
+    def _bulk_read_currents(self):
+        """Read currents of all motors on each board in bulk. Returns dict motor_id->raw_current (or None)."""
+        result = {}
+        if self.board_configs:
+            for board_name in sorted(self.board_configs.keys()):
+                bulk_client = self.bulk_current_clients.get(board_name)
+                if bulk_client is None:
+                    for motor_id in self.board_configs[board_name].get("motor_ids", []):
+                        result[motor_id] = self._read_motor_current(motor_id)
+                    continue
+                try:
+                    resp = bulk_client(motor_ids=[])
+                    motor_ids = self.board_configs[board_name].get("motor_ids", [])
+                    for motor_id, raw_current in zip(motor_ids, resp.currents):
+                        if raw_current == 0:
+                            result[motor_id] = None
+                        else:
+                            result[motor_id] = raw_current
+                except (rospy.ServiceException, rospy.ROSException) as exc:
+                    rospy.logwarn_throttle(5.0, "Bulk current read failed on %s: %s", board_name, exc)
+                    for motor_id in self.board_configs[board_name].get("motor_ids", []):
+                        result[motor_id] = self._read_motor_current(motor_id)
+        else:
+            for motor_id in self.motor_ids:
+                result[motor_id] = self._read_motor_current(motor_id)
+        return result
+
     def publish_telemetry(self, _event):
         stamp = rospy.Time.now()
         dt = None
@@ -548,6 +583,8 @@ class DynamixelBridge(object):
 
         # Bulk read all positions in 1-2 serial transactions per board
         bulk_positions = self._bulk_read_positions()
+        # Bulk read all currents in 1-2 serial transactions per board
+        bulk_currents = self._bulk_read_currents()
 
         positions = []
         velocities = []
@@ -563,7 +600,7 @@ class DynamixelBridge(object):
             joint_velocity = 0.0 if dt is None else (joint_position - previous_position) / dt
             self.last_position_rad[motor_id] = joint_position
 
-            raw_current = self._read_motor_current(motor_id)
+            raw_current = bulk_currents.get(motor_id)
             current_amp = 0.0 if raw_current is None else self._current_raw_to_amp(raw_current)
             torque_nm = self._estimate_torque_nm(motor_id, current_amp)
 
