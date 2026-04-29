@@ -183,7 +183,7 @@ class LegIkExecutor(object):
             self.nominal_x,
             self.nominal_y,
             self.nominal_universal_joint_center_z,
-            reference_deg=[0.0, 90.0, 60.0],  # prefer knee-forward (q3>0) branch
+            reference_deg=[0.0, 90.0, -60.0],  # prefer knee-backward (q3<0) branch
         )
         return [q1_deg, q2_deg, q3_deg]
 
@@ -314,19 +314,16 @@ class LegIkExecutor(object):
         q3_0 = candidates[0][2]
         q3_1 = candidates[1][2]
 
-        # Primary tiebreaker: strongly prefer knee-forward (q3 >= 0) branch.
-        # The RRR leg has two IK solutions (q3>0 = knee forward, q3<0 = knee backward).
-        # Using reference_deg alone (from last_joint_deg_by_leg) is insufficient because
-        # once q3 drifts negative in the reference, the backward branch becomes self-locking.
-        if q3_0 >= 0.0 and q3_1 < 0.0:
-            chosen_idx = 0  # cand1 is knee-forward, cand2 is knee-backward
-        elif q3_1 >= 0.0 and q3_0 < 0.0:
-            chosen_idx = 1  # cand2 is knee-forward, cand1 is knee-backward
+        # Primary tiebreaker: strongly prefer knee-backward (q3 < 0) branch.
+        if q3_0 < 0.0 and q3_1 >= 0.0:
+            chosen_idx = 0  # cand1 is knee-backward, cand2 is knee-forward
+        elif q3_1 < 0.0 and q3_0 >= 0.0:
+            chosen_idx = 1  # cand2 is knee-backward, cand1 is knee-forward
         else:
-            # Both have same q3 sign or both are ~0 — use cost with knee-forward-biased reference
+            # Both have same q3 sign — use cost with knee-backward-biased reference
             ref = list(reference_deg)
-            if ref[2] < 0.0:
-                ref[2] = 0.0  # prevent backward-bias lock-in
+            if ref[2] > 0.0:
+                ref[2] = 0.0  # prevent forward-bias lock-in
             costs = [self._ik_solution_cost(c, ref) for c in candidates]
             chosen_idx = 0 if costs[0] <= costs[1] else 1
 
@@ -339,12 +336,12 @@ class LegIkExecutor(object):
                 "IK branch switching risk (cost_diff=%.1f): "
                 "cand1=[%.1f, %.1f, %.1f](cost=%.1f) "
                 "cand2=[%.1f, %.1f, %.1f](cost=%.1f) "
-                "reference=[%.1f, %.1f, %.1f] q3_forward=%d chosen=%d",
+                "reference=[%.1f, %.1f, %.1f] q3_backward=%d chosen=%d",
                 cost_diff,
                 candidates[0][0], candidates[0][1], candidates[0][2], costs[0],
                 candidates[1][0], candidates[1][1], candidates[1][2], costs[1],
                 reference_deg[0], reference_deg[1], reference_deg[2],
-                0 if q3_0 >= q3_1 else 1,
+                0 if q3_0 < q3_1 else 1,
                 chosen_idx,
             )
         return tuple(candidates[chosen_idx])
