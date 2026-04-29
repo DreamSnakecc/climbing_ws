@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <mutex>
 
 // Control table address for X series (except XL-320)
 #define ADDR_OPERATING_MODE 11
@@ -37,6 +38,8 @@ uint8_t dxl_error = 0;
 int dxl_comm_result;
 int32_t present_position = 0;
 int16_t present_current = 0;
+
+std::mutex serial_mutex;
 
 std::vector<uint8_t> controlled_ids;
 std::set<uint8_t> multi_turn_ids;
@@ -70,6 +73,7 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     if (mode_it != current_operating_modes.end() && mode_it->second == mode)
         return true;
 
+    std::lock_guard<std::mutex> lock(serial_mutex);
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 0, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
         ROS_ERROR("[ID %d] Failed disable torque before mode set: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
@@ -83,8 +87,11 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     else
         ROS_INFO("[ID %d] Operating mode set to %d", id, static_cast<int>(mode));
 
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 0, &dxl_error);
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 0, &dxl_error);
+    // Set smooth motion profile: velocity=200 (~24rpm), acceleration=50
+    // Non-zero values enable internal trajectory interpolation, making leg
+    // motion smooth despite irregular command arrival or serial bus contention.
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 50, &dxl_error);
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 200, &dxl_error);
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -114,6 +121,7 @@ void setPositionCallback(const dynamixel_control::SetPosition::ConstPtr &msg)
         // ROS_WARN("ID %d is not in the controlled list", id);
         return;
     }
+    std::lock_guard<std::mutex> lock(serial_mutex);
     dxl_comm_result = packetHandler->write4ByteTxRx(portHandler, id, ADDR_GOAL_POSITION, msg->position, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
         ROS_ERROR("Failed write pos: %s", packetHandler->getTxRxResult(dxl_comm_result));
@@ -125,6 +133,7 @@ void setCurrentCallback(const dynamixel_control::SetCurrent::ConstPtr &msg)
     if (!containsId(controlled_ids, id))
         return;
 
+    std::lock_guard<std::mutex> lock(serial_mutex);
     uint16_t goal_current_raw = static_cast<uint16_t>(static_cast<int16_t>(msg->current));
     dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_GOAL_CURRENT, goal_current_raw, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -158,6 +167,7 @@ bool getPositionService(dynamixel_control::GetPosition::Request &req,
         res.position = -1;
         return true;
     }
+    std::lock_guard<std::mutex> lock(serial_mutex);
     dxl_comm_result = packetHandler->read4ByteTxRx(portHandler, id, ADDR_PRESENT_POSITION,
                                                    (uint32_t *)&present_position, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -178,7 +188,7 @@ bool getCurrentService(dynamixel_control::GetCurrent::Request &req,
         res.current = 0;
         return true;
     }
-
+    std::lock_guard<std::mutex> lock(serial_mutex);
     uint16_t present_current_raw = 0;
     dxl_comm_result = packetHandler->read2ByteTxRx(portHandler, id, ADDR_PRESENT_CURRENT,
                                                    &present_current_raw, &dxl_error);
@@ -294,18 +304,23 @@ int main(int argc, char **argv)
     for (auto id : controlled_ids)
         setupDxl(id);
 
-    ros::Subscriber sub = nh.subscribe("set_position", 10, setPositionCallback);
-    ros::Subscriber current_sub = nh.subscribe("set_current", 20, setCurrentCallback);
-    ros::Subscriber mode_sub = nh.subscribe("set_operating_mode", 20, setOperatingModeCallback);
+    ros::Subscriber sub = nh.subscribe("set_position", 100, setPositionCallback);
+    ros::Subscriber current_sub = nh.subscribe("set_current", 100, setCurrentCallback);
+    ros::Subscriber mode_sub = nh.subscribe("set_operating_mode", 100, setOperatingModeCallback);
     ros::ServiceServer srv = nh.advertiseService("get_position", getPositionService);
     ros::ServiceServer current_srv = nh.advertiseService("get_current", getCurrentService);
 
-    ros::spin();
+    ros::AsyncSpinner spinner(2);  // 2 threads: one for serial writes, one for service reads
+    spinner.start();
+    ros::waitForShutdown();
 
     // disable torque on exit
-    for (auto id : controlled_ids)
     {
-        packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 0, &dxl_error);
+        std::lock_guard<std::mutex> lock(serial_mutex);
+        for (auto id : controlled_ids)
+        {
+            packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 0, &dxl_error);
+        }
     }
     portHandler->closePort();
 
