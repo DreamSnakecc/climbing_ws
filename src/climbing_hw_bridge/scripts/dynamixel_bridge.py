@@ -8,7 +8,7 @@ from std_msgs.msg import Float32MultiArray
 
 from climbing_msgs.msg import LegCenterCommand, StanceWrenchCommand
 from dynamixel_control.msg import SetCurrent, SetOperatingMode, SetPosition
-from dynamixel_control.srv import GetCurrent, GetPosition
+from dynamixel_control.srv import GetCurrent, GetPosition, GetBulkPositions
 
 
 class DynamixelBridge(object):
@@ -96,6 +96,7 @@ class DynamixelBridge(object):
         self.get_current = None
         self.position_clients = {}
         self.current_clients = {}
+        self.bulk_clients = {}
         self._init_service_clients()
         self._initialize_startup_pose_mode()
 
@@ -158,6 +159,13 @@ class DynamixelBridge(object):
                     self.current_clients[board_name] = rospy.ServiceProxy(current_service, GetCurrent)
                 except (rospy.ROSException, rospy.ROSInterruptException):
                     rospy.logwarn("dynamixel_bridge could not find %s; current telemetry will stay zero on %s", current_service, board_name)
+
+                bulk_service = self._qualify_service(board_name, "get_bulk_positions")
+                try:
+                    rospy.wait_for_service(bulk_service, timeout=3.0)
+                    self.bulk_clients[board_name] = rospy.ServiceProxy(bulk_service, GetBulkPositions)
+                except (rospy.ROSException, rospy.ROSInterruptException):
+                    rospy.logwarn("dynamixel_bridge could not find %s; will use per-motor reads", bulk_service)
             return
 
         rospy.wait_for_service(self.position_service_name)
@@ -500,19 +508,52 @@ class DynamixelBridge(object):
         self.command_recv_count = 0
         self.position_pub_count = 0
 
+    def _bulk_read_positions(self):
+        """Read positions of all motors on each board in bulk. Returns dict motor_id->tick (or None)."""
+        result = {}
+        if self.board_configs:
+            for board_name in sorted(self.board_configs.keys()):
+                bulk_client = self.bulk_clients.get(board_name)
+                if bulk_client is None:
+                    # Fallback to per-motor reads
+                    for motor_id in self.board_configs[board_name].get("motor_ids", []):
+                        result[motor_id] = self._read_motor_position(motor_id)
+                    continue
+                try:
+                    # Bulk read: pass empty list to read all controlled IDs on this board
+                    resp = bulk_client(motor_ids=[])
+                    motor_ids = self.board_configs[board_name].get("motor_ids", [])
+                    for motor_id, pos in zip(motor_ids, resp.positions):
+                        if pos == 0:
+                            result[motor_id] = None
+                        else:
+                            result[motor_id] = pos
+                except (rospy.ServiceException, rospy.ROSException) as exc:
+                    rospy.logwarn_throttle(5.0, "Bulk read failed on %s: %s", board_name, exc)
+                    for motor_id in self.board_configs[board_name].get("motor_ids", []):
+                        result[motor_id] = self._read_motor_position(motor_id)
+        else:
+            for motor_id in self.motor_ids:
+                result[motor_id] = self._read_motor_position(motor_id)
+        return result
+
     def publish_telemetry(self, _event):
         stamp = rospy.Time.now()
         dt = None
         if self.last_sample_time is not None:
             dt = max((stamp - self.last_sample_time).to_sec(), 1e-6)
         self.last_sample_time = stamp
+
+        # Bulk read all positions in 1-2 serial transactions per board
+        bulk_positions = self._bulk_read_positions()
+
         positions = []
         velocities = []
         torques = []
         currents = []
 
         for motor_id in self.motor_ids:
-            raw_position = self._read_motor_position(motor_id)
+            raw_position = bulk_positions.get(motor_id)
             if raw_position is None:
                 raw_position = self.last_command_ticks.get(motor_id, 0)
             joint_position = self._ticks_to_joint_rad(motor_id, raw_position)

@@ -21,6 +21,7 @@ add_service_files(
   FILES
   GetPosition.srv
   GetCurrent.srv
+  GetBulkPositions.srv
 )
 
 generate_messages(
