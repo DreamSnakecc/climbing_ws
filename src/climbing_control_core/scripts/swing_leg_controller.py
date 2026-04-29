@@ -646,7 +646,24 @@ class SwingLegController(object):
         candidates = self._ik_candidates_rad(target_x, target_y, target_z)
         if reference_rad is None:
             reference_rad = [0.0, math.radians(90.0), math.radians(60.0)]  # prefer knee-forward (q3>0) branch
-        return min(candidates, key=lambda candidate: self._solution_cost(candidate, reference_rad))
+        costs = [self._solution_cost(c, reference_rad) for c in candidates]
+        chosen_idx = 0 if costs[0] <= costs[1] else 1
+        # Log branch switching risk when both candidates have similar cost
+        cost_diff_rad2 = abs(costs[0] - costs[1])
+        if cost_diff_rad2 < math.radians(10.0) ** 2:  # roughly 10 deg difference
+            rospy.logwarn_throttle(
+                2.0,
+                "IK branch switching risk (leg=%s cost_diff=%.4f): "
+                "cand1=[%.2f, %.2f, %.2f](cost=%.4f) "
+                "cand2=[%.2f, %.2f, %.2f](cost=%.4f) "
+                "reference=[%.2f, %.2f, %.2f] chosen=%d",
+                leg_name, cost_diff_rad2,
+                candidates[0][0], candidates[0][1], candidates[0][2], costs[0],
+                candidates[1][0], candidates[1][1], candidates[1][2], costs[1],
+                reference_rad[0], reference_rad[1], reference_rad[2],
+                chosen_idx,
+            )
+        return candidates[chosen_idx]
 
     def _forward_kinematics_leg(self, joint_vector):
         q1 = float(joint_vector[0])

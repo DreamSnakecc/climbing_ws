@@ -310,7 +310,25 @@ class LegIkExecutor(object):
         candidates = [self._clamp_joint_solution_deg(candidate) for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm)]
         if reference_deg is None:
             reference_deg = [0.0, 0.0, 0.0]
-        return tuple(min(candidates, key=lambda candidate: self._ik_solution_cost(candidate, reference_deg)))
+        costs = [self._ik_solution_cost(c, reference_deg) for c in candidates]
+        chosen_idx = 0 if costs[0] <= costs[1] else 1
+        # Log branch switching risk when both candidates have similar cost
+        # (cost is squared-distance in deg^2, so diff < 100 ≈ 10 deg difference)
+        cost_diff = abs(costs[0] - costs[1])
+        if cost_diff < 100.0:
+            rospy.logwarn_throttle(
+                2.0,
+                "IK branch switching risk (cost_diff=%.1f): "
+                "cand1=[%.1f, %.1f, %.1f](cost=%.1f) "
+                "cand2=[%.1f, %.1f, %.1f](cost=%.1f) "
+                "reference=[%.1f, %.1f, %.1f] chosen=%d",
+                cost_diff,
+                candidates[0][0], candidates[0][1], candidates[0][2], costs[0],
+                candidates[1][0], candidates[1][1], candidates[1][2], costs[1],
+                reference_deg[0], reference_deg[1], reference_deg[2],
+                chosen_idx,
+            )
+        return tuple(candidates[chosen_idx])
 
     def _joint_gear_ratio(self, joint_index):
         if joint_index == 1:
