@@ -90,6 +90,7 @@ class DynamixelBridge(object):
         }
 
         self.cmd_pub = rospy.Publisher("/set_position", SetPosition, queue_size=200)
+        self.bulk_cmd_pub = rospy.Publisher("/set_bulk_positions", Int32MultiArray, queue_size=20)
         self.current_cmd_pub = rospy.Publisher("/set_current", SetCurrent, queue_size=200)
         self.mode_cmd_pub = rospy.Publisher("/set_operating_mode", SetOperatingMode, queue_size=100)
         self.telemetry_pub = rospy.Publisher("~joint_state", JointState, queue_size=20)
@@ -472,13 +473,16 @@ class DynamixelBridge(object):
             rospy.logwarn_throttle(2.0, "joint_position_ticks_cmd length does not match ordered_motor_ids")
             return
         self.command_recv_count += 1
+
+        # Use bulk write (GroupSyncWrite in multi_dxl_node) for all positions
+        bulk_msg = Int32MultiArray()
+        bulk_msg.data = [int(round(tick)) for tick in msg.position]
+        self.bulk_cmd_pub.publish(bulk_msg)
+
+        # Also update last_command_ticks for mode-switching logic
         for motor_id, tick in zip(self.motor_ids, msg.position):
-            packet = SetPosition()
-            packet.id = int(motor_id)
-            packet.position = int(round(tick))
-            self.last_command_ticks[int(motor_id)] = packet.position
-            self.cmd_pub.publish(packet)
-            self.position_pub_count += 1
+            self.last_command_ticks[int(motor_id)] = int(round(tick))
+        self.position_pub_count += 1
 
     def _read_motor_position(self, motor_id):
         board_name = self._board_name_for_motor(motor_id)

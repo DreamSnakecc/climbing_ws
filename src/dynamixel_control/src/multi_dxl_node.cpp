@@ -1,5 +1,6 @@
 #include <ros/ros.h>
 #include <std_msgs/Int32.h>
+#include <std_msgs/Int32MultiArray.h>
 #include <sensor_msgs/JointState.h>
 #include <std_msgs/Float32MultiArray.h>
 #include <dynamixel_sdk/dynamixel_sdk.h>
@@ -48,6 +49,7 @@ std::mutex serial_mutex;
 
 dynamixel::GroupSyncRead *group_sync_reader = nullptr;
 dynamixel::GroupSyncRead *current_group_sync_reader = nullptr;
+dynamixel::GroupSyncWrite *group_sync_writer = nullptr;
 
 ros::Publisher joint_state_pub;
 ros::Publisher joint_currents_pub;
@@ -101,11 +103,11 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     else
         ROS_INFO("[ID %d] Operating mode set to %d", id, static_cast<int>(mode));
 
-    // Set smooth motion profile: velocity=350 (~80rpm), acceleration=50
+    // Set smooth motion profile: velocity=500 (~114rpm), acceleration=200
     // Non-zero values enable internal trajectory interpolation, making leg
     // motion smooth despite irregular command arrival or serial bus contention.
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 50, &dxl_error);
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 350, &dxl_error);
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 100, &dxl_error);
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 500, &dxl_error);
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -139,6 +141,36 @@ void setPositionCallback(const dynamixel_control::SetPosition::ConstPtr &msg)
     dxl_comm_result = packetHandler->write4ByteTxRx(portHandler, id, ADDR_GOAL_POSITION, msg->position, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
         ROS_ERROR("Failed write pos: %s", packetHandler->getTxRxResult(dxl_comm_result));
+}
+
+void setBulkPositionsCallback(const std_msgs::Int32MultiArray::ConstPtr &msg)
+{
+    if (msg->data.size() != controlled_ids.size())
+    {
+        ROS_WARN("set_bulk_positions size %zu != controlled_ids size %zu", msg->data.size(), controlled_ids.size());
+        return;
+    }
+    std::lock_guard<std::mutex> lock(serial_mutex);
+    for (size_t i = 0; i < controlled_ids.size(); ++i)
+    {
+        uint8_t id = controlled_ids[i];
+        int32_t position = msg->data[i];
+        uint8_t param[4];
+        param[0] = DXL_LOBYTE(DXL_LOWORD(position));
+        param[1] = DXL_HIBYTE(DXL_LOWORD(position));
+        param[2] = DXL_LOBYTE(DXL_HIWORD(position));
+        param[3] = DXL_HIBYTE(DXL_HIWORD(position));
+        if (!group_sync_writer->addParam(id, param))
+        {
+            ROS_WARN("Failed to add ID %d to GroupSyncWrite", id);
+        }
+    }
+    int tx_result = group_sync_writer->txPacket();
+    if (tx_result != COMM_SUCCESS)
+    {
+        ROS_ERROR("Failed bulk write pos: %s", packetHandler->getTxRxResult(tx_result));
+    }
+    group_sync_writer->clearParam();
 }
 
 void setCurrentCallback(const dynamixel_control::SetCurrent::ConstPtr &msg)
@@ -553,7 +585,11 @@ int main(int argc, char **argv)
         }
     }
 
+    // Initialize GroupSyncWrite for bulk position writes (4 bytes = 32-bit position)
+    group_sync_writer = new dynamixel::GroupSyncWrite(portHandler, packetHandler, ADDR_GOAL_POSITION, 4);
+
     ros::Subscriber sub = nh.subscribe("set_position", 100, setPositionCallback);
+    ros::Subscriber bulk_sub = nh.subscribe("set_bulk_positions", 100, setBulkPositionsCallback);
     ros::Subscriber current_sub = nh.subscribe("set_current", 100, setCurrentCallback);
     ros::Subscriber mode_sub = nh.subscribe("set_operating_mode", 100, setOperatingModeCallback);
     ros::ServiceServer srv = nh.advertiseService("get_position", getPositionService);
@@ -582,6 +618,7 @@ int main(int argc, char **argv)
     portHandler->closePort();
     delete group_sync_reader;
     delete current_group_sync_reader;
+    delete group_sync_writer;
 
     return 0;
 }
