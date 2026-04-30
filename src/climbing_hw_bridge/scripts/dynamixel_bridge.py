@@ -90,7 +90,10 @@ class DynamixelBridge(object):
         }
 
         self.cmd_pub = rospy.Publisher("/set_position", SetPosition, queue_size=200)
-        self.bulk_cmd_pub = rospy.Publisher("/set_bulk_positions", Int32MultiArray, queue_size=20)
+        self.bulk_cmd_pubs = {}
+        for board_name in sorted(self.board_configs.keys()):
+            board_topic = self._qualify_service(board_name, "set_bulk_positions")
+            self.bulk_cmd_pubs[board_name] = rospy.Publisher(board_topic, Int32MultiArray, queue_size=20)
         self.current_cmd_pub = rospy.Publisher("/set_current", SetCurrent, queue_size=200)
         self.mode_cmd_pub = rospy.Publisher("/set_operating_mode", SetOperatingMode, queue_size=100)
         self.telemetry_pub = rospy.Publisher("~joint_state", JointState, queue_size=20)
@@ -474,12 +477,19 @@ class DynamixelBridge(object):
             return
         self.command_recv_count += 1
 
-        # Use bulk write (GroupSyncWrite in multi_dxl_node) for all positions
-        bulk_msg = Int32MultiArray()
-        bulk_msg.data = [int(round(tick)) for tick in msg.position]
-        self.bulk_cmd_pub.publish(bulk_msg)
+        # Build a lookup: motor_id -> position tick
+        pos_lookup = {}
+        for motor_id, tick in zip(self.motor_ids, msg.position):
+            pos_lookup[int(motor_id)] = int(round(tick))
 
-        # Also update last_command_ticks for mode-switching logic
+        # Publish bulk positions per board (each multi_dxl_node handles its own 6 motors)
+        for board_name, board_cfg in sorted(self.board_configs.items()):
+            board_ids = board_cfg.get("motor_ids", [])
+            bulk_msg = Int32MultiArray()
+            bulk_msg.data = [pos_lookup[mid] for mid in board_ids]
+            self.bulk_cmd_pubs[board_name].publish(bulk_msg)
+
+        # Update last_command_ticks for mode-switching logic
         for motor_id, tick in zip(self.motor_ids, msg.position):
             self.last_command_ticks[int(motor_id)] = int(round(tick))
         self.position_pub_count += 1
