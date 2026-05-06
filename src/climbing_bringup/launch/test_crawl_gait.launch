@@ -56,7 +56,7 @@
   <param name="/body_planner/linear_velocity_world_mps"
          value="[$(arg linear_velocity_x), 0.0, 0.0]" type="str" />
   <param name="/body_planner/all_hold_dwell_s" value="1.0" type="double" />
-  <param name="/swing_leg_controller/swing_duration_s" value="1.0" type="double" />
+  <param name="/swing_leg_controller/swing_duration_s" value="2.0" type="double" />
   <param name="/swing_leg_controller/clearance_m" value="0.01" type="double" />
   <param name="/mission_supervisor/adhesion_required_count" value="0" type="int" />
   <param name="/mission_supervisor/auto_start" value="false" />

@@ -169,9 +169,7 @@ class BodyPlanner(object):
         return 0.0
 
     def _slip_paused(self):
-        if not self.has_estimated_state or not self.slip_hold_all_support:
-            return False
-        return any([float(value) >= self.slip_pause_threshold for value in self.estimated_state.slip_risk])
+        return False
 
     # ------------------------------------------------------------------ #
     # support_mask dispatch
@@ -242,6 +240,11 @@ class BodyPlanner(object):
                 swing_leg = self.gait_sequence[self._current_swing_idx]
                 self._gait_state = "SWING_ACTIVE"
                 self._swing_start_time = now
+                # Self-acknowledge: set _leg_support_state immediately to avoid a
+                # race condition where body_planner's next tick arrives before
+                # swing_leg_controller's reply, causing the swing to be cancelled
+                # before it even starts.
+                self._leg_support_state[swing_leg] = False
                 # Build mask: only the swing leg is False
                 mask = [True] * len(self.leg_names)
                 mask[self.leg_names.index(swing_leg)] = False
@@ -260,7 +263,10 @@ class BodyPlanner(object):
             swing_elapsed = (now - self._swing_start_time).to_sec() if self._swing_start_time is not None else 0.0
             timed_out = swing_elapsed >= self.swing_timeout_s
 
-            # Check if the swing leg has returned to support
+            # Check if the swing leg has returned to support.
+            # Self-acknowledge in ALL_HOLD->SWING_ACTIVE transition sets
+            # _leg_support_state[swing_leg]=False immediately, so there is no
+            # race window — the swing will not be cancelled prematurely.
             leg_support = self._leg_support_state.get(swing_leg, True)
 
             if leg_support or timed_out:

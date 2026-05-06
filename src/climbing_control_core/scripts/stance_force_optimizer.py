@@ -357,7 +357,7 @@ class StanceForceOptimizer(object):
         estimated_support_mask = self._estimated_mask_or_default(self.last_state.support_mask, desired_support_mask)
         estimated_attachment_mask = self._estimated_mask_or_default(
             getattr(self.last_state, "attachment_ready_mask", []),
-            self._estimated_mask_or_default(self.last_state.adhesion_mask, [True] * len(self.leg_names)),
+            [True] * len(self.leg_names),
         )
         planned_support_mask = self._state_mask_or_default("plan_support_mask", desired_support_mask)
         early_contact_mask = self._state_mask_or_default("early_contact_mask", [False] * len(self.leg_names))

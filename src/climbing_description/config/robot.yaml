@@ -3,9 +3,6 @@ robot:
   # Control uses the universal-joint center as the non-adhesive quadruped-style support point.
   active_endpoint: universal_joint_center
   suction_cavity_height_mm: 20.0
-  skirt_height_uncompressed_mm: 20.0
-  skirt_height_compressed_min_mm: 8.0
-  skirt_height_compressed_max_mm: 10.0
 
 body_planner:
   publish_rate_hz: 50.0
@@ -48,14 +45,12 @@ mission_supervisor:
   swing_release_rpm: 0.0
   touchdown_rpm: 35000.0
   touchdown_boost_duration_s: 0.25
-  pre_attach_time_s: 0.12
   default_normal_force_limit: 150.0
-  # Release fan when support_leg=false, bypass attachment_ready gate.
-  release_on_swing: true
+  # Fan activation for swing leg: mission_supervisor detects normal_force_limit >= attach_normal_force_limit_n
   adhesion_force_reference_n: 100.0
   adhesion_rpm_min_scale: 0.85
   adhesion_rpm_max_scale: 1.35
-  # Swing-leg attachment timing is now state-driven: wall touch -> preload -> fan attach -> stable attachment.
+  # Swing-leg attachment via normal_force_limit trigger
   leg_count: 4
   leg_names: [lf, rf, rr, lr]
 
@@ -112,15 +107,9 @@ state_estimator:
   angular_velocity_alpha: 0.35
   support_force_threshold_n: 5.0
   adhesion_force_threshold_n: 10.0
-  current_contact_threshold_a: 0.2
-  torque_contact_threshold_nm: 0.25
-  # Torque/current/fan-current derived contact states feed the guided swing attachment state machine.
   slip_warning_ratio: 0.75
   early_contact_phase_threshold: 0.5
-  compression_ready_ratio: 0.8
-  normal_force_to_compression_gain_m_per_n: 8.0e-5
   adhesion_force_reference_n: [65.0, 83.0, 107.0, 145.0]
-  adhesion_skirt_compression_mm: [6.5, 7.2, 8.3, 9.2]
   stable_contact_confidence_threshold: 0.75
   recent_contact_position_alpha: 0.2
   fan_min_active_rpm: 300.0
@@ -171,7 +160,7 @@ swing_leg_controller:
   swing_duration_s: 0.65
   clearance_m: 0.035
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.02
+  swing_lift_normal_m: 0.01 
   retraction_m: 0.015
   touchdown_extension_m: 0.008
   slip_clearance_gain: 0.5
@@ -179,9 +168,7 @@ swing_leg_controller:
   raibert_velocity_gain: 1.0
   foot_delta_x_limit_m: 0.25
   foot_delta_y_limit_m: 0.25
-  nominal_skirt_compression_target: 0.0
-  swing_skirt_compression_target: 0.0
-  max_position_offset_m: [0.045, 0.035, 0.05]
+  max_position_offset_m: [0.45, 0.35, 0.45]
   max_velocity_mps: [0.30, 0.25, 0.30]
   feedforward_twist_gain: [0.16, 0.16, 0.0]
   body_position_gain: [0.70, 0.70, 0.35]
@@ -192,65 +179,35 @@ swing_leg_controller:
   admittance_damping: [18.0, 18.0, 16.0]
   admittance_stiffness: [85.0, 85.0, 70.0]
   wall_normal_body: [0.0, 0.0, 1.0]
-  # Guided wall-attachment swing phases: keep light wall contact, align tangentially, preload, then attach compliantly.
+  # LIFT_SWING phases: retract + bezier swing to target
   detach_contact_offset_m: 0.006
   detach_slide_duration_s: 0.12
   tangential_align_duration_s: 0.28
   preload_duration_s: 0.16
   compliant_settle_timeout_s: 0.40
-  preload_extra_normal_m: 0.003
+  preload_extra_normal_m: 0.004
   fan_attach_sink_m: 0.002
   tangential_alignment_tolerance_m: 0.008
-  normal_alignment_tolerance_m: 0.004
-  light_contact_skirt_compression_target: 0.20
-  preload_skirt_compression_target: 0.85
+  normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 25.0
   detach_velocity_limit_mps: [0.05, 0.05, 0.05]
   tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
   preload_velocity_limit_mps: [0.04, 0.04, 0.03]
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
-  test_lift_velocity_limit_mps: [0.08, 0.08, 0.08]
-  test_press_velocity_limit_mps: [0.04, 0.04, 0.04]
-  # Dwell times (s) hold the test trajectory at the lift / press alignment target so observers can verify each apex.
-  test_lift_dwell_s: 0.0
-  test_press_dwell_s: 0.0
-  # COMPLIANT_SETTLE uses single-axis normal admittance driven by J^T F ~= tau_ext.
-  # Convention: admittance is bidirectional. The offset floats in
-  # [-compliant_normal_offset_limit_m, +compliant_normal_offset_limit_m] along wall_normal_body,
-  # so filtered_force > +deadband retracts the leg outward (+n) and filtered_force < -deadband
-  # extends it inward (-n). The sign the leg sees at the wall depends on the skirt-fan
-  # interplay; we don't pick a direction in advance.
+  # ADMIT uses single-axis normal admittance driven by J^T F ~= tau_ext.
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.012
   compliant_admittance_mass: 0.35
   compliant_admittance_damping: 18.0
   compliant_admittance_stiffness: 120.0
   compliant_force_filter_alpha: 0.35
-  # Symmetric deadband (N) on |filtered_force|: below this magnitude both directions are
-  # treated as noise and effective_force = 0; above it the sign of filtered_force is
-  # preserved, clamped in magnitude to compliant_force_limit_n.
   compliant_force_deadband_n: 0.5
   compliant_force_limit_n: 200.0
   compliant_force_sign: 1.0
-  # false: enter COMPLIANT_SETTLE and start admittance immediately (can sync with fan start).
-  # true : wait for measured_contact / wall_touch to be stable for contact_hold_min_s first.
-  compliant_start_requires_contact: false
-  contact_hold_min_s: 0.04
   jacobian_delta_rad: 0.001
-  # PRESS-phase delta-contact detector (swing-leg only): the first PRESS tick samples
-  # sum|joint effort| and sum|joint current| as the free-air baseline; contact is confirmed
-  # once either aggregate rises by at least (threshold * n_motors_on_leg). Defaults chosen to
-  # sit above sensor quantization noise but well below the full LIFT-motion signal so LIFT
-  # does not leak into the PRESS detector.
-  press_contact_torque_delta_nm: 0.10
-  press_contact_current_delta_a: 0.20
-  # OR by default: a single well-behaved channel is enough to declare contact. Set true to
-  # require both torque and current channels to trip simultaneously (more conservative).
-  press_contact_require_both: false
   hold_position_states: ["INIT"]
-  # Global contact feedback. false=suppress only wall_touch and measured_contact
-  # (these thresholds are uncalibrated). attachment_ready/adhesion_ready/early_contact are preserved.
+  # Global contact feedback. false=suppress all contact/adhesion feedback.
   use_contact_feedback: true
 
 jetson:

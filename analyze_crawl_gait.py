@@ -1,294 +1,294 @@
 #!/usr/bin/env python3
 """
-Analyze crawl gait CSV log: IK jumps, body displacement, swing sequence, phase counts.
+Analyze a crawl-gait CSV log from the climbing robot.
+Pure stdlib (csv + math only) — no pandas/numpy dependency.
 """
+
 import csv
-import sys
-from collections import defaultdict
+import math
 
-CSV_PATH = "/home/cc/climbing_ws/test_logs/crawl_gait_20260429_202915.csv"
-
-# Phase ID to name mapping (from swing_leg_controller.py)
-PHASE_NAMES = {
-    0: "SUPPORT",
-    1: "TEST_LIFT_CLEARANCE",
-    2: "TEST_PRESS_CONTACT",
-    3: "DETACH_SLIDE",
-    4: "TANGENTIAL_ALIGN",
-    5: "PRELOAD_OR_COMPLIANT",  # observed combined label in CSV
-    6: "COMPLIANT_SETTLE",
-    7: "ATTACHED_HOLD",
-}
-
+CSV_PATH = "/home/cc/climbing_ws/test_logs/crawl_gait_20260430_113450.csv"
 LEGS = ["lf", "rf", "rr", "lr"]
-# Columns per leg (0-indexed in cmd suffix order)
-LEG_CMD_COLS = {}  # leg -> (col_cmd_x, col_cmd_y, col_cmd_z)
-LEG_PHASE_COL = {}
-LEG_SUPPORT_COL = {}
+PHASE_MAP = {
+    0: "SUPPORT", 1: "TEST_LIFT_CLEARANCE", 2: "TEST_PRESS_CONTACT",
+    3: "DETACH_SLIDE", 4: "TANGENTIAL_ALIGN", 5: "PRELOAD_COMPRESS",
+    6: "COMPLIANT_SETTLE", 7: "ATTACHED_HOLD",
+}
+ZERO_TOL = 1e-6
 
-def parse_csv(path):
-    rows = []
-    with open(path, "r") as f:
-        reader = csv.DictReader(f)
-        for i, row in enumerate(reader):
-            rows.append(row)
-    print(f"Read {len(rows)} data rows (plus header).")
-    return rows
-
-
-def analyze_ik_jumps(rows):
-    """
-    Per leg: compute per-sample change in cmd_x, cmd_y, cmd_z.
-    Flag any change > 0.01m as a "jump" (potential IK branch switch).
-    """
-    print("=" * 70)
-    print("1. IK BRANCH SWITCHING DETECTION")
-    print("=" * 70)
-    total_jumps = 0
-    leg_results = {}
-    for leg in LEGS:
-        jumps = []
-        prev = None
-        for idx, row in enumerate(rows):
+# ---------------------------------------------------------------------------
+# 1. Load
+# ---------------------------------------------------------------------------
+rows = []
+with open(CSV_PATH) as f:
+    reader = csv.DictReader(f)
+    for r in reader:
+        # Convert numeric fields
+        out = {}
+        for k, v in r.items():
+            k = k.strip()
+            v = v.strip()
             try:
-                cur = (
-                    float(row[f"{leg}_cmd_x"]),
-                    float(row[f"{leg}_cmd_y"]),
-                    float(row[f"{leg}_cmd_z"]),
-                )
-            except (ValueError, KeyError):
-                continue
-            if prev is not None:
-                dx = abs(cur[0] - prev[0])
-                dy = abs(cur[1] - prev[1])
-                dz = abs(cur[2] - prev[2])
-                max_delta = max(dx, dy, dz)
-                if max_delta > 0.01:
-                    jumps.append({
-                        "row": idx,
-                        "elapsed": float(row["elapsed_s"]),
-                        "prev": prev,
-                        "cur": cur,
-                        "dx": dx,
-                        "dy": dy,
-                        "dz": dz,
-                        "max_delta": max_delta,
-                        "phase_before": int(float(row.get(f"{leg}_phase_id", -1))),
-                    })
-            prev = cur
+                out[k] = float(v)
+            except ValueError:
+                out[k] = v
+        rows.append(out)
 
-        leg_results[leg] = jumps
-        total_jumps += len(jumps)
+n = len(rows)
+print(f"Loaded {n} rows, {len(rows[0])} columns")
+print(f"Time span: {rows[0]['elapsed_s']:.2f}s → {rows[-1]['elapsed_s']:.2f}s")
+print()
 
-        # Summarize
-        max_mag = max((j["max_delta"] for j in jumps), default=0.0)
-        print(f"\n  Leg {leg.upper()}: {len(jumps)} jumps detected "
-              f"(max magnitude {max_mag*1000:.1f} mm)")
-        if jumps:
-            print(f"    Jumps at elapsed times (s):")
-            for j in jumps:
-                print(f"      t={j['elapsed']:.3f}s  "
-                      f"drift=({j['dx']*1000:.1f}, {j['dy']*1000:.1f}, {j['dz']*1000:.1f}) mm  "
-                      f"max={j['max_delta']*1000:.1f} mm  "
-                      f"phase_before={j['phase_before']} ({PHASE_NAMES.get(j['phase_before'],'?')})")
-    print(f"\n  TOTAL jumps across all legs: {total_jumps}")
-    print(f"  Comparison (pre-fix): ~15 jumps across 4 legs, magnitudes up to 0.050 m.")
-    return leg_results
+# Helper to get a column as floats
+def col(name):
+    return [r[name] for r in rows]
 
+# Helper for column per leg
+def leg_col(leg, field):
+    return [r[f"{leg}_{field}"] for r in rows]
 
-def analyze_body_displacement(rows):
-    """Body X displacement: start vs end, range."""
-    print("\n" + "=" * 70)
-    print("2. BODY DISPLACEMENT")
-    print("=" * 70)
-    body_x_vals = []
-    for row in rows:
-        try:
-            body_x_vals.append(float(row["body_x"]))
-        except (ValueError, KeyError):
-            continue
+# ---------------------------------------------------------------------------
+# 2. Body motion
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("1. BODY MOTION")
+print("=" * 72)
+bx = col("body_x")
+by = col("body_y")
+bz = col("body_z")
+bx_start, bx_end = bx[0], bx[-1]
+bx_delta = bx_end - bx_start
+bx_min, bx_max = min(bx), max(bx)
 
-    start_x = body_x_vals[0]
-    end_x = body_x_vals[-1]
-    min_x = min(body_x_vals)
-    max_x = max(body_x_vals)
-    displacement = end_x - start_x
+print(f"  body_x:  {bx_start:.4f} → {bx_end:.4f}  (\u0394 = {bx_delta:.4f} m)")
+print(f"  body_x range: [{bx_min:.4f}, {bx_max:.4f}]")
+print(f"  body_y range: [{min(by):.4f}, {max(by):.4f}]")
+print(f"  body_z range: [{min(bz):.4f}, {max(bz):.4f}]")
 
-    print(f"  body_x at start: {start_x*1000:.2f} mm")
-    print(f"  body_x at end:   {end_x*1000:.2f} mm")
-    span = (max_x - min_x) * 1000
-    print(f"  body_x range:    [{min_x*1000:.2f}, {max_x*1000:.2f}] mm  (span={span:.2f} mm)")
-    print(f"  Net displacement: {displacement*1000:.2f} mm ({displacement*1000:.2f} mm per ~{len(rows)/50:.0f}s of logging)")
-    # Also check body_y, body_z
-    body_y_vals = [float(r["body_y"]) for r in rows if "body_y" in r]
-    body_z_vals = [float(r["body_z"]) for r in rows if "body_z" in r]
-    if body_y_vals:
-        print(f"  body_y range: [{min(body_y_vals)*1000:.2f}, {max(body_y_vals)*1000:.2f}] mm")
-    if body_z_vals:
-        print(f"  body_z range: [{min(body_z_vals)*1000:.2f}, {max(body_z_vals)*1000:.2f}] mm")
+if bx_delta > 0.001:
+    print("  \u2713 body_x INCREASES \u2014 body is moving forward.")
+elif bx_delta < -0.001:
+    print("  \u2717 body_x DECREASES \u2014 body is moving backward!")
+else:
+    print("  ~ body_x is nearly constant \u2014 no meaningful forward motion.")
 
+num_dec = sum(1 for i in range(1, n) if bx[i] - bx[i-1] < -1e-6)
+print(f"  Number of small backward steps in body_x: {num_dec} / {n-1}")
 
-def analyze_swing_sequence(rows):
-    """
-    Determine swing order: which legs leave SUPPORT (phase_id=0) and in what order.
-    Track phase_id transitions per leg.
-    """
-    print("\n" + "=" * 70)
-    print("3. SWING SEQUENCE")
-    print("=" * 70)
+cum_max = max(bx[i] - bx[0] for i in range(n))
+print(f"  Max cumulative forward displacement: {cum_max:.4f} m")
+print()
 
-    # Track phase transitions per leg
-    transitions = {leg: [] for leg in LEGS}
-    prev_phase = {leg: None for leg in LEGS}
+# ---------------------------------------------------------------------------
+# 3. Support-leg cmd_x drift
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("2. SUPPORT-LEG CMD_X DRIFT (should decrease to push body forward)")
+print("=" * 72)
 
-    for idx, row in enumerate(rows):
-        elapsed = float(row["elapsed_s"])
-        for leg in LEGS:
-            try:
-                phase_id = int(float(row[f"{leg}_phase_id"]))
-            except (ValueError, KeyError):
-                continue
-            if prev_phase[leg] is not None and prev_phase[leg] != phase_id:
-                transitions[leg].append({
-                    "row": idx,
-                    "elapsed": elapsed,
-                    "from": prev_phase[leg],
-                    "to": phase_id,
-                })
-            prev_phase[leg] = phase_id
+for leg in LEGS:
+    supp = leg_col(leg, "cmd_support")
+    cmd_x = leg_col(leg, "cmd_x")
+    # gather values when cmd_support == 1
+    vals = [cmd_x[i] for i in range(n) if supp[i] == 1.0]
+    nsupp = len(vals)
+    if nsupp == 0:
+        print(f"  {leg.upper()}: never in support \u2014 skipping.")
+        continue
+    first, last = vals[0], vals[-1]
+    delta = last - first
+    vmin, vmax = min(vals), max(vals)
+    print(f"  {leg.upper()}: support cmd_x {first:.4f} \u2192 {last:.4f}  (\u0394 = {delta:.4f} m)")
+    print(f"           range [{vmin:.4f}, {vmax:.4f}] over {nsupp} support rows")
+    if delta < -0.001:
+        print(f"           \u2713 cmd_x DECREASES \u2014 leg is moving backward in body frame (good).")
+    elif delta > 0.001:
+        print(f"           \u2717 cmd_x INCREASES \u2014 leg is NOT moving backward (bad!).")
+    else:
+        print(f"           ~ cmd_x nearly constant \u2014 no meaningful drift.")
+    print()
 
-    # Also track the actual swing cycle: when does each leg first enter a non-SUPPORT phase
-    # and what order do they swing in?
-    swing_cycles = []
-    current_cycle_swing_start = {}
+# ---------------------------------------------------------------------------
+# 4. ujc tracking for support legs
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("3. UJC TRACKING ERROR FOR SUPPORT LEGS (cmd vs measured)")
+print("=" * 72)
 
-    for idx, row in enumerate(rows):
-        elapsed = float(row["elapsed_s"])
-        phases_this_sample = {}
-        for leg in LEGS:
-            try:
-                phases_this_sample[leg] = int(float(row[f"{leg}_phase_id"]))
-            except (ValueError, KeyError):
-                phases_this_sample[leg] = -1
+for leg in LEGS:
+    supp = leg_col(leg, "cmd_support")
+    nsupp = sum(1 for v in supp if v == 1.0)
+    if nsupp == 0:
+        continue
+    for axis in ["x", "y", "z"]:
+        cmd = leg_col(leg, f"cmd_{axis}")
+        ujc = leg_col(leg, f"ujc_{axis}")
+        errs = [ujc[i] - cmd[i] for i in range(n) if supp[i] == 1.0]
+        mean_e = sum(errs) / len(errs)
+        std_e = math.sqrt(sum((e - mean_e)**2 for e in errs) / len(errs))
+        max_abs = max(abs(e) for e in errs)
+        print(f"  {leg.upper()}_{axis}: mean_error={mean_e:.4f}, std={std_e:.4f}, max|error|={max_abs:.4f}")
+    print()
 
-        # Check which legs are in non-SUPPORT this sample
-        swinging = {leg: pid for leg, pid in phases_this_sample.items() if pid != 0}
-        if swinging:
-            for leg, pid in swinging.items():
-                if leg not in current_cycle_swing_start:
-                    current_cycle_swing_start[leg] = {
-                        "start_time": elapsed,
-                        "phase": pid,
-                    }
+# ---------------------------------------------------------------------------
+# 5. Swing counts per leg
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("4. SWING COUNTS PER LEG")
+print("=" * 72)
 
-        # Check if all swinging legs returned to SUPPORT
-        if current_cycle_swing_start:
-            all_returned = all(
-                phases_this_sample.get(leg, 0) == 0
-                for leg in current_cycle_swing_start
-            )
-            if all_returned:
-                swing_cycles.append(current_cycle_swing_start)
-                current_cycle_swing_start = {}
+for leg in LEGS:
+    pid = leg_col(leg, "phase_id")
+    cnt = sum(1 for i in range(1, n) if pid[i] != 0.0 and pid[i-1] == 0.0)
+    print(f"  {leg.upper()}: {cnt} swing cycles")
+print()
 
-    # Print transitions per leg
-    for leg in LEGS:
-        if transitions[leg]:
-            print(f"\n  Leg {leg.upper()} transitions ({len(transitions[leg])} total):")
-            for t in transitions[leg][:10]:
-                print(f"    t={t['elapsed']:.3f}s: {PHASE_NAMES.get(t['from'], '?')}({t['from']}) -> {PHASE_NAMES.get(t['to'], '?')}({t['to']})")
-            if len(transitions[leg]) > 10:
-                print(f"    ... ({len(transitions[leg]) - 10} more transitions)")
+# ---------------------------------------------------------------------------
+# 6. Anomalies
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("5. ANOMALIES")
+print("=" * 72)
+
+# 6a. Multiple legs swinging simultaneously
+print("5a. Multiple legs out of support simultaneously:")
+multi_rows = []
+for i in range(n):
+    swinging = [leg for leg in LEGS if rows[i][f"{leg}_phase_id"] != 0.0]
+    if len(swinging) > 1:
+        phases = {leg: PHASE_MAP.get(int(rows[i][f"{leg}_phase_id"]), "?") for leg in swinging}
+        multi_rows.append((rows[i]["elapsed_s"], swinging, phases))
+
+if multi_rows:
+    print(f"    Found {len(multi_rows)} rows with >1 leg swinging:")
+    for ts, legs_list, phases in multi_rows[:15]:  # cap output
+        print(f"      elapsed={ts:.3f}s  legs: {legs_list}  phases: {phases}")
+    if len(multi_rows) > 15:
+        print(f"      ... and {len(multi_rows) - 15} more rows")
+else:
+    print("    None \u2014 at most one leg swings at a time \u2713")
+print()
+
+# 6b. Stuck legs
+print("5b. Legs stuck in non-support phases (consecutive rows in same non-zero phase):")
+for leg in LEGS:
+    pid = leg_col(leg, "phase_id")
+    elapsed = col("elapsed_s")
+    i = 0
+    while i < n:
+        if pid[i] != 0.0:
+            phase_start = i
+            phase_val = pid[i]
+            while i < n and pid[i] == phase_val:
+                i += 1
+            phase_end = i - 1
+            run_len = phase_end - phase_start + 1
+            if run_len >= 2:
+                dur = elapsed[phase_end] - elapsed[phase_start]
+                pname = PHASE_MAP.get(int(phase_val), "?")
+                print(f"    {leg.upper()}: {pname} for {dur:.2f}s ({run_len} rows, "
+                      f"elapsed {elapsed[phase_start]:.3f}\u2013{elapsed[phase_end]:.3f})")
         else:
-            print(f"\n  Leg {leg.upper()}: NO transitions (always SUPPORT)")
+            i += 1
+print()
 
-    # Print swing cycles
-    print(f"\n  Swing cycles detected: {len(swing_cycles)}")
-    for i, cycle in enumerate(swing_cycles):
-        legs_ordered = sorted(cycle.keys(), key=lambda l: cycle[l]["start_time"])
-        print(f"    Cycle {i+1}: swing order = {[l.upper() for l in legs_ordered]}")
-        for leg in legs_ordered:
-            info = cycle[leg]
-            print(f"      {leg.upper()}: starts at t={info['start_time']:.3f}s, phase={info['phase']}")
+# ---------------------------------------------------------------------------
+# 7. Forward body motion per swing cycle
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("6. FORWARD BODY MOTION \u2014 DETAILED VIEW")
+print("=" * 72)
 
-    # If no cycles detected (all SUPPORT all the time), report that
-    if not swing_cycles:
-        print("  (no complete swing cycles detected - legs may be in SUPPORT throughout)")
-
-
-def analyze_phase_counts(rows):
-    """Count occurrences of each phase_id per leg."""
-    print("\n" + "=" * 70)
-    print("4. PHASE ANALYSIS")
-    print("=" * 70)
-
-    for leg in LEGS:
-        counts = defaultdict(int)
-        for row in rows:
-            try:
-                pid = int(float(row[f"{leg}_phase_id"]))
-            except (ValueError, KeyError):
-                continue
-            counts[pid] += 1
-
-        total = sum(counts.values())
-        print(f"\n  Leg {leg.upper()}: {total} samples")
-        for pid in sorted(counts.keys()):
-            pct = counts[pid] / total * 100 if total else 0
-            name = PHASE_NAMES.get(pid, "UNKNOWN")
-            print(f"    Phase {pid} ({name}): {counts[pid]:5d} samples ({pct:5.1f}%)")
-
-        # Check for DETACH_SLIDE specifically
-        detach_count = counts.get(1, 0)  # User asked about DETACH_SLIDE(1) but let's check both 1 and 3
-        detach_count_3 = counts.get(3, 0)
-        test_lift_count = counts.get(1, 0)
-        if detach_count_3 > 0:
-            print(f"    *** DETACH_SLIDE (phase_id=3) entered {detach_count_3} times ***")
-        elif test_lift_count > 0:
-            print(f"    *** TEST_LIFT_CLEARANCE (phase_id=1) entered {test_lift_count} times ***")
+swing_cycles = []
+for leg in LEGS:
+    pid = leg_col(leg, "phase_id")
+    elapsed = col("elapsed_s")
+    bx = col("body_x")
+    # find transitions from SUPPORT(0) to non-zero
+    i = 0
+    while i < n:
+        if pid[i] != 0.0 and (i == 0 or pid[i-1] == 0.0):
+            t_start = elapsed[i]
+            bx_start = bx[i]
+            # find end of this swing (back to SUPPORT)
+            j = i + 1
+            while j < n and pid[j] != 0.0:
+                j += 1
+            if j < n:
+                t_end = elapsed[j]
+                bx_end = bx[j]
+                swing_cycles.append((leg.upper(), t_start, t_end, bx_start, bx_end, bx_end - bx_start))
+            i = j
         else:
-            print(f"    DETACH_SLIDE (phase_id=3): NEVER entered (0 samples)")
-            print(f"    TEST_LIFT_CLEARANCE (phase_id=1): NEVER entered (0 samples)")
+            i += 1
 
-    # Quick check: was the robot ever outside SUPPORT at all?
-    non_support_counts = defaultdict(int)
-    for row in rows:
-        elapsed = float(row["elapsed_s"])
-        for leg in LEGS:
-            try:
-                pid = int(float(row[f"{leg}_phase_id"]))
-            except (ValueError, KeyError):
-                continue
-            if pid not in (0,):
-                non_support_counts[leg] += 1
+if swing_cycles:
+    swing_cycles.sort(key=lambda x: x[1])  # sort by t_start
+    delta_sym = "\u0394"
+    print(f"  {'Leg':>4s} {'Start(s)':>9s} {'End(s)':>9s} {'bx_start':>10s} {'bx_end':>10s} {f'{delta_sym}bx':>8s}")
+    print("  " + "-" * 58)
+    for s in swing_cycles:
+        leg_name, ts, te, bxs, bxe, dx = s
+        mark = "\u2713" if dx > 0 else ("\u2717" if dx < 0 else "~")
+        print(f"  {leg_name:>4s} {ts:>9.3f} {te:>9.3f}  {bxs:>10.4f}  {bxe:>10.4f}  {dx:>+8.4f} {mark}")
 
-    print(f"\n  Summary - non-SUPPORT samples per leg:")
-    for leg in LEGS:
-        print(f"    {leg.upper()}: {non_support_counts.get(leg, 0)} samples outside SUPPORT")
+    avg_dx = sum(s[5] for s in swing_cycles) / len(swing_cycles)
+    pos = sum(1 for s in swing_cycles if s[5] > 0)
+    neg = sum(1 for s in swing_cycles if s[5] < 0)
+    print(f"\n  Average \u0394body_x per swing cycle: {avg_dx:.4f} m")
+    print(f"  Cycles with forward motion: {pos}, backward: {neg}")
+else:
+    print("  No swing cycles detected!")
+print()
 
+# ---------------------------------------------------------------------------
+# 8. Summary
+# ---------------------------------------------------------------------------
+print("=" * 72)
+print("SUMMARY")
+print("=" * 72)
 
-def main():
-    rows = parse_csv(CSV_PATH)
-    if not rows:
-        print("No data rows found. Exiting.")
-        sys.exit(1)
+dur = rows[-1]["elapsed_s"] - rows[0]["elapsed_s"]
+print(f"  Total duration: {dur:.2f}s")
 
-    # 1. IK branch switching
-    jumps = analyze_ik_jumps(rows)
+if bx_delta > 0.001:
+    print(f"  \u2713 Body moves forward: \u0394body_x = {bx_delta:.4f} m")
+elif bx_delta < -0.001:
+    print(f"  \u2717 Body moves backward: \u0394body_x = {bx_delta:.4f} m")
+else:
+    print(f"  ~ Body stationary: \u0394body_x = {bx_delta:.4f} m")
 
-    # 2. Body displacement
-    analyze_body_displacement(rows)
+print(f"\n  Support-leg cmd_x drift (should decrease):")
+for leg in LEGS:
+    supp = leg_col(leg, "cmd_support")
+    cmd_x = leg_col(leg, "cmd_x")
+    vals = [cmd_x[i] for i in range(n) if supp[i] == 1.0]
+    if vals:
+        d = vals[-1] - vals[0]
+        mark = "\u2713 decreases" if d < -0.001 else ("\u2717 increases!" if d > 0.001 else "~ constant")
+        print(f"    {leg.upper()}: \u0394 = {d:.4f} m ({mark})")
 
-    # 3. Swing sequence
-    analyze_swing_sequence(rows)
+print(f"\n  Swing cycles per leg:")
+for leg in LEGS:
+    pid = leg_col(leg, "phase_id")
+    cnt = sum(1 for i in range(1, n) if pid[i] != 0.0 and pid[i-1] == 0.0)
+    print(f"    {leg.upper()}: {cnt}")
 
-    # 4. Phase analysis
-    analyze_phase_counts(rows)
+if multi_rows:
+    print(f"\n  \u26a0  {len(multi_rows)} rows with >1 leg swinging (see anomaly section)")
+else:
+    print(f"\n  \u2713 No simultaneous multi-leg swings")
 
-    print("\n" + "=" * 70)
-    print("DONE")
-    print("=" * 70)
+print(f"\n  Mean |tracking error| across support legs:")
+for leg in LEGS:
+    supp = leg_col(leg, "cmd_support")
+    nsupp = sum(1 for v in supp if v == 1.0)
+    if nsupp:
+        for axis in ["x", "y", "z"]:
+            cmd = leg_col(leg, f"cmd_{axis}")
+            ujc = leg_col(leg, f"ujc_{axis}")
+            errs = [abs(ujc[i] - cmd[i]) for i in range(n) if supp[i] == 1.0]
+            avg_e = sum(errs) / len(errs)
+            print(f"    {leg.upper()}_{axis}: {avg_e:.4f} m")
 
-
-if __name__ == "__main__":
-    main()
+print()

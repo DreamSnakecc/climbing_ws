@@ -228,7 +228,6 @@ class StateLogger(object):
             return {
                 'pose': pose_to_dict(msg.pose),
                 'twist': twist_to_dict(msg.twist),
-                'skirt_compression_estimate': list(msg.skirt_compression_estimate),
                 'normal_force_limit': list(msg.normal_force_limit),
                 'slip_risk': list(msg.slip_risk),
                 'contact_confidence': list(msg.contact_confidence),
@@ -239,7 +238,6 @@ class StateLogger(object):
                 'early_contact_mask': list(msg.early_contact_mask),
                 'contact_mask': list(msg.contact_mask),
                 'support_mask': list(msg.support_mask),
-                'adhesion_mask': list(msg.adhesion_mask),
                 'attachment_ready_mask': list(msg.attachment_ready_mask),
                 'seal_confidence': list(msg.seal_confidence),
                 'leg_torque_sum': list(msg.leg_torque_sum),
@@ -261,7 +259,6 @@ class StateLogger(object):
                 'leg_name': msg.leg_name,
                 'center': point_to_dict(msg.center),
                 'center_velocity': vector3_to_dict(msg.center_velocity),
-                'skirt_compression_target': msg.skirt_compression_target,
                 'support_leg': msg.support_leg,
                 'desired_normal_force_limit': msg.desired_normal_force_limit,
             }

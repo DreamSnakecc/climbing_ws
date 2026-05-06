@@ -125,8 +125,6 @@ class StateEstimator(object):
         self.angular_velocity_alpha = float(get_cfg("angular_velocity_alpha", 0.35))
         self.support_force_threshold_n = float(get_cfg("support_force_threshold_n", 5.0))
         self.adhesion_force_threshold_n = float(get_cfg("adhesion_force_threshold_n", 10.0))
-        self.current_contact_threshold_a = float(get_cfg("current_contact_threshold_a", 0.12))
-        self.torque_contact_threshold_nm = float(get_cfg("torque_contact_threshold_nm", 0.05))
         self.slip_warning_ratio = float(get_cfg("slip_warning_ratio", 0.75))
         self.early_contact_phase_threshold = float(get_cfg("early_contact_phase_threshold", 0.5))
         self.wall_mu = float(get_cfg("friction_coefficient", rospy.get_param("/wall/default_friction_coefficient", 0.5)))
@@ -142,12 +140,9 @@ class StateEstimator(object):
             legacy_fallback,
         )
         self.contact_offset_sign = float(get_cfg("contact_offset_sign", 1.0))
-        self.compression_ready_ratio = float(get_cfg("compression_ready_ratio", 0.8))
-        self.normal_force_to_compression_gain_m_per_n = float(get_cfg("normal_force_to_compression_gain_m_per_n", 8.0e-5))
         self.stable_contact_confidence_threshold = float(get_cfg("stable_contact_confidence_threshold", 0.75))
         self.recent_contact_position_alpha = float(get_cfg("recent_contact_position_alpha", 0.2))
         self.adhesion_force_reference_n = [float(value) for value in get_cfg("adhesion_force_reference_n", [65.0, 83.0, 107.0, 145.0])]
-        self.adhesion_skirt_compression_mm = [float(value) for value in get_cfg("adhesion_skirt_compression_mm", [6.5, 7.2, 8.3, 9.2])]
         self.fan_min_active_rpm = float(get_cfg("fan_min_active_rpm", 300.0))
         self.fan_adhesion_reference_rpm = [float(value) for value in get_cfg("fan_adhesion_reference_rpm", [30000.0, 40000.0])]
         self.fan_attached_current_min_a = [float(value) for value in get_cfg("fan_attached_current_min_a", [1.2, 1.8])]
@@ -214,19 +209,11 @@ class StateEstimator(object):
                 self.nominal_universal_joint_center_z_m * 1000.0,
             )
         ) / 1000.0
-        self.skirt_height_uncompressed_m = float(rospy.get_param("/robot/skirt_height_uncompressed_mm", 20.0)) / 1000.0
-        self.skirt_height_compressed_min_m = float(rospy.get_param("/robot/skirt_height_compressed_min_mm", 8.0)) / 1000.0
-        self.skirt_height_compressed_max_m = float(rospy.get_param("/robot/skirt_height_compressed_max_mm", 10.0)) / 1000.0
-        self.max_skirt_compression_m = max(self.skirt_height_uncompressed_m - self.skirt_height_compressed_min_m, 0.0)
-        self.nominal_skirt_compression_m = max(
-            self.skirt_height_uncompressed_m - 0.5 * (self.skirt_height_compressed_min_m + self.skirt_height_compressed_max_m),
-            0.0,
-        )
 
         self.leg_motor_ids = self._build_leg_motor_map()
         self.leg_hip_yaw = self._build_leg_yaw_map()
         self.swing_targets = {
-            leg_name: {"support_leg": False, "desired_normal_force_limit": 0.0, "skirt_compression_target": 0.0}
+            leg_name: {"support_leg": False, "desired_normal_force_limit": 0.0}
             for leg_name in self.leg_names
         }
         self.stance_commands = {
@@ -370,7 +357,6 @@ class StateEstimator(object):
             return
         self.swing_targets[msg.leg_name]["support_leg"] = bool(msg.support_leg)
         self.swing_targets[msg.leg_name]["desired_normal_force_limit"] = float(msg.desired_normal_force_limit)
-        self.swing_targets[msg.leg_name]["skirt_compression_target"] = float(msg.skirt_compression_target)
 
     def stance_wrench_callback(self, msg, leg_name):
         if leg_name not in self.stance_commands:
@@ -521,16 +507,6 @@ class StateEstimator(object):
         # Require both current and RPM evidence for attachment readiness.
         return min(current_confidence, rpm_confidence)
 
-    def _compression_from_required_adhesion_force(self, required_force_n):
-        if required_force_n <= 0.0:
-            return 0.0
-        compression_mm = self._interpolate_reference_curve(
-            float(required_force_n),
-            self.adhesion_force_reference_n,
-            self.adhesion_skirt_compression_mm,
-        )
-        return clamp(compression_mm / 1000.0, 0.0, self.max_skirt_compression_m)
-
     def _body_orientation_list(self):
         quaternion = quaternion_to_list(self.last_imu.orientation)
         if math.sqrt(sum([value * value for value in quaternion])) > 1e-6:
@@ -553,8 +529,7 @@ class StateEstimator(object):
             self.operating_universal_joint_center_z_m,
         ]
 
-    def _foot_center_from_universal_joint_center(self, universal_joint_center, compression_estimate):
-        del compression_estimate
+    def _foot_center_from_universal_joint_center(self, universal_joint_center):
         return [
             universal_joint_center[0] + self.contact_offset_sign * self.universal_joint_to_foot_center_rigid_offset_m * self.wall_normal_body[0],
             universal_joint_center[1] + self.contact_offset_sign * self.universal_joint_to_foot_center_rigid_offset_m * self.wall_normal_body[1],
@@ -564,7 +539,6 @@ class StateEstimator(object):
     def _nominal_foot_center_position(self, leg_name):
         return self._foot_center_from_universal_joint_center(
             self._nominal_universal_joint_center_position(leg_name),
-            self.nominal_skirt_compression_m,
         )
 
     def _forward_kinematics_leg_local(self, joint_vector):
@@ -625,67 +599,10 @@ class StateEstimator(object):
         self.prev_universal_joint_center_time_sec = now_sec
         return velocities
 
-    def _aggregate_leg_scalar(self, motor_ids, values, index_map):
-        total = 0.0
-        count = 0
-        for motor_id in motor_ids:
-            joint_index = index_map.get(str(int(motor_id)))
-            if joint_index is None or joint_index >= len(values):
-                continue
-            total += abs(float(values[joint_index]))
-            count += 1
-        return total, count
-
     def _leg_normal_force_limit(self, leg_name):
         stance_limit = float(self.stance_commands[leg_name]["normal_force_limit"])
         swing_limit = float(self.swing_targets[leg_name]["desired_normal_force_limit"])
         return max(self.default_normal_force_limit, stance_limit, swing_limit) if max(stance_limit, swing_limit) <= 0.0 else max(stance_limit, swing_limit)
-
-    def _target_skirt_compression_m(self, leg_name):
-        raw_target = float(self.swing_targets[leg_name].get("skirt_compression_target", 0.0))
-        if raw_target <= 0.0:
-            return 0.0
-        if raw_target <= 1.0:
-            return clamp(raw_target * self.max_skirt_compression_m, 0.0, self.max_skirt_compression_m)
-        if raw_target <= self.max_skirt_compression_m:
-            return clamp(raw_target, 0.0, self.max_skirt_compression_m)
-        return clamp(raw_target / 1000.0, 0.0, self.max_skirt_compression_m)
-
-    def _required_skirt_compression_m(self, leg_name):
-        target_compression = self._target_skirt_compression_m(leg_name)
-        adhesion_force_compression = self._compression_from_required_adhesion_force(
-            float(self.stance_commands[leg_name].get("required_adhesion_force", 0.0))
-        )
-        required_compression = max(target_compression, adhesion_force_compression)
-        if required_compression <= 1e-6:
-            return self.nominal_skirt_compression_m
-        return clamp(required_compression, 0.0, self.max_skirt_compression_m)
-
-    def _estimate_skirt_compression(self, leg_name, normal_cmd, planned_support, measured_contact):
-        target_compression = self._required_skirt_compression_m(leg_name)
-        if not (planned_support or measured_contact):
-            return target_compression
-        load_based = clamp(normal_cmd * self.normal_force_to_compression_gain_m_per_n, 0.0, self.max_skirt_compression_m)
-        return clamp(max(target_compression, load_based), 0.0, self.max_skirt_compression_m)
-
-    def _compression_ready(self, leg_name, compression_estimate_m):
-        required_compression = self._required_skirt_compression_m(leg_name)
-        if required_compression <= 1e-6:
-            return True
-        return compression_estimate_m >= self.compression_ready_ratio * required_compression
-
-    def _compression_progress(self, leg_name, compression_estimate_m):
-        required_compression = self._required_skirt_compression_m(leg_name)
-        if required_compression <= 1e-6:
-            return 1.0
-        return clamp(compression_estimate_m / required_compression, 0.0, 1.0)
-
-    def _estimate_foot_center_positions(self, universal_joint_center_positions, skirt_compression_estimates):
-        contact_positions = []
-        for leg_index, universal_joint_center in enumerate(universal_joint_center_positions):
-            compression_estimate = skirt_compression_estimates[leg_index] if leg_index < len(skirt_compression_estimates) else 0.0
-            contact_positions.append(self._foot_center_from_universal_joint_center(universal_joint_center, compression_estimate))
-        return contact_positions
 
     def _split_force_components(self, force_vector):
         normal_projection = vector_dot(force_vector, self.wall_normal_body)
@@ -697,11 +614,17 @@ class StateEstimator(object):
         tangential_cmd = vector_norm(tangential_vector)
         return normal_cmd, tangential_cmd
 
-    def _update_recent_stable_foot_center_positions(self, foot_center_positions, adhesion_mask, contact_confidence):
+    def _estimate_foot_center_positions(self, universal_joint_center_positions):
+        return [
+            self._foot_center_from_universal_joint_center(ujc)
+            for ujc in universal_joint_center_positions
+        ]
+
+    def _update_recent_stable_foot_center_positions(self, foot_center_positions, attachment_ready_mask, contact_confidence):
         updated = []
         for leg_index, foot_center in enumerate(foot_center_positions):
             previous = self.recent_stable_foot_center_positions[leg_index] if leg_index < len(self.recent_stable_foot_center_positions) else list(foot_center)
-            stable = leg_index < len(adhesion_mask) and bool(adhesion_mask[leg_index]) and leg_index < len(contact_confidence) and float(contact_confidence[leg_index]) >= self.stable_contact_confidence_threshold
+            stable = leg_index < len(attachment_ready_mask) and bool(attachment_ready_mask[leg_index]) and leg_index < len(contact_confidence) and float(contact_confidence[leg_index]) >= self.stable_contact_confidence_threshold
             if stable:
                 updated.append(low_pass_blend(previous, foot_center, self.recent_contact_position_alpha))
             else:
@@ -925,46 +848,28 @@ class StateEstimator(object):
         early_contact_mask = []
         contact_mask = []
         support_mask = []
-        adhesion_mask = []
         attachment_ready_mask = []
         seal_confidence = []
         leg_torque_sum = []
         leg_torque_contact_confidence = []
         slip_risk = []
         normal_force_limit = []
-        skirt_compression_estimate = []
         contact_confidence = []
-
-        joint_index_map = self._joint_name_to_index_map()
-        joint_torques = list(self.last_joint_state.effort)
-        joint_currents = list(self.last_joint_currents)
 
         for leg_index, leg_name in enumerate(self.leg_names):
             stance_cmd = self.stance_commands[leg_name]
             requested_support = self.body_reference_support_mask[leg_index] if leg_index < len(self.body_reference_support_mask) else True
 
-            leg_motor_ids = self.leg_motor_ids.get(leg_name, [])
-            current_sum, current_count = self._aggregate_leg_scalar(leg_motor_ids, joint_currents, joint_index_map)
-            torque_sum, torque_count = self._aggregate_leg_scalar(leg_motor_ids, joint_torques, joint_index_map)
-
-            measured_contact = (current_count > 0 and current_sum >= self.current_contact_threshold_a * max(current_count, 1)) or (
-                torque_count > 0 and torque_sum > self.torque_contact_threshold_nm * max(torque_count, 1)
-            )
+            measured_contact = False
 
             force_vector = list(stance_cmd["force"])
             normal_cmd, tangential_cmd = self._split_force_components(force_vector)
             force_limit = self._leg_normal_force_limit(leg_name)
             adhesion_confidence = self._fan_adhesion_confidence(leg_name, leg_index)
-            measured_torque_confidence = clamp(
-                torque_sum / max(self.torque_contact_threshold_nm * max(torque_count, 1), 1e-6),
-                0.0,
-                1.0,
-            ) if torque_count > 0 else 0.0
+            measured_torque_confidence = 0.0
 
             planned_support = bool(requested_support)
-            compression_estimate_m = self._estimate_skirt_compression(leg_name, normal_cmd, planned_support, measured_contact)
             normal_support = normal_cmd >= self.support_force_threshold_n
-            compression_progress = self._compression_progress(leg_name, compression_estimate_m)
             swing_phase = self._leg_swing_phase(leg_name, planned_support)
             early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
             wall_touch = (not planned_support) and measured_contact
@@ -978,7 +883,6 @@ class StateEstimator(object):
                 0.6 if early_contact else 0.0,
                 clamp(normal_cmd / max(self.support_force_threshold_n, 1e-6), 0.0, 1.0) if planned_support else 0.0,
                 adhesion_confidence,
-                compression_progress,
             )
 
             if planned_support:
@@ -987,12 +891,6 @@ class StateEstimator(object):
                 actual_contact = early_contact or wall_touch or attachment_ready
 
             support_value = actual_contact
-            adhesion_value = bool(attachment_ready)
-
-            denom = max(self.wall_mu * max(normal_cmd, 1e-3), 1e-3)
-            slip_ratio = tangential_cmd / denom
-            if not support_value:
-                slip_ratio = 0.0
 
             plan_support_mask.append(bool(planned_support))
             measured_contact_mask.append(bool(measured_contact))
@@ -1000,14 +898,12 @@ class StateEstimator(object):
             early_contact_mask.append(bool(early_contact))
             contact_mask.append(bool(actual_contact))
             support_mask.append(bool(support_value))
-            adhesion_mask.append(bool(adhesion_value))
             attachment_ready_mask.append(bool(attachment_ready))
             seal_confidence.append(float(seal_value))
-            leg_torque_sum.append(float(torque_sum))
+            leg_torque_sum.append(0.0)
             leg_torque_contact_confidence.append(float(measured_torque_confidence))
             normal_force_limit.append(float(force_limit))
-            slip_risk.append(float(clamp(slip_ratio / max(self.slip_warning_ratio, 1e-3), 0.0, 1.0)))
-            skirt_compression_estimate.append(float(compression_estimate_m))
+            slip_risk.append(0.0)
             contact_confidence.append(float(confidence_value))
 
         return (
@@ -1017,14 +913,12 @@ class StateEstimator(object):
             early_contact_mask,
             contact_mask,
             support_mask,
-            adhesion_mask,
             attachment_ready_mask,
             seal_confidence,
             leg_torque_sum,
             leg_torque_contact_confidence,
             normal_force_limit,
             slip_risk,
-            skirt_compression_estimate,
             contact_confidence,
         )
 
@@ -1070,14 +964,12 @@ class StateEstimator(object):
             early_contact_mask,
             contact_mask,
             support_mask,
-            adhesion_mask,
             attachment_ready_mask,
             seal_confidence,
             leg_torque_sum,
             leg_torque_contact_confidence,
             normal_force_limit,
             slip_risk,
-            skirt_compression_estimate,
             contact_confidence,
         ) = self._estimate_leg_support_and_adhesion()
         position_world, linear_velocity_world = self._estimate_body_state_ekf(
@@ -1085,7 +977,7 @@ class StateEstimator(object):
             universal_joint_center_velocities,
             contact_confidence,
         )
-        foot_center_positions = self._estimate_foot_center_positions(universal_joint_center_positions, skirt_compression_estimate)
+        foot_center_positions = self._estimate_foot_center_positions(universal_joint_center_positions)
         msg.pose.position.x = float(position_world[0])
         msg.pose.position.y = float(position_world[1])
         msg.pose.position.z = float(position_world[2])
@@ -1096,16 +988,14 @@ class StateEstimator(object):
         msg.joint_torques_est = list(self.last_joint_state.effort)
         msg.universal_joint_center_positions = [Point(position[0], position[1], position[2]) for position in universal_joint_center_positions]
         msg.foot_center_positions = [Point(position[0], position[1], position[2]) for position in foot_center_positions]
-        recent_stable_foot_center_positions = self._update_recent_stable_foot_center_positions(foot_center_positions, adhesion_mask, contact_confidence)
+        recent_stable_foot_center_positions = self._update_recent_stable_foot_center_positions(foot_center_positions, attachment_ready_mask, contact_confidence)
         msg.recent_stable_foot_center_positions = [Point(position[0], position[1], position[2]) for position in recent_stable_foot_center_positions]
-        msg.skirt_compression_estimate = skirt_compression_estimate
         msg.plan_support_mask = plan_support_mask
         msg.measured_contact_mask = measured_contact_mask
         msg.wall_touch_mask = wall_touch_mask
         msg.early_contact_mask = early_contact_mask
         msg.contact_mask = contact_mask
         msg.support_mask = support_mask
-        msg.adhesion_mask = adhesion_mask
         msg.attachment_ready_mask = attachment_ready_mask
         msg.seal_confidence = seal_confidence
         msg.leg_torque_sum = leg_torque_sum

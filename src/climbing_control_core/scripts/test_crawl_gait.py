@@ -59,13 +59,9 @@ LEG_NAMES = ["lf", "rf", "rr", "lr"]
 
 PHASE_ID_MAP = {
     "SUPPORT": 0,
-    "TEST_LIFT_CLEARANCE": 1,
-    "TEST_PRESS_CONTACT": 2,
-    "DETACH_SLIDE": 3,
-    "TANGENTIAL_ALIGN": 4,
-    "PRELOAD_COMPRESS": 5,
-    "COMPLIANT_SETTLE": 6,
-    "ATTACHED_HOLD": 7,
+    "LIFT_SWING": 1,
+    "PRELOAD": 2,
+    "ADMIT": 3,
 }
 
 STATE_INIT = "INIT"
@@ -108,6 +104,11 @@ class CrawlGaitTester(object):
             "/control/mission_pause", Bool, queue_size=2,
         )
 
+        # Initialize timing markers BEFORE creating subscribers so that
+        # callbacks arriving immediately do not see uninitialized attributes.
+        self._t_zero_wall = None
+        self._t_zero_ros = None
+
         # subscribers
         rospy.Subscriber(
             "/control/mission_state", String,
@@ -144,8 +145,6 @@ class CrawlGaitTester(object):
         self._csv_writer = None
         self._csv_columns = self._build_csv_columns()
         self._sample_count = 0
-        self._t_zero_wall = None
-        self._t_zero_ros = None
 
         # swing cycle counter for summary
         self._prev_support = {leg: None for leg in LEG_NAMES}
@@ -383,7 +382,7 @@ class CrawlGaitTester(object):
             fan_curr = list(self._latest_fan_currents)
 
         lines = [
-            "  leg  adhesion  attach_ready  seal_conf  fan_rpm  fan_current_a  measured_contact",
+            "  leg  attach_ready  seal_conf  fan_rpm  fan_current_a  measured_contact",
         ]
         for leg_index, leg in enumerate(LEG_NAMES):
             def mask(attr_name):
@@ -398,9 +397,8 @@ class CrawlGaitTester(object):
             rpm = fan_rpm[leg_index] if leg_index < len(fan_rpm) else 0.0
             current = fan_curr[leg_index] if leg_index < len(fan_curr) else 0.0
             lines.append(
-                "  %-3s     %-5s       %-5s       %6.3f   %7.1f      %7.3f          %-5s" % (
+                "  %-3s     %-5s       %6.3f   %7.1f      %7.3f          %-5s" % (
                     leg,
-                    str(mask("adhesion_mask")),
                     str(mask("attachment_ready_mask")),
                     seal,
                     float(rpm),
@@ -426,7 +424,7 @@ class CrawlGaitTester(object):
                 )
                 return False
             if time.time() >= deadline:
-                rospy.logerr(
+                rospy.logwarn(
                     "test_crawl_gait: timeout (%ss) waiting for state %s; current=%s\n%s",
                     timeout_s, target, state, self._mission_diagnostic_lines(),
                 )
@@ -518,12 +516,9 @@ class CrawlGaitTester(object):
         # not support: enter swing sequence
         normal_limit = float(getattr(swing_msg, "desired_normal_force_limit", 0.0))
         if normal_limit > 0.5:
-            # Both PRELOAD and COMPLIANT set normal_force_limit
-            return "PRELOAD_OR_COMPLIANT", PHASE_ID_MAP["PRELOAD_COMPRESS"]
-        skirt = float(getattr(swing_msg, "skirt_compression_target", 0.0))
-        if skirt < 0.05:
-            return "DETACH_OR_LIFT", PHASE_ID_MAP["DETACH_SLIDE"]
-        return "TANGENTIAL_ALIGN", PHASE_ID_MAP["TANGENTIAL_ALIGN"]
+            # ADMIT or PRELOAD sets normal_force_limit
+            return "ADMIT_OR_PRELOAD", PHASE_ID_MAP["PRELOAD"]
+        return "LIFT_SWING", PHASE_ID_MAP["LIFT_SWING"]
 
     def _sample_row(self, phase_label):
         with self._lock:
@@ -587,7 +582,6 @@ class CrawlGaitTester(object):
                 "%.4f" % (float(ujc.y) if ujc is not None else 0.0),
                 "%.4f" % (float(ujc.z) if ujc is not None else 0.0),
                 mask("attachment_ready_mask"),
-                mask("adhesion_mask"),
                 mask("measured_contact_mask"),
                 "%.2f" % float(fan_rpm[leg_index]),
                 "%.4f" % float(fan_curr[leg_index]),
@@ -632,9 +626,19 @@ class CrawlGaitTester(object):
         self._open_csv()
 
         self._publish_start()
-        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s) and self._latest_mission_state != STATE_CLIMB:
-            self._publish_pause()
-            return 4
+        # Wait for STICK (or CLIMB when adhesion_required_count=0 and
+        # the system skips STICK entirely).
+        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s):
+            with self._lock:
+                current_state = self._latest_mission_state
+            if current_state == STATE_CLIMB:
+                rospy.loginfo(
+                    "test_crawl_gait: adhesion disabled, STICK skipped; "
+                    "continuing with CLIMB"
+                )
+            else:
+                self._publish_pause()
+                return 4
         if not self._wait_state(STATE_CLIMB, self.args.climb_timeout_s):
             self._publish_pause()
             return 5

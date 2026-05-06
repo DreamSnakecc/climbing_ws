@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Staged swing-leg admittance test.
 
-The test drives a single leg through the `swing_leg_controller` staged
+The test drives a single leg through the `swing_leg_controller` simplified
 sequence:
 
-  1) PHASE_TEST_LIFT_CLEARANCE : lift +lift_m along the wall normal.
-  2) PHASE_TEST_PRESS_CONTACT  : after lift, press downward by `press_m`.
-     So the press target in normal-from-nominal is `(lift_m - press_m)`.
-  3) PHASE_COMPLIANT_SETTLE    : normal-axis admittance control takes over.
-  4) PHASE_ATTACHED_HOLD       : latched once attachment/adhesion asserts.
+  1) PHASE_LIFT_SWING : lift +lift_m along the wall normal.
+  2) PHASE_PRELOAD    : after lift, press downward by `press_m`.
+     So the preload target in normal-from-nominal is `(lift_m - press_m)`.
+  3) PHASE_ADMIT      : normal-axis admittance control takes over; fan starts.
+  4) ADMIT (continued): after attachment_ready + 0.2s delay, support_leg=True.
+
+The test publishes a BodyReference marking the target leg as swing, and
+drives the fan directly (bypassing mission_supervisor).
 
 The test triggers are the existing `/swing_leg_controller/test_trigger_*`
 parameters exposed by `swing_leg_controller.py`; this script simply sets
@@ -70,13 +73,9 @@ LEG_NAMES = ["lf", "rf", "rr", "lr"]
 
 PHASE_NAMES = {
     0: "SUPPORT",
-    1: "TEST_LIFT_CLEARANCE",
-    2: "TEST_PRESS_CONTACT",
-    3: "DETACH_SLIDE",
-    4: "TANGENTIAL_ALIGN",
-    5: "PRELOAD_COMPRESS",
-    6: "COMPLIANT_SETTLE",
-    7: "ATTACHED_HOLD",
+    1: "LIFT_SWING",
+    2: "PRELOAD",
+    3: "ADMIT",
 }
 
 DIAG_FIELDS = [
@@ -84,8 +83,7 @@ DIAG_FIELDS = [
     "phase_id",
     "phase_elapsed_s",
     "cmd_normal_from_nominal_m",
-    "lift_target_normal_from_nominal_m",
-    "press_target_normal_from_nominal_m",
+    "lift_swing_target_normal_from_nominal_m",
     "preload_target_normal_from_nominal_m",
     "attach_target_normal_from_nominal_m",
     "compliant_force_estimate_n",
@@ -93,17 +91,7 @@ DIAG_FIELDS = [
     "compliant_normal_velocity_mps",
     "estimated_leg_normal_force_n",
     "joint_torque_bias_norm_nm",
-    "contact_active_since_age_s",
-    "test_experiment_active",
-    "test_hold_at_lift",
-    "test_lift_aligned",
-    "leg_torque_sum_nm",
-    "leg_current_sum_a",
-    "press_torque_baseline_nm",
-    "press_current_baseline_a",
-    "press_torque_delta_nm",
-    "press_current_delta_a",
-    "press_contact_confirmed",
+    "attach_confirmed_time_s",
 ]
 
 FAN_MODE_RELEASE = 0
@@ -203,9 +191,7 @@ class SwingAdmittanceTest(object):
             "first_wall_touch_time": None,
             "first_measured_contact_time": None,
             "first_attachment_ready_time": None,
-            "first_adhesion_time": None,
             "first_fan_command_time": None,
-            "max_skirt_compression": 0.0,
             "max_compliant_force_n": 0.0,
             # Bidirectional admittance: offset floats in [-limit, +limit]. Track peak magnitude
             # for the legacy "compliance range" readout plus both signed extremes so the summary
@@ -458,7 +444,6 @@ class SwingAdmittanceTest(object):
             row["cmd_center_y"] = float(leg_command.center.y)
             row["cmd_center_z"] = float(leg_command.center.z)
             row["cmd_center_velocity_z"] = float(leg_command.center_velocity.z)
-            row["cmd_skirt_compression_target"] = float(leg_command.skirt_compression_target)
             row["cmd_normal_force_limit"] = float(leg_command.desired_normal_force_limit)
             row["cmd_support_leg"] = bool(leg_command.support_leg)
         else:
@@ -466,11 +451,9 @@ class SwingAdmittanceTest(object):
             row["cmd_center_y"] = None
             row["cmd_center_z"] = None
             row["cmd_center_velocity_z"] = None
-            row["cmd_skirt_compression_target"] = None
             row["cmd_normal_force_limit"] = None
             row["cmd_support_leg"] = None
 
-        row["skirt_compression_est"] = None
         row["leg_fan_current_est"] = None
         row["slip_risk"] = None
         row["contact_confidence"] = None
@@ -481,12 +464,10 @@ class SwingAdmittanceTest(object):
         row["early_contact_mask"] = None
         row["contact_mask"] = None
         row["attachment_ready_mask"] = None
-        row["adhesion_mask"] = None
         row["ujc_x"] = None
         row["ujc_y"] = None
         row["ujc_z"] = None
         if estimated is not None:
-            row["skirt_compression_est"] = _safe_index(estimated.skirt_compression_estimate, leg_idx)
             row["leg_fan_current_est"] = _safe_index(estimated.fan_current, leg_idx)
             row["slip_risk"] = _safe_index(estimated.slip_risk, leg_idx)
             row["contact_confidence"] = _safe_index(estimated.contact_confidence, leg_idx)
@@ -501,7 +482,6 @@ class SwingAdmittanceTest(object):
             row["attachment_ready_mask"] = bool(
                 _safe_index(estimated.attachment_ready_mask, leg_idx, False)
             )
-            row["adhesion_mask"] = bool(_safe_index(estimated.adhesion_mask, leg_idx, False))
             if leg_idx < len(estimated.universal_joint_center_positions):
                 ujc = estimated.universal_joint_center_positions[leg_idx]
                 row["ujc_x"] = float(ujc.x)
@@ -576,13 +556,6 @@ class SwingAdmittanceTest(object):
             and self.highlights["first_attachment_ready_time"] is None
         ):
             self.highlights["first_attachment_ready_time"] = now_sec
-        if row.get("adhesion_mask") and self.highlights["first_adhesion_time"] is None:
-            self.highlights["first_adhesion_time"] = now_sec
-        skirt = row.get("skirt_compression_est")
-        if skirt is not None:
-            self.highlights["max_skirt_compression"] = max(
-                self.highlights["max_skirt_compression"], float(skirt)
-            )
         force = row.get("compliant_force_estimate_n")
         if force is not None:
             # Inward admittance feeds on negative filtered_force, so track magnitude to keep
@@ -687,19 +660,17 @@ class SwingAdmittanceTest(object):
         force = row.get("compliant_force_estimate_n")
         offset = row.get("compliant_normal_offset_m")
         est_force = row.get("estimated_leg_normal_force_n")
-        skirt = row.get("skirt_compression_est")
         fan_current = row.get("fan_current_a")
-        masks = "wt=%d mc=%d att=%d adh=%d" % (
+        masks = "wt=%d mc=%d att=%d" % (
             int(bool(row.get("wall_touch_mask"))),
             int(bool(row.get("measured_contact_mask"))),
             int(bool(row.get("attachment_ready_mask"))),
-            int(bool(row.get("adhesion_mask"))),
         )
         i_sum = row.get("leg_contact_current_sum_a")
         tau_sum = row.get("leg_contact_torque_sum_nm")
         rospy.loginfo_throttle(
             0.5,
-            "[%s] phase=%s cmd_z=%s f_filt=%s est_f=%s offset=%s skirt=%s fan_i=%s "
+            "[%s] phase=%s cmd_z=%s f_filt=%s est_f=%s offset=%s fan_i=%s "
             "sum|I|=%s sum|tau|=%s | %s",
             self.test_phase,
             phase_name,
@@ -707,7 +678,6 @@ class SwingAdmittanceTest(object):
             _fmt(force, "%.2f"),
             _fmt(est_force, "%.2f"),
             _fmt(offset, "%.4f"),
-            _fmt(skirt, "%.2f"),
             _fmt(fan_current, "%.2f"),
             _fmt(i_sum, "%.3f"),
             _fmt(tau_sum, "%.3f"),
@@ -761,7 +731,6 @@ class SwingAdmittanceTest(object):
             self.body_ref_pub.publish(self._build_body_reference(target_in_swing=True))
 
             phase_id = self._get_diag_field("phase_id")
-            lift_aligned_flag = self._get_diag_field("test_lift_aligned")
             now = time.time()
             phase_id_int = int(phase_id) if phase_id is not None else None
 
@@ -774,12 +743,13 @@ class SwingAdmittanceTest(object):
                 )
                 last_phase_id = phase_id_int
                 if phase_id_int == 1:
-                    self.test_phase = "LIFT"
+                    self.test_phase = "LIFT_SWING"
                 elif phase_id_int == 2:
-                    self.test_phase = "PRESS"
-                elif phase_id_int == 6:
-                    self.test_phase = "COMPLIANT_SETTLE"
-                elif phase_id_int == 7:
+                    self.test_phase = "PRELOAD"
+                elif phase_id_int == 3:
+                    self.test_phase = "ADMIT"
+                else:
+                    self.test_phase = PHASE_NAMES.get(phase_id_int, "UNKNOWN")
                     self.test_phase = "ATTACHED_HOLD"
 
             # Operator-gated pause: once the controller reports the leg has reached the lift
@@ -842,16 +812,14 @@ class SwingAdmittanceTest(object):
                     self._publish_adhesion(FAN_MODE_RELEASE, 0.0)
                     last_adhesion_pub = now
 
-            adhesion_mask = False
             attachment_mask = False
             with self._state_lock:
                 est = self.latest_estimated
             if est is not None:
-                adhesion_mask = bool(_safe_index(est.adhesion_mask, self.leg_index, False))
                 attachment_mask = bool(
                     _safe_index(est.attachment_ready_mask, self.leg_index, False)
                 )
-            if (adhesion_mask or attachment_mask) and hold_after_adhesion_until is None:
+            if attachment_mask and hold_after_adhesion_until is None:
                 hold_after_adhesion_until = now + self.hold_adhesion_s
                 rospy.loginfo(
                     "[test_swing_admittance] adhesion/attachment latched; holding for %.2fs",
@@ -949,10 +917,8 @@ class SwingAdmittanceTest(object):
             "cmd_center_y",
             "cmd_center_z",
             "cmd_center_velocity_z",
-            "cmd_skirt_compression_target",
             "cmd_normal_force_limit",
             "cmd_support_leg",
-            "skirt_compression_est",
             "leg_fan_current_est",
             "slip_risk",
             "contact_confidence",
@@ -967,7 +933,6 @@ class SwingAdmittanceTest(object):
             "early_contact_mask",
             "contact_mask",
             "attachment_ready_mask",
-            "adhesion_mask",
             "ujc_x",
             "ujc_y",
             "ujc_z",
@@ -1261,11 +1226,9 @@ class SwingAdmittanceTest(object):
             "  first attachment_ready  : %s"
             % _fmt_time(self.highlights["first_attachment_ready_time"])
         )
-        print("  first adhesion_mask     : %s" % _fmt_time(self.highlights["first_adhesion_time"]))
         print("  first fan command       : %s" % _fmt_time(self.highlights["first_fan_command_time"]))
 
         print()
-        print("  max skirt compression est         : %.3f" % self.highlights["max_skirt_compression"])
         print("  max compliant filtered force (N)  : %.2f" % self.highlights["max_compliant_force_n"])
         # Bidirectional admittance: offset in [-limit, +limit]. Show peak magnitude plus signed
         # min/max so the reviewer can tell direction of compliance at a glance.
@@ -1436,69 +1399,48 @@ class SwingAdmittanceTest(object):
     def _diagnose_issues(self):
         issues = []
         reached_lift = self.highlights["max_cmd_normal_from_nominal_m"] + 1e-4 >= self.lift_m
-        reached_press = self.highlights["min_cmd_normal_from_nominal_m"] - 1e-4 <= self.press_target_from_nominal_m
-        entered_press = 2 in self.highlights["phase_enter_time"]
-        entered_settle = 6 in self.highlights["phase_enter_time"]
-        entered_attached = 7 in self.highlights["phase_enter_time"]
+        reached_preload = self.highlights["min_cmd_normal_from_nominal_m"] - 1e-4 <= self.press_target_from_nominal_m
+        entered_preload = 2 in self.highlights["phase_enter_time"]
+        entered_admit = 3 in self.highlights["phase_enter_time"]
 
         if not reached_lift:
             issues.append(
-                "Lift target not fully reached; check test_lift_velocity_limit_mps, "
-                "test_lift_dwell_s, max_position_offset_m[2], or swing trigger didn't start."
+                "Lift target not fully reached; check tangential_velocity_limit_mps, "
+                "max_position_offset_m[2], or swing trigger didn't start."
             )
-        if not entered_press:
+        if not entered_preload:
             issues.append(
-                "TEST_PRESS_CONTACT not entered; leg may have dropped out of swing "
+                "PRELOAD not entered; leg may have dropped out of swing "
                 "(check BodyReference support_mask publishing rate / body_planner interference)."
             )
-        elif not reached_press:
+        elif not reached_preload:
             issues.append(
-                "Press target not fully reached; check test_press_velocity_limit_mps, "
+                "Preload target not fully reached; check preload_velocity_limit_mps, "
                 "normal_alignment_tolerance_m, or clamp limits in max_position_offset_m[2]."
             )
-        if entered_press and not entered_settle:
+        if entered_preload and not entered_admit:
             issues.append(
-                "COMPLIANT_SETTLE not entered; probably press target not aligned within "
-                "normal_alignment_tolerance_m before test_press_dwell_s elapsed."
-            )
-        if entered_settle and self.highlights["first_measured_contact_time"] is None:
-            issues.append(
-                "COMPLIANT_SETTLE reached but no measured_contact seen; check "
-                "support_force_threshold_n / torque_contact_threshold_nm / joint torque estimation."
+                "ADMIT not entered; probably preload target not aligned within "
+                "normal_alignment_tolerance_m before preload_duration_s elapsed."
             )
         if (
-            entered_settle
+            entered_admit
             and self.highlights["first_measured_contact_time"] is not None
             and self.highlights["max_compliant_force_n"] < 1.0
         ):
             issues.append(
                 "Filtered compliant force stays near zero; verify compliant_force_sign, "
-                "compliant_force_deadband_n, and joint torque bias capture during press."
+                "compliant_force_deadband_n, and joint torque bias capture during preload."
             )
         if self.highlights["max_compliant_force_n"] > 0.0 and self.highlights["max_compliant_offset_m"] < 1e-4:
             issues.append(
                 "Admittance offset never grew despite measured force; reduce "
                 "compliant_admittance_stiffness or increase compliant_normal_velocity_limit_mps."
             )
-        if self.highlights["max_compliant_offset_m"] > 0.0 and not entered_attached:
-            issues.append(
-                "Admittance pushed in but ATTACHED_HOLD never triggered; check fan RPM, "
-                "fan_adhesion_reference_rpm ranges, and fan_attached_current_*_a thresholds."
-            )
         if self.highlights["max_fan_current_a"] < 0.1 and self.highlights["first_fan_command_time"] is not None:
             issues.append(
                 "Fan RPM commanded but no current feedback; check fan_serial_bridge port, "
                 "protocol setting, and telemetry frame format."
-            )
-        if entered_attached and self.highlights["max_skirt_compression"] < 0.3:
-            issues.append(
-                "Attached but skirt compression stayed low; check adhesion_skirt_compression_mm / "
-                "adhesion_force_reference_n scaling in state_estimator."
-            )
-        if self.highlights["first_wall_touch_time"] is None and entered_settle:
-            issues.append(
-                "wall_touch_mask never asserted; verify early_contact_phase_threshold, "
-                "skirt estimator, and whether the wall is actually being pressed."
             )
         return issues
 
