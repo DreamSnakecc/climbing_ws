@@ -15,15 +15,12 @@
         (leg_ik_executor completes startup move to operating UJC;
          dynamixel_bridge current control disabled so supporting legs stay static.)
 
-    This launch loads robot.yaml (via pc_bringup.launch), overrides UJC z and test params,
-    then includes pc_bringup.launch (mission_auto_start=false).
-
     Params:
       ujc_z_mm                        nominal UJC z (default -195.5)
       linear_velocity_x               body planner x velocity (default 0.01 m/s)
       use_contact_feedback            false=trajectory+time only (default false)
       enable_auto_adhesion_commands   false=no fan commands (default false for flat ground)
-      (additional overrides: all_hold_dwell_s=1.0, swing_duration_s=1.0, clearance_m=0.02)
+      (additional overrides: all_hold_dwell_s=0.2, tangential_align_duration_s=0.5, clearance_m=0.01)
   -->
 
   <arg name="ujc_z_mm" default="-195.5" />
@@ -55,8 +52,9 @@
          value="$(arg use_contact_feedback)" type="bool" />
   <param name="/body_planner/linear_velocity_world_mps"
          value="[$(arg linear_velocity_x), 0.0, 0.0]" type="str" />
-  <param name="/body_planner/all_hold_dwell_s" value="1.0" type="double" />
+  <param name="/body_planner/all_hold_dwell_s" value="0.2" type="double" />
   <param name="/swing_leg_controller/swing_duration_s" value="2.0" type="double" />
+  <param name="/swing_leg_controller/tangential_align_duration_s" value="0.5" type="double" />
   <param name="/swing_leg_controller/clearance_m" value="0.01" type="double" />
   <param name="/mission_supervisor/adhesion_required_count" value="0" type="int" />
   <param name="/mission_supervisor/auto_start" value="false" />
