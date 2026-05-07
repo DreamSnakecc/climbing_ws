@@ -826,7 +826,11 @@ class SwingLegController(object):
         if phase == self.PHASE_LIFT_SWING:
             lift_duration = max(self.tangential_align_duration_s, 0.05)
             start_pos = list(state["phase_start_pos"])
-            cmd_position = self._bezier_interp(start_pos, list(state["lift_swing_target"]), lift_duration, phase_elapsed)
+            lift_swing_target = list(state["lift_swing_target"])
+            # XY follows Bezier smooth interpolation; Z (normal height) instantly
+            # reaches and holds the target lift height for the entire phase.
+            cmd_position = self._bezier_interp(start_pos, lift_swing_target, lift_duration, phase_elapsed)
+            cmd_position[2] = lift_swing_target[2]
             cmd_velocity = [0.0, 0.0, 0.0]
             if phase_elapsed >= lift_duration:
                 self._set_phase(state, self.PHASE_PRELOAD, now_sec)

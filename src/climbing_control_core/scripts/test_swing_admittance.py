@@ -20,9 +20,7 @@ drives the fan directly (bypassing mission_supervisor).
 
 All relevant monitoring topics are subscribed; per-sample state goes to a
 CSV under the workspace `test_logs/` directory (default) and a phase-level
-summary is printed to stdout. Per-leg sums of absolute motor current
-(`joint_currents` topic) and absolute joint effort / torque (`joint_state`)
-match `state_estimator` aggregation for `measured_contact` threshold tuning.
+summary is printed to stdout.
 
 Preconditions
 -------------
@@ -188,8 +186,6 @@ class SwingAdmittanceTest(object):
         self.highlights = {
             "phase_enter_time": {},
             "phase_exit_time": {},
-            "first_wall_touch_time": None,
-            "first_measured_contact_time": None,
             "first_attachment_ready_time": None,
             "first_fan_command_time": None,
             "max_compliant_force_n": 0.0,
@@ -459,9 +455,6 @@ class SwingAdmittanceTest(object):
         row["contact_confidence"] = None
         row["seal_confidence"] = None
         row["leg_torque_sum"] = None
-        row["wall_touch_mask"] = None
-        row["measured_contact_mask"] = None
-        row["early_contact_mask"] = None
         row["contact_mask"] = None
         row["attachment_ready_mask"] = None
         row["ujc_x"] = None
@@ -473,11 +466,6 @@ class SwingAdmittanceTest(object):
             row["contact_confidence"] = _safe_index(estimated.contact_confidence, leg_idx)
             row["seal_confidence"] = _safe_index(estimated.seal_confidence, leg_idx)
             row["leg_torque_sum"] = _safe_index(estimated.leg_torque_sum, leg_idx)
-            row["wall_touch_mask"] = bool(_safe_index(estimated.wall_touch_mask, leg_idx, False))
-            row["measured_contact_mask"] = bool(
-                _safe_index(estimated.measured_contact_mask, leg_idx, False)
-            )
-            row["early_contact_mask"] = bool(_safe_index(estimated.early_contact_mask, leg_idx, False))
             row["contact_mask"] = bool(_safe_index(estimated.contact_mask, leg_idx, False))
             row["attachment_ready_mask"] = bool(
                 _safe_index(estimated.attachment_ready_mask, leg_idx, False)
@@ -544,13 +532,6 @@ class SwingAdmittanceTest(object):
                 if self.last_phase_id_seen is not None:
                     self.highlights["phase_exit_time"][self.last_phase_id_seen] = now_sec
                 self.last_phase_id_seen = phase_id
-        if row.get("wall_touch_mask") and self.highlights["first_wall_touch_time"] is None:
-            self.highlights["first_wall_touch_time"] = now_sec
-        if (
-            row.get("measured_contact_mask")
-            and self.highlights["first_measured_contact_time"] is None
-        ):
-            self.highlights["first_measured_contact_time"] = now_sec
         if (
             row.get("attachment_ready_mask")
             and self.highlights["first_attachment_ready_time"] is None
@@ -661,9 +642,7 @@ class SwingAdmittanceTest(object):
         offset = row.get("compliant_normal_offset_m")
         est_force = row.get("estimated_leg_normal_force_n")
         fan_current = row.get("fan_current_a")
-        masks = "wt=%d mc=%d att=%d" % (
-            int(bool(row.get("wall_touch_mask"))),
-            int(bool(row.get("measured_contact_mask"))),
+        masks = "att=%d" % (
             int(bool(row.get("attachment_ready_mask"))),
         )
         i_sum = row.get("leg_contact_current_sum_a")
@@ -928,9 +907,6 @@ class SwingAdmittanceTest(object):
             "leg_contact_current_count",
             "leg_contact_torque_sum_nm",
             "leg_contact_torque_count",
-            "wall_touch_mask",
-            "measured_contact_mask",
-            "early_contact_mask",
             "contact_mask",
             "attachment_ready_mask",
             "ujc_x",
@@ -960,204 +936,8 @@ class SwingAdmittanceTest(object):
         rospy.loginfo("[test_swing_admittance] log saved to %s (%d rows)", filename, len(self.samples))
         return filename
 
-    @staticmethod
-    def _measured_contact_trips(row, thr_i, thr_tau):
-        """Same OR logic as state_estimator (current branch uses >=, torque uses >)."""
-        csum = row.get("leg_contact_current_sum_a")
-        ccnt = row.get("leg_contact_current_count")
-        tsum = row.get("leg_contact_torque_sum_nm")
-        tcnt = row.get("leg_contact_torque_count")
-        cur_ok = csum is not None and ccnt is not None and int(ccnt) > 0
-        tau_ok = tsum is not None and tcnt is not None and int(tcnt) > 0
-        cur_trip = cur_ok and float(csum) >= thr_i * max(int(ccnt), 1)
-        tau_trip = tau_ok and float(tsum) > thr_tau * max(int(tcnt), 1)
-        return cur_trip, tau_trip
-
-    def _print_contact_model_stats(self):
-        """Min/max/mean of leg motor |I| and |tau| sums for LIFT, short PRESS, and 2+6+7 wall load."""
-        if not self.samples:
-            return
-        thr_i = float(rospy.get_param("/state_estimator/current_contact_threshold_a", 0.12))
-        thr_tau = float(
-            rospy.get_param("/state_estimator/torque_contact_threshold_nm", 0.05)
-        )
-
-        def collect_rows(phase_id_target):
-            rows = []
-            for row in self.samples:
-                pid = row.get("phase_id")
-                if pid is None:
-                    continue
-                if int(pid) != int(phase_id_target):
-                    continue
-                rows.append(row)
-            return rows
-
-        def collect_rows_phases(phase_id_targets):
-            idset = {int(p) for p in phase_id_targets}
-            rows = []
-            for row in self.samples:
-                pid = row.get("phase_id")
-                if pid is None or int(pid) not in idset:
-                    continue
-                rows.append(row)
-            return rows
-
-        def _summarize_row_list(rows, title, block_kind, phase_id=None):
-            cur_sums = []
-            tau_sums = []
-            n_cur_trip = 0
-            n_tau_trip = 0
-            n_either = 0
-            for row in rows:
-                c = row.get("leg_contact_current_sum_a")
-                t = row.get("leg_contact_torque_sum_nm")
-                if c is not None:
-                    cur_sums.append(float(c))
-                if t is not None:
-                    tau_sums.append(float(t))
-                ct, tt = self._measured_contact_trips(row, thr_i, thr_tau)
-                if ct:
-                    n_cur_trip += 1
-                if tt:
-                    n_tau_trip += 1
-                if ct or tt:
-                    n_either += 1
-            cur_mm = _min_max_mean(cur_sums)
-            tau_mm = _min_max_mean(tau_sums)
-            return {
-                "phase_id": phase_id,
-                "block_kind": block_kind,
-                "title": title,
-                "n_rows": len(rows),
-                "cur_mm": cur_mm,
-                "tau_mm": tau_mm,
-                "n_cur_trip": n_cur_trip,
-                "n_tau_trip": n_tau_trip,
-                "n_either": n_either,
-            }
-
-        def summarize_phase(phase_id, title, block_kind):
-            return _summarize_row_list(
-                collect_rows(phase_id), title, block_kind, phase_id=int(phase_id)
-            )
-
-        def summarize_phases(phase_id_targets, title, block_kind):
-            return _summarize_row_list(
-                collect_rows_phases(phase_id_targets),
-                title,
-                block_kind,
-                phase_id=None,
-            )
-
-        def fmt_mm(label, mm, unit):
-            if mm is None:
-                return "    %s: (no data)" % label
-            lo, hi, mid = mm
-            return "    %s: min=%.4f max=%.4f mean=%.4f %s" % (label, lo, hi, mid, unit)
-
-        print()
-        print("  --- Leg motor sums (state_estimator measured_contact model) ---")
-        print(
-            "    Params: current_contact_threshold_a=%.4f  torque_contact_threshold_nm=%.4f"
-            % (thr_i, thr_tau)
-        )
-        print(
-            "    Trip rule: sum|I| >= thr_i*max(n,1) OR sum|tau| > thr_tau*max(n,1) "
-            "(n = motors on leg with valid samples)."
-        )
-        print(
-            "    Motors on this leg (from /legs/%s/motor_ids): %s"
-            % (self.leg_name, self._leg_motor_ids)
-        )
-        print(
-            "    Note: phase 2 alone is often very short; use the 2+6+7 block to see "
-            "current/torque sums after the foot is loading (press + compliant + attached)."
-        )
-
-        blocks = [
-            summarize_phase(
-                1,
-                "TEST_LIFT_CLEARANCE (phase_id=1, includes operator pause)",
-                "lift",
-            ),
-            summarize_phase(2, "TEST_PRESS_CONTACT (phase_id=2 only)", "press_only"),
-            summarize_phases(
-                (2, 6, 7),
-                "Phases 2+6+7 (press + COMPLIANT_SETTLE + ATTACHED_HOLD; wall load)",
-                "wall_load",
-            ),
-        ]
-        for block in blocks:
-            print("  %s — logged samples: %d" % (block["title"], block["n_rows"]))
-            if block["n_rows"] == 0:
-                print("    (no samples in this phase)")
-                continue
-            print(fmt_mm("sum|motor current|", block["cur_mm"], "A"))
-            print(fmt_mm("sum|joint effort| ", block["tau_mm"], "Nm"))
-            denom = float(block["n_rows"]) if block["n_rows"] else 1.0
-            print(
-                "    measured_contact would be true on: current-only %d/%d (%.1f%%), "
-                "torque-only %d/%d (%.1f%%), either %d/%d (%.1f%%)"
-                % (
-                    block["n_cur_trip"],
-                    block["n_rows"],
-                    100.0 * block["n_cur_trip"] / denom,
-                    block["n_tau_trip"],
-                    block["n_rows"],
-                    100.0 * block["n_tau_trip"] / denom,
-                    block["n_either"],
-                    block["n_rows"],
-                    100.0 * block["n_either"] / denom,
-                )
-            )
-            n0 = max(len(self._leg_motor_ids), 1)
-            if block["phase_id"] == 1 and block["cur_mm"] is not None and n0 > 0:
-                line_i = thr_i * float(n0)
-                hi = block["cur_mm"][1]
-                print(
-                    "    Lift (false contact): keep max(sum|I|) below trip line ~%.4f A "
-                    "(=%.4f * %d); max observed=%.4f A, headroom=%.4f A"
-                    % (line_i, thr_i, n0, hi, line_i - hi)
-                )
-            if block["phase_id"] == 1 and block["tau_mm"] is not None and n0 > 0:
-                line_t = thr_tau * float(n0)
-                hi = block["tau_mm"][1]
-                print(
-                    "    Lift (false contact): max(sum|tau|) trip line ~%.4f Nm "
-                    "(=%.4f * %d); max observed=%.4f Nm, headroom=%.4f Nm"
-                    % (line_t, thr_tau, n0, hi, line_t - hi)
-                )
-            if block["block_kind"] in ("press_only", "wall_load") and block["cur_mm"] is not None and n0 > 0:
-                line_i = thr_i * float(n0)
-                hi = block["cur_mm"][1]
-                excess = hi - line_i
-                if excess >= 0.0:
-                    note = "excess above trip line +%.4f A (good for detection)" % excess
-                else:
-                    note = "shortfall below trip line %.4f A (raise signal or lower thr_i)" % excess
-                label = "Wall load" if block["block_kind"] == "wall_load" else "Press-only"
-                print(
-                    "    %s: max(sum|I|)=%.4f A vs trip ~%.4f A (=%.4f * %d) — %s"
-                    % (label, hi, line_i, thr_i, n0, note)
-                )
-            if block["block_kind"] in ("press_only", "wall_load") and block["tau_mm"] is not None and n0 > 0:
-                line_t = thr_tau * float(n0)
-                hi = block["tau_mm"][1]
-                excess = hi - line_t
-                if excess > 0.0:
-                    note = "excess above trip line +%.4f Nm (good for detection)" % excess
-                else:
-                    note = "shortfall below trip line %.4f Nm (raise signal or lower thr_tau)" % excess
-                label = "Wall load" if block["block_kind"] == "wall_load" else "Press-only"
-                print(
-                    "    %s: max(sum|tau|)=%.4f Nm vs trip ~%.4f Nm (=%.4f * %d) — %s"
-                    % (label, hi, line_t, thr_tau, n0, note)
-                )
-
     def print_summary(self):
         self._compute_admittance_metrics()
-        self._print_contact_model_stats()
         print()
         print("=" * 76)
         print("Swing-leg admittance test summary - leg=%s" % self.leg_name)
@@ -1217,11 +997,6 @@ class SwingAdmittanceTest(object):
                 print("  Phase %d %-22s: %s" % (phase_id, name, _duration(phase_id)))
 
         print()
-        print("  first wall_touch        : %s" % _fmt_time(self.highlights["first_wall_touch_time"]))
-        print(
-            "  first measured_contact  : %s"
-            % _fmt_time(self.highlights["first_measured_contact_time"])
-        )
         print(
             "  first attachment_ready  : %s"
             % _fmt_time(self.highlights["first_attachment_ready_time"])
@@ -1425,7 +1200,6 @@ class SwingAdmittanceTest(object):
             )
         if (
             entered_admit
-            and self.highlights["first_measured_contact_time"] is not None
             and self.highlights["max_compliant_force_n"] < 1.0
         ):
             issues.append(

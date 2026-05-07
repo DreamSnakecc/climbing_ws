@@ -3,16 +3,11 @@ geometry_msgs/Pose pose
 geometry_msgs/Twist twist
 sensor_msgs/Imu imu
 geometry_msgs/Point[] universal_joint_center_positions
-geometry_msgs/Point[] foot_center_positions
-geometry_msgs/Point[] recent_stable_foot_center_positions
 float32[4] normal_force_limit
 float32[4] slip_risk
 float32[4] contact_confidence
 float32[4] fan_current
 bool[4] plan_support_mask
-bool[4] measured_contact_mask
-bool[4] wall_touch_mask
-bool[4] early_contact_mask
 bool[4] contact_mask
 bool[4] support_mask
 bool[4] attachment_ready_mask

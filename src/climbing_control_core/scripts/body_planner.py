@@ -78,10 +78,6 @@ class BodyPlanner(object):
         self.nominal_rpy = [math.radians(v) for v in self._parse_float_list(get_cfg("nominal_rpy_deg", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])]
         self.linear_velocity_world = self._parse_float_list(get_cfg("linear_velocity_world_mps", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])
         self.angular_velocity_world = self._parse_float_list(get_cfg("angular_velocity_world_rps", [0.0, 0.0, 0.0]), [0.0, 0.0, 0.0])
-        self.com_shift_gain = self._parse_float_list(get_cfg("com_shift_gain_m", [0.025, 0.03, 0.0]), [0.025, 0.03, 0.0])
-        self.orientation_shift_gain = [
-            math.radians(v) for v in self._parse_float_list(get_cfg("orientation_shift_gain_deg", [6.0, 4.0, 0.0]), [6.0, 4.0, 0.0])
-        ]
         self.slip_pause_threshold = float(get_cfg("slip_pause_threshold", 0.92))
         self.slip_hold_all_support = bool(get_cfg("slip_hold_all_support", True))
 
@@ -91,7 +87,7 @@ class BodyPlanner(object):
         self.all_hold_dwell_s = max(float(get_cfg("all_hold_dwell_s", 0.2)), 0.0)
 
         self.phase_offsets = self._build_phase_offsets()
-        self.hip_offsets = self._build_hip_offsets()
+        self.hip_offsets = {}
         self.start_time = rospy.Time.now().to_sec()
         self.estimated_state = EstimatedState()
         self.has_estimated_state = False
@@ -119,16 +115,6 @@ class BodyPlanner(object):
         offsets = {}
         for leg_name in self.leg_names:
             offsets[leg_name] = float(phase_cfg.get(leg_name, default_offsets.get(leg_name, 0.0)))
-        return offsets
-
-    def _build_hip_offsets(self):
-        base_radius = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
-        leg_cfg = rospy.get_param("/legs", {})
-        offsets = {}
-        for leg_name in self.leg_names:
-            hip_yaw_deg = float(leg_cfg.get(leg_name, {}).get("hip_yaw_deg", 0.0))
-            hip_yaw = math.radians(hip_yaw_deg)
-            offsets[leg_name] = [base_radius * math.cos(hip_yaw), base_radius * math.sin(hip_yaw), 0.0]
         return offsets
 
     def estimated_state_callback(self, msg):
@@ -301,39 +287,8 @@ class BodyPlanner(object):
         return -1
 
     # ------------------------------------------------------------------ #
-    # body shift / CoM
+    # pose and twist computation
     # ------------------------------------------------------------------ #
-    def _body_shift(self, support_mask):
-        swing_legs = [self.leg_names[index] for index, is_support in enumerate(support_mask) if not is_support]
-        if not swing_legs:
-            return [0.0, 0.0, 0.0]
-
-        shift = [0.0, 0.0, 0.0]
-        for leg_name in swing_legs:
-            hip = self.hip_offsets.get(leg_name, [0.0, 0.0, 0.0])
-            shift[0] -= hip[0]
-            shift[1] -= hip[1]
-        scale = 1.0 / max(float(len(swing_legs)), 1.0)
-        averaged = vector_scale(shift, scale)
-
-        normalized = [0.0, 0.0, 0.0]
-        for axis in [0, 1, 2]:
-            denominator = max(abs(averaged[axis]), 1e-6)
-            normalized[axis] = averaged[axis] / denominator if axis < 2 and abs(averaged[axis]) > 1e-6 else 0.0
-
-        return [
-            self.com_shift_gain[0] * normalized[0],
-            self.com_shift_gain[1] * normalized[1],
-            self.com_shift_gain[2] * normalized[2],
-        ]
-
-    def _body_orientation_bias(self, shift):
-        return [
-            -self.orientation_shift_gain[0] * shift[1] / max(abs(self.com_shift_gain[1]), 1e-6) if abs(self.com_shift_gain[1]) > 1e-6 else 0.0,
-            self.orientation_shift_gain[1] * shift[0] / max(abs(self.com_shift_gain[0]), 1e-6) if abs(self.com_shift_gain[0]) > 1e-6 else 0.0,
-            self.orientation_shift_gain[2] * shift[2] / max(abs(self.com_shift_gain[2]), 1e-6) if abs(self.com_shift_gain[2]) > 1e-6 else 0.0,
-        ]
-
     def _compute_swing_progression(self):
         """Compute the cumulative body position progression contributed by
         completed and in-progress swing cycles.
@@ -347,9 +302,6 @@ class BodyPlanner(object):
             return vector_add(self._swing_progression, increment)
         return list(self._swing_progression)
 
-    # ------------------------------------------------------------------ #
-    # pose and twist computation
-    # ------------------------------------------------------------------ #
     def _build_pose_and_twist(self, elapsed_s, support_mask):
         if self.gait == "sequential":
             return self._build_pose_and_twist_sequential(elapsed_s, support_mask)
@@ -363,17 +315,14 @@ class BodyPlanner(object):
         if not self.mission_active:
             hold_scale = 0.0
 
-        shift = self._body_shift(support_mask)
         progression = vector_scale(self.linear_velocity_world, max(elapsed_s - self.startup_hold_s, 0.0))
         position = vector_add(self.nominal_position, progression)
-        position = vector_add(position, shift)
 
-        orientation_bias = self._body_orientation_bias(shift)
         yaw_progress = hold_scale * self.angular_velocity_world[2] * max(elapsed_s - self.startup_hold_s, 0.0)
         rpy = [
-            self.nominal_rpy[0] + orientation_bias[0],
-            self.nominal_rpy[1] + orientation_bias[1],
-            self.nominal_rpy[2] + yaw_progress + orientation_bias[2],
+            self.nominal_rpy[0],
+            self.nominal_rpy[1],
+            self.nominal_rpy[2] + yaw_progress,
         ]
         quat = quaternion_from_rpy(rpy[0], rpy[1], rpy[2])
 
@@ -409,25 +358,19 @@ class BodyPlanner(object):
         if not self.mission_active:
             hold_scale = 0.0
 
-        # Body shift toward support legs (away from swing leg)
-        shift = self._body_shift(support_mask)
-
         # Progression: cumulative step-wise advancement
         progression = self._compute_swing_progression()
         position = vector_add(self.nominal_position, progression)
-        position = vector_add(position, shift)
 
-        # Orientation bias (same as timed gait)
-        orientation_bias = self._body_orientation_bias(shift)
         # Yaw progress only applies during active swing
         yaw_progress = 0.0
         if self._gait_state == "SWING_ACTIVE" and self._swing_start_time is not None:
             swing_elapsed = (rospy.Time.now() - self._swing_start_time).to_sec()
             yaw_progress = hold_scale * self.angular_velocity_world[2] * swing_elapsed
         rpy = [
-            self.nominal_rpy[0] + orientation_bias[0],
-            self.nominal_rpy[1] + orientation_bias[1],
-            self.nominal_rpy[2] + yaw_progress + orientation_bias[2],
+            self.nominal_rpy[0],
+            self.nominal_rpy[1],
+            self.nominal_rpy[2] + yaw_progress,
         ]
         quat = quaternion_from_rpy(rpy[0], rpy[1], rpy[2])
 

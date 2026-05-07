@@ -324,7 +324,7 @@ class StanceForceOptimizer(object):
             solution = trial
         return solution
 
-    def _publish_leg_commands(self, stamp, active_legs, support_mask, solution, planned_support_mask, early_contact_mask, actual_contact_mask):
+    def _publish_leg_commands(self, stamp, active_legs, support_mask, solution, planned_support_mask, actual_contact_mask):
         force_by_leg = {}
         for leg_index, leg_name in enumerate(active_legs):
             force_by_leg[leg_name] = solution[3 * leg_index:3 * leg_index + 3]
@@ -335,7 +335,6 @@ class StanceForceOptimizer(object):
             out.leg_name = leg_name
             out.normal_force_limit = self.max_normal_force
             out.planned_support = leg_index < len(planned_support_mask) and bool(planned_support_mask[leg_index])
-            out.early_contact = leg_index < len(early_contact_mask) and bool(early_contact_mask[leg_index])
             out.actual_contact = leg_index < len(actual_contact_mask) and bool(actual_contact_mask[leg_index])
             out.tangential_force_magnitude = 0.0
             out.required_adhesion_force = 0.0
@@ -360,7 +359,6 @@ class StanceForceOptimizer(object):
             [True] * len(self.leg_names),
         )
         planned_support_mask = self._state_mask_or_default("plan_support_mask", desired_support_mask)
-        early_contact_mask = self._state_mask_or_default("early_contact_mask", [False] * len(self.leg_names))
         actual_contact_mask = self._state_mask_or_default("contact_mask", estimated_support_mask)
 
         combined_mask = [
@@ -376,7 +374,6 @@ class StanceForceOptimizer(object):
                 combined_mask,
                 np.zeros(0, dtype=float),
                 planned_support_mask,
-                early_contact_mask,
                 actual_contact_mask,
             )
             return
@@ -390,7 +387,6 @@ class StanceForceOptimizer(object):
             combined_mask,
             solution,
             planned_support_mask,
-            early_contact_mask,
             actual_contact_mask,
         )
 

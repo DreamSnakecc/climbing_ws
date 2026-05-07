@@ -233,16 +233,12 @@ class StateLogger(object):
                 'contact_confidence': list(msg.contact_confidence),
                 'fan_current': list(msg.fan_current),
                 'plan_support_mask': list(msg.plan_support_mask),
-                'measured_contact_mask': list(msg.measured_contact_mask),
-                'wall_touch_mask': list(msg.wall_touch_mask),
-                'early_contact_mask': list(msg.early_contact_mask),
                 'contact_mask': list(msg.contact_mask),
                 'support_mask': list(msg.support_mask),
                 'attachment_ready_mask': list(msg.attachment_ready_mask),
                 'seal_confidence': list(msg.seal_confidence),
                 'leg_torque_sum': list(msg.leg_torque_sum),
                 'leg_torque_contact_confidence': list(msg.leg_torque_contact_confidence),
-                'recent_stable_foot_center_positions': [point_to_dict(p) for p in msg.recent_stable_foot_center_positions],
                 'universal_joint_center_positions': [point_to_dict(p) for p in msg.universal_joint_center_positions],
             }
 
@@ -316,7 +312,6 @@ class StateLogger(object):
                 'tangential_force_magnitude': msg.tangential_force_magnitude,
                 'required_adhesion_force': msg.required_adhesion_force,
                 'planned_support': msg.planned_support,
-                'early_contact': msg.early_contact,
                 'actual_contact': msg.actual_contact,
                 'active': msg.active,
             }

@@ -2,7 +2,6 @@ robot:
   mass_kg: 8.5
   # Control uses the universal-joint center as the non-adhesive quadruped-style support point.
   active_endpoint: universal_joint_center
-  suction_cavity_height_mm: 20.0
 
 body_planner:
   publish_rate_hz: 50.0
@@ -21,8 +20,6 @@ body_planner:
   nominal_rpy_deg: [0.0, 0.0, 0.0]
   linear_velocity_world_mps: [0.01, 0.0, 0.0]
   angular_velocity_world_rps: [0.0, 0.0, 0.0]
-  com_shift_gain_m: [0.025, 0.03, 0.0]
-  orientation_shift_gain_deg: [6.0, 4.0, 0.0]
   slip_pause_threshold: 0.92
   slip_hold_all_support: false
 
@@ -108,10 +105,7 @@ state_estimator:
   support_force_threshold_n: 5.0
   adhesion_force_threshold_n: 10.0
   slip_warning_ratio: 0.75
-  early_contact_phase_threshold: 0.5
   adhesion_force_reference_n: [65.0, 83.0, 107.0, 145.0]
-  stable_contact_confidence_threshold: 0.75
-  recent_contact_position_alpha: 0.2
   fan_min_active_rpm: 300.0
   # Adhesion is judged primarily from fan current under a commanded RPM.
   # Attached: lower current; detached: higher current.
@@ -134,7 +128,6 @@ state_estimator:
   ekf_swing_velocity_measurement_std_mps: 1.20
   ekf_external_position_measurement_std_m: 0.01
   ekf_reset_position_jump_m: 0.75
-  contact_offset_sign: 1.0
   friction_coefficient: 0.5
   default_normal_force_limit: 150.0
   wall_normal_body: [0.0, 0.0, 1.0]
@@ -190,7 +183,7 @@ swing_leg_controller:
   tangential_alignment_tolerance_m: 0.008
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
-  attach_normal_force_limit_n: 25.0
+  attach_normal_force_limit_n: 35.0
   detach_velocity_limit_mps: [0.05, 0.05, 0.05]
   tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
   preload_velocity_limit_mps: [0.04, 0.04, 0.03]

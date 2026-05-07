@@ -126,7 +126,6 @@ class StateEstimator(object):
         self.support_force_threshold_n = float(get_cfg("support_force_threshold_n", 5.0))
         self.adhesion_force_threshold_n = float(get_cfg("adhesion_force_threshold_n", 10.0))
         self.slip_warning_ratio = float(get_cfg("slip_warning_ratio", 0.75))
-        self.early_contact_phase_threshold = float(get_cfg("early_contact_phase_threshold", 0.5))
         self.wall_mu = float(get_cfg("friction_coefficient", rospy.get_param("/wall/default_friction_coefficient", 0.5)))
         self.default_normal_force_limit = float(get_cfg("default_normal_force_limit", rospy.get_param("/wall/max_normal_force_n", 150.0)))
         legacy_axis = str(get_cfg("contact_normal_axis", rospy.get_param("/wall/legacy_contact_normal_axis", "z"))).lower()
@@ -139,9 +138,6 @@ class StateEstimator(object):
             get_cfg("wall_normal_body", rospy.get_param("/wall/normal_body", legacy_fallback)),
             legacy_fallback,
         )
-        self.contact_offset_sign = float(get_cfg("contact_offset_sign", 1.0))
-        self.stable_contact_confidence_threshold = float(get_cfg("stable_contact_confidence_threshold", 0.75))
-        self.recent_contact_position_alpha = float(get_cfg("recent_contact_position_alpha", 0.2))
         self.adhesion_force_reference_n = [float(value) for value in get_cfg("adhesion_force_reference_n", [65.0, 83.0, 107.0, 145.0])]
         self.fan_min_active_rpm = float(get_cfg("fan_min_active_rpm", 300.0))
         self.fan_adhesion_reference_rpm = [float(value) for value in get_cfg("fan_adhesion_reference_rpm", [30000.0, 40000.0])]
@@ -156,7 +152,7 @@ class StateEstimator(object):
             get_cfg("fan_feedback_rpm_full_ratio_for_adhesion", 0.90)
         )
         self.fan_adhesion_confidence_threshold = float(
-            get_cfg("fan_adhesion_confidence_threshold", self.stable_contact_confidence_threshold)
+            get_cfg("fan_adhesion_confidence_threshold", 0.75)
         )
         self.gravity_world = [float(value) for value in get_cfg("gravity_world", [0.0, 0.0, -9.81])]
         self.ekf_initial_covariance = max(float(get_cfg("ekf_initial_covariance", 0.25)), 1e-6)
@@ -172,7 +168,6 @@ class StateEstimator(object):
         self.ekf_swing_velocity_measurement_std_mps = max(float(get_cfg("ekf_swing_velocity_measurement_std_mps", 1.20)), 1e-6)
         self.ekf_external_position_measurement_std_m = max(float(get_cfg("ekf_external_position_measurement_std_m", 0.01)), 1e-6)
         self.ekf_reset_position_jump_m = max(float(get_cfg("ekf_reset_position_jump_m", 0.75)), 1e-6)
-        self.nominal_swing_duration_s = self._nominal_swing_duration()
         self.base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
         self.nominal_y_m = float(rospy.get_param("/gait_controller/nominal_y", 0.0)) / 1000.0
@@ -183,8 +178,6 @@ class StateEstimator(object):
         self.l_a3 = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
         self.l_d6 = float(rospy.get_param("/gait_controller/link_d6", -13.5)) / 1000.0
         self.l_d7 = float(rospy.get_param("/gait_controller/link_d7", -106.7)) / 1000.0
-        self.suction_cavity_height_m = float(rospy.get_param("/robot/suction_cavity_height_mm", 20.0)) / 1000.0
-        self.universal_joint_to_foot_center_rigid_offset_m = abs(self.l_d6 + self.l_d7) + self.suction_cavity_height_m
         self.nominal_universal_joint_center_z_m = float(
             rospy.get_param(
                 "/gait_controller/nominal_universal_joint_center_z",
@@ -226,8 +219,6 @@ class StateEstimator(object):
             for leg_name in self.leg_names
         }
         self.body_reference_support_mask = [True] * len(self.leg_names)
-        self.previous_body_reference_support_mask = [True] * len(self.leg_names)
-        self.leg_swing_start_time = {leg_name: None for leg_name in self.leg_names}
 
         self.last_pose = None
         self.prev_pose = None
@@ -245,7 +236,6 @@ class StateEstimator(object):
         self.last_ekf_time_sec = None
         self.prev_universal_joint_center_positions = None
         self.prev_universal_joint_center_time_sec = None
-        self.recent_stable_foot_center_positions = [self._nominal_foot_center_position(leg_name) for leg_name in self.leg_names]
         self.ekf_state_dim = 6 + 3 * len(self.leg_names)
         self.ekf_state = np.zeros((self.ekf_state_dim, 1), dtype=float)
         self.ekf_covariance = np.eye(self.ekf_state_dim, dtype=float) * self.ekf_initial_covariance
@@ -285,38 +275,6 @@ class StateEstimator(object):
             yaw_map[leg_name] = math.radians(float(legs.get(leg_name, {}).get("hip_yaw_deg", 0.0)))
         return yaw_map
 
-    def _nominal_swing_duration(self):
-        gait = str(rospy.get_param("/body_planner/gait", "crawl")).lower()
-        gait_frequency_hz = float(rospy.get_param("/body_planner/gait_frequency_hz", 0.25))
-        if gait == "trot":
-            swing_ratio = float(rospy.get_param("/body_planner/trot_swing_ratio", 0.50))
-        else:
-            swing_ratio = float(rospy.get_param("/body_planner/crawl_swing_ratio", 0.25))
-        if gait not in ["crawl", "trot"] or gait_frequency_hz <= 1e-6:
-            return max(float(rospy.get_param("/swing_leg_controller/swing_duration_s", 0.65)), 1e-3)
-        return max(swing_ratio / gait_frequency_hz, 1e-3)
-
-    def _update_swing_phase_tracking(self, next_support_mask):
-        now_sec = rospy.Time.now().to_sec()
-        updated_mask = [bool(value) for value in next_support_mask]
-        for leg_index, leg_name in enumerate(self.leg_names):
-            previous_support = self.previous_body_reference_support_mask[leg_index] if leg_index < len(self.previous_body_reference_support_mask) else True
-            current_support = updated_mask[leg_index] if leg_index < len(updated_mask) else True
-            if previous_support and not current_support:
-                self.leg_swing_start_time[leg_name] = now_sec
-            elif current_support:
-                self.leg_swing_start_time[leg_name] = None
-        self.previous_body_reference_support_mask = list(updated_mask)
-
-    def _leg_swing_phase(self, leg_name, planned_support):
-        if planned_support:
-            return 0.0
-        start_time = self.leg_swing_start_time.get(leg_name)
-        if start_time is None:
-            return 0.0
-        elapsed = rospy.Time.now().to_sec() - start_time
-        return clamp(elapsed / max(self.nominal_swing_duration_s, 1e-3), 0.0, 1.0)
-
     def mocap_callback(self, msg):
         if self.last_pose is not None:
             self.prev_pose = self.last_pose
@@ -349,7 +307,6 @@ class StateEstimator(object):
     def body_reference_callback(self, msg):
         if len(msg.support_mask) == len(self.leg_names):
             support_mask = [bool(value) for value in msg.support_mask]
-            self._update_swing_phase_tracking(support_mask)
             self.body_reference_support_mask = support_mask
 
     def swing_target_callback(self, msg):
@@ -529,18 +486,6 @@ class StateEstimator(object):
             self.operating_universal_joint_center_z_m,
         ]
 
-    def _foot_center_from_universal_joint_center(self, universal_joint_center):
-        return [
-            universal_joint_center[0] + self.contact_offset_sign * self.universal_joint_to_foot_center_rigid_offset_m * self.wall_normal_body[0],
-            universal_joint_center[1] + self.contact_offset_sign * self.universal_joint_to_foot_center_rigid_offset_m * self.wall_normal_body[1],
-            universal_joint_center[2] + self.contact_offset_sign * self.universal_joint_to_foot_center_rigid_offset_m * self.wall_normal_body[2],
-        ]
-
-    def _nominal_foot_center_position(self, leg_name):
-        return self._foot_center_from_universal_joint_center(
-            self._nominal_universal_joint_center_position(leg_name),
-        )
-
     def _forward_kinematics_leg_local(self, joint_vector):
         q1 = float(joint_vector[0])
         q2 = float(joint_vector[1])
@@ -613,24 +558,6 @@ class StateEstimator(object):
         ]
         tangential_cmd = vector_norm(tangential_vector)
         return normal_cmd, tangential_cmd
-
-    def _estimate_foot_center_positions(self, universal_joint_center_positions):
-        return [
-            self._foot_center_from_universal_joint_center(ujc)
-            for ujc in universal_joint_center_positions
-        ]
-
-    def _update_recent_stable_foot_center_positions(self, foot_center_positions, attachment_ready_mask, contact_confidence):
-        updated = []
-        for leg_index, foot_center in enumerate(foot_center_positions):
-            previous = self.recent_stable_foot_center_positions[leg_index] if leg_index < len(self.recent_stable_foot_center_positions) else list(foot_center)
-            stable = leg_index < len(attachment_ready_mask) and bool(attachment_ready_mask[leg_index]) and leg_index < len(contact_confidence) and float(contact_confidence[leg_index]) >= self.stable_contact_confidence_threshold
-            if stable:
-                updated.append(low_pass_blend(previous, foot_center, self.recent_contact_position_alpha))
-            else:
-                updated.append(list(previous))
-        self.recent_stable_foot_center_positions = updated
-        return updated
 
     def _update_position_estimate(self, linear_velocity_world):
         now_sec = rospy.Time.now().to_sec()
@@ -843,9 +770,6 @@ class StateEstimator(object):
 
     def _estimate_leg_support_and_adhesion(self):
         plan_support_mask = []
-        measured_contact_mask = []
-        wall_touch_mask = []
-        early_contact_mask = []
         contact_mask = []
         support_mask = []
         attachment_ready_mask = []
@@ -860,8 +784,6 @@ class StateEstimator(object):
             stance_cmd = self.stance_commands[leg_name]
             requested_support = self.body_reference_support_mask[leg_index] if leg_index < len(self.body_reference_support_mask) else True
 
-            measured_contact = False
-
             force_vector = list(stance_cmd["force"])
             normal_cmd, tangential_cmd = self._split_force_components(force_vector)
             force_limit = self._leg_normal_force_limit(leg_name)
@@ -870,32 +792,23 @@ class StateEstimator(object):
 
             planned_support = bool(requested_support)
             normal_support = normal_cmd >= self.support_force_threshold_n
-            swing_phase = self._leg_swing_phase(leg_name, planned_support)
-            early_contact = (not planned_support) and measured_contact and swing_phase >= self.early_contact_phase_threshold
-            wall_touch = (not planned_support) and measured_contact
             # Adhesion judgement combines fan current and fan feedback RPM under commanded RPM.
             seal_value = float(adhesion_confidence)
             attachment_ready = adhesion_confidence >= self.fan_adhesion_confidence_threshold
             confidence_value = max(
-                1.0 if measured_contact else 0.0,
                 1.0 if attachment_ready else 0.0,
-                0.8 if wall_touch else 0.0,
-                0.6 if early_contact else 0.0,
                 clamp(normal_cmd / max(self.support_force_threshold_n, 1e-6), 0.0, 1.0) if planned_support else 0.0,
                 adhesion_confidence,
             )
 
             if planned_support:
-                actual_contact = measured_contact or normal_support or attachment_ready
+                actual_contact = normal_support or attachment_ready
             else:
-                actual_contact = early_contact or wall_touch or attachment_ready
+                actual_contact = attachment_ready
 
             support_value = actual_contact
 
             plan_support_mask.append(bool(planned_support))
-            measured_contact_mask.append(bool(measured_contact))
-            wall_touch_mask.append(bool(wall_touch))
-            early_contact_mask.append(bool(early_contact))
             contact_mask.append(bool(actual_contact))
             support_mask.append(bool(support_value))
             attachment_ready_mask.append(bool(attachment_ready))
@@ -908,9 +821,6 @@ class StateEstimator(object):
 
         return (
             plan_support_mask,
-            measured_contact_mask,
-            wall_touch_mask,
-            early_contact_mask,
             contact_mask,
             support_mask,
             attachment_ready_mask,
@@ -959,9 +869,6 @@ class StateEstimator(object):
         universal_joint_center_velocities = self._estimate_universal_joint_center_velocities(universal_joint_center_positions)
         (
             plan_support_mask,
-            measured_contact_mask,
-            wall_touch_mask,
-            early_contact_mask,
             contact_mask,
             support_mask,
             attachment_ready_mask,
@@ -977,7 +884,6 @@ class StateEstimator(object):
             universal_joint_center_velocities,
             contact_confidence,
         )
-        foot_center_positions = self._estimate_foot_center_positions(universal_joint_center_positions)
         msg.pose.position.x = float(position_world[0])
         msg.pose.position.y = float(position_world[1])
         msg.pose.position.z = float(position_world[2])
@@ -987,13 +893,7 @@ class StateEstimator(object):
         msg.joint_currents = list(self.last_joint_currents)
         msg.joint_torques_est = list(self.last_joint_state.effort)
         msg.universal_joint_center_positions = [Point(position[0], position[1], position[2]) for position in universal_joint_center_positions]
-        msg.foot_center_positions = [Point(position[0], position[1], position[2]) for position in foot_center_positions]
-        recent_stable_foot_center_positions = self._update_recent_stable_foot_center_positions(foot_center_positions, attachment_ready_mask, contact_confidence)
-        msg.recent_stable_foot_center_positions = [Point(position[0], position[1], position[2]) for position in recent_stable_foot_center_positions]
         msg.plan_support_mask = plan_support_mask
-        msg.measured_contact_mask = measured_contact_mask
-        msg.wall_touch_mask = wall_touch_mask
-        msg.early_contact_mask = early_contact_mask
         msg.contact_mask = contact_mask
         msg.support_mask = support_mask
         msg.attachment_ready_mask = attachment_ready_mask

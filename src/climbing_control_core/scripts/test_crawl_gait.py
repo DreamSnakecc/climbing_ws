@@ -31,7 +31,7 @@ CSV fields compact (~60 cols):
   Legs x4 (12):   {leg}_phase, {leg}_phase_id,
                {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
                {leg}_ujc_z, {leg}_attachment_ready, {leg}_adhesion,
-               {leg}_measured_contact, {leg}_fan_rpm, {leg}_fan_current_a
+               {leg}_fan_rpm, {leg}_fan_current_a
 """
 
 from __future__ import print_function
@@ -382,7 +382,7 @@ class CrawlGaitTester(object):
             fan_curr = list(self._latest_fan_currents)
 
         lines = [
-            "  leg  attach_ready  seal_conf  fan_rpm  fan_current_a  measured_contact",
+            "  leg  attach_ready  seal_conf  fan_rpm  fan_current_a",
         ]
         for leg_index, leg in enumerate(LEG_NAMES):
             def mask(attr_name):
@@ -397,13 +397,12 @@ class CrawlGaitTester(object):
             rpm = fan_rpm[leg_index] if leg_index < len(fan_rpm) else 0.0
             current = fan_curr[leg_index] if leg_index < len(fan_curr) else 0.0
             lines.append(
-                "  %-3s     %-5s       %6.3f   %7.1f      %7.3f          %-5s" % (
+                "  %-3s     %-5s       %6.3f   %7.1f      %7.3f" % (
                     leg,
                     str(mask("attachment_ready_mask")),
                     seal,
                     float(rpm),
                     float(current),
-                    str(mask("measured_contact_mask")),
                 )
             )
         return "\n".join(lines)
@@ -475,7 +474,6 @@ class CrawlGaitTester(object):
                 "%s_ujc_z" % leg,
                 "%s_attachment_ready" % leg,
                 "%s_adhesion" % leg,
-                "%s_measured_contact" % leg,
                 "%s_fan_rpm" % leg,
                 "%s_fan_current_a" % leg,
             ])
@@ -582,7 +580,6 @@ class CrawlGaitTester(object):
                 "%.4f" % (float(ujc.y) if ujc is not None else 0.0),
                 "%.4f" % (float(ujc.z) if ujc is not None else 0.0),
                 mask("attachment_ready_mask"),
-                mask("measured_contact_mask"),
                 "%.2f" % float(fan_rpm[leg_index]),
                 "%.4f" % float(fan_curr[leg_index]),
             ])

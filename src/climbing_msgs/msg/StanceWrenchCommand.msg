@@ -5,6 +5,5 @@ float32 normal_force_limit
 float32 tangential_force_magnitude
 float32 required_adhesion_force
 bool planned_support
-bool early_contact
 bool actual_contact
 bool active
