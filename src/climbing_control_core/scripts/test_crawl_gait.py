@@ -25,14 +25,15 @@ Flow:
      Log CSV. FAULT during CLIMB = immediate exit
   6. 6. Pause, write CSV, print summary
 
-CSV fields compact (~72 cols):
+CSV fields compact (~102 cols):
   Common (6):    wall_time, ros_time, elapsed_s, mission_state, mission_active, phase_label
   body  (6):   body_x, body_y, body_z, body_vx, body_vy, body_vz
   est   (6):   est_x, est_y, est_z, est_vx, est_vy, est_vz
-  Legs x4 (12):  {leg}_phase, {leg}_phase_id,
+  Legs x4 (21):  {leg}_phase, {leg}_phase_id,
                {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
                {leg}_ujc_x, {leg}_ujc_y, {leg}_ujc_z,
-               {leg}_attachment_ready, {leg}_fan_rpm, {leg}_fan_current_a
+               {leg}_attachment_ready, {leg}_fan_rpm, {leg}_fan_current_a,
+               {leg}_lift_x/y/z, {leg}_preload_x/y/z, {leg}_attach_x/y/z
 """
 
 from __future__ import print_function
@@ -478,6 +479,15 @@ class CrawlGaitTester(object):
                 "%s_attachment_ready" % leg,
                 "%s_fan_rpm" % leg,
                 "%s_fan_current_a" % leg,
+                "%s_lift_x" % leg,
+                "%s_lift_y" % leg,
+                "%s_lift_z" % leg,
+                "%s_preload_x" % leg,
+                "%s_preload_y" % leg,
+                "%s_preload_z" % leg,
+                "%s_attach_x" % leg,
+                "%s_attach_y" % leg,
+                "%s_attach_z" % leg,
             ])
         return cols
 
@@ -596,6 +606,15 @@ class CrawlGaitTester(object):
                 mask("attachment_ready_mask"),
                 "%.2f" % float(fan_rpm[leg_index]),
                 "%.4f" % float(fan_curr[leg_index]),
+                "%.4f" % (float(cmd.lift_swing_target.x) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.lift_swing_target.y) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.lift_swing_target.z) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.preload_target.x) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.preload_target.y) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.preload_target.z) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.attach_target.x) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.attach_target.y) if cmd is not None else 0.0),
+                "%.4f" % (float(cmd.attach_target.z) if cmd is not None else 0.0),
             ])
 
             # swing cycle: count True->False->True transitions

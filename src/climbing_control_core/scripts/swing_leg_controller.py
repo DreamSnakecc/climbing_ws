@@ -879,6 +879,15 @@ class SwingLegController(object):
         else:
             msg.support_leg = bool(support_leg)
         msg.desired_normal_force_limit = float(normal_force_limit)
+        # Fill in target positions for CSV recording
+        state = self.swing_states.get(leg_name, {})
+        nominal = self._operating_center_command(leg_name)
+        lift_tgt = state.get("lift_swing_target", nominal)
+        preload_tgt = state.get("preload_target", nominal)
+        attach_tgt = state.get("attach_target", nominal)
+        msg.lift_swing_target = Point(lift_tgt[0], lift_tgt[1], lift_tgt[2])
+        msg.preload_target = Point(preload_tgt[0], preload_tgt[1], preload_tgt[2])
+        msg.attach_target = Point(attach_tgt[0], attach_tgt[1], attach_tgt[2])
         return msg
 
     def _publish_leg_diagnostic(self, leg_name, leg_index, cmd_position, now_sec):
