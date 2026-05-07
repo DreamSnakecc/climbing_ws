@@ -25,13 +25,14 @@ Flow:
      Log CSV. FAULT during CLIMB = immediate exit
   6. 6. Pause, write CSV, print summary
 
-CSV fields compact (~60 cols):
+CSV fields compact (~72 cols):
   Common (6):    wall_time, ros_time, elapsed_s, mission_state, mission_active, phase_label
   body  (6):   body_x, body_y, body_z, body_vx, body_vy, body_vz
-  Legs x4 (12):   {leg}_phase, {leg}_phase_id,
+  est   (6):   est_x, est_y, est_z, est_vx, est_vy, est_vz
+  Legs x4 (12):  {leg}_phase, {leg}_phase_id,
                {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
-               {leg}_ujc_z, {leg}_attachment_ready, {leg}_adhesion,
-               {leg}_fan_rpm, {leg}_fan_current_a
+               {leg}_ujc_x, {leg}_ujc_y, {leg}_ujc_z,
+               {leg}_attachment_ready, {leg}_fan_rpm, {leg}_fan_current_a
 """
 
 from __future__ import print_function
@@ -460,6 +461,8 @@ class CrawlGaitTester(object):
             "mission_state", "mission_active", "phase_label",
             "body_x", "body_y", "body_z",
             "body_vx", "body_vy", "body_vz",
+            "est_x", "est_y", "est_z",
+            "est_vx", "est_vy", "est_vz",
         ]
         for leg in LEG_NAMES:
             cols.extend([
@@ -473,7 +476,6 @@ class CrawlGaitTester(object):
                 "%s_ujc_y" % leg,
                 "%s_ujc_z" % leg,
                 "%s_attachment_ready" % leg,
-                "%s_adhesion" % leg,
                 "%s_fan_rpm" % leg,
                 "%s_fan_current_a" % leg,
             ])
@@ -542,11 +544,23 @@ class CrawlGaitTester(object):
             body_vy = float(body.twist.linear.y)
             body_vz = float(body.twist.linear.z)
 
+        est_x = est_y = est_z = 0.0
+        est_vx = est_vy = est_vz = 0.0
+        if est is not None:
+            est_x = float(est.pose.position.x)
+            est_y = float(est.pose.position.y)
+            est_z = float(est.pose.position.z)
+            est_vx = float(est.twist.linear.x)
+            est_vy = float(est.twist.linear.y)
+            est_vz = float(est.twist.linear.z)
+
         row = [
             "%.6f" % wall_time, "%.6f" % ros_time, "%.4f" % elapsed,
             state, int(bool(mission_active)), phase_label,
             "%.4f" % body_x, "%.4f" % body_y, "%.4f" % body_z,
             "%.4f" % body_vx, "%.4f" % body_vy, "%.4f" % body_vz,
+            "%.4f" % est_x, "%.4f" % est_y, "%.4f" % est_z,
+            "%.4f" % est_vx, "%.4f" % est_vy, "%.4f" % est_vz,
         ]
 
         for leg_index, leg in enumerate(LEG_NAMES):
