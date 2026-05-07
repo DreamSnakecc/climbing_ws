@@ -4,3 +4,6 @@ geometry_msgs/Point center
 geometry_msgs/Vector3 center_velocity
 bool support_leg
 float32 desired_normal_force_limit
+geometry_msgs/Point lift_swing_target
+geometry_msgs/Point preload_target
+geometry_msgs/Point attach_target
