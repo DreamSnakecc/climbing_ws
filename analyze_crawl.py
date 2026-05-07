@@ -1,415 +1,199 @@
 #!/usr/bin/env python3
-"""Analyze crawl gait CSV log."""
-
+"""Analyze commanded vs actual foot positions from crawl gait test CSV."""
 import csv
-import numpy as np
+import sys
 from collections import defaultdict
+import math
 
-CSV_PATH = "/home/cc/climbing_ws/test_logs/crawl_gait_20260429_164359.csv"
+csv_path = "test_logs/crawl_gait_20260507_143947.csv"
 
-LEGS = ["lf", "rf", "rr", "lr"]
-PHASE_NAMES = {
-    0: "SUPPORT", 1: "DETACH_SLIDE",
-    2: "TANGENTIAL_ALIGN", 3: "PRELOAD_COMPRESS",
-    4: "TANGENTIAL_ALIGN_wait", 5: "PRELOAD_OR_COMPLIANT",
-    6: "COMPLIANT_SETTLE",
-}
+# Check header to ensure column names match
+with open(csv_path) as f:
+    header = f.readline().strip().split(",")
+    print(f"CSV columns: {len(header)}")
+    # Verify key columns exist
+    for leg in ["lf", "rf", "rr", "lr"]:
+        assert f"{leg}_cmd_support" in header, f"Missing {leg}_cmd_support"
+        assert f"{leg}_cmd_x" in header, f"Missing {leg}_cmd_x"
 
-# Load data
-rows = []
-with open(CSV_PATH) as f:
+legs = ["lf", "rf", "rr", "lr"]
+phases = ["SUPPORT", "LIFT_SWING", "ADMIT_OR_PRELOAD"]
+
+# Per-leg stats
+leg_errors = {leg: {"dx": [], "dy": [], "dz": [], "d3d": [], "phase": []} for leg in legs}
+support_errors = {leg: {"dx": [], "dy": [], "dz": [], "d3d": []} for leg in legs}
+swing_errors = {leg: {"dx": [], "dy": [], "dz": [], "d3d": []} for leg in legs}
+
+body_x_vals = []
+body_vx_vals = []
+total_duration = 0
+
+with open(csv_path) as f:
     reader = csv.DictReader(f)
-    for r in reader:
-        rows.append(r)
+    for row in reader:
+        t = float(row["elapsed_s"])
+        total_duration = max(total_duration, t)
+        body_x_vals.append(float(row["body_x"]))
+        body_vx_vals.append(float(row["body_vx"]))
 
-print(f"Loaded {len(rows)} rows\n")
+        for leg in legs:
+            cmd_x = float(row[f"{leg}_cmd_x"])
+            cmd_y = float(row[f"{leg}_cmd_y"])
+            cmd_z = float(row[f"{leg}_cmd_z"])
+            ujc_x = float(row[f"{leg}_ujc_x"])
+            ujc_y = float(row[f"{leg}_ujc_y"])
+            ujc_z = float(row[f"{leg}_ujc_z"])
+            phase = row[f"{leg}_phase"]
+            support_val = float(row[f"{leg}_cmd_support"])
+            support = abs(support_val) > 0.5
 
-# Convert numeric fields
-def float_or_nan(v):
-    try:
-        return float(v)
-    except (ValueError, TypeError):
-        return float("nan")
+            dx = ujc_x - cmd_x
+            dy = ujc_y - cmd_y
+            dz = ujc_z - cmd_z
+            d3d = math.sqrt(dx*dx + dy*dy + dz*dz)
 
-for r in rows:
-    r["elapsed_s"] = float_or_nan(r["elapsed_s"])
-    r["body_x"] = float_or_nan(r["body_x"])
-    r["body_y"] = float_or_nan(r["body_y"])
-    r["body_z"] = float_or_nan(r["body_z"])
-    for leg in LEGS:
-        r[f"{leg}_phase_id"] = int(float_or_nan(r[f"{leg}_phase_id"]))
-        r[f"{leg}_cmd_x"] = float_or_nan(r[f"{leg}_cmd_x"])
-        r[f"{leg}_cmd_y"] = float_or_nan(r[f"{leg}_cmd_y"])
-        r[f"{leg}_cmd_z"] = float_or_nan(r[f"{leg}_cmd_z"])
-        r[f"{leg}_cmd_support"] = int(float_or_nan(r[f"{leg}_cmd_support"]))
-        r[f"{leg}_ujc_z"] = float_or_nan(r[f"{leg}_ujc_z"])
+            leg_errors[leg]["dx"].append(dx)
+            leg_errors[leg]["dy"].append(dy)
+            leg_errors[leg]["dz"].append(dz)
+            leg_errors[leg]["d3d"].append(d3d)
+            leg_errors[leg]["phase"].append(phase)
 
-# ============================================================
-# 1. Body displacement
-# ============================================================
-body_x_start = rows[0]["body_x"]
-body_x_end = rows[-1]["body_x"]
-body_y_start = rows[0]["body_y"]
-body_y_end = rows[-1]["body_y"]
-
-print("=" * 60)
-print("1. BODY DISPLACEMENT")
-print("=" * 60)
-print(f"  body_x: {body_x_start:.4f} -> {body_x_end:.4f}  (Δ = {body_x_end - body_x_start:.4f} m)")
-print(f"  body_y: {body_y_start:.4f} -> {body_y_end:.4f}  (Δ = {body_y_end - body_y_start:.4f} m)")
-print(f"  Duration: {rows[-1]['elapsed_s'] - rows[0]['elapsed_s']:.2f} s")
-# Also check body_x trajectory over time
-bx_vals = np.array([r["body_x"] for r in rows])
-by_vals = np.array([r["body_y"] for r in rows])
-print(f"  body_x range: [{bx_vals.min():.4f}, {bx_vals.max():.4f}]  std: {bx_vals.std():.4f}")
-print(f"  body_y range: [{by_vals.min():.4f}, {by_vals.max():.4f}]  std: {by_vals.std():.4f}")
-
-# Check if body moved at all
-if abs(bx_vals.max() - bx_vals.min()) < 0.01:
-    print("  ⚠ body_x barely moved — body is effectively stationary")
-print()
-
-# ============================================================
-# 2. Leg swing patterns — count phase_id=1 transitions
-# ============================================================
-print("=" * 60)
-print("2. LEG SWING PATTERNS (DETACH_SLIDE = phase_id=1)")
-print("=" * 60)
-
-for leg in LEGS:
-    pid_key = f"{leg}_phase_id"
-    swing_starts = []
-    prev = rows[0][pid_key]
-    for i, r in enumerate(rows):
-        curr = r[pid_key]
-        # Transition INTO phase_id=1
-        if prev != 1 and curr == 1:
-            swing_starts.append((i, r["elapsed_s"]))
-        prev = curr
-
-    print(f"\n  {leg.upper()}: {len(swing_starts)} swing transitions detected")
-    for idx, (row_idx, t) in enumerate(swing_starts):
-        duration = 0
-        # measure duration of this swing
-        for j in range(row_idx, len(rows)):
-            if rows[j][pid_key] != 1:
-                duration = rows[j]["elapsed_s"] - t
-                break
-        else:
-            duration = rows[-1]["elapsed_s"] - t
-        print(f"    Swing #{idx+1}: t={t:.3f}s (row {row_idx}), duration={duration:.2f}s")
-
-# Also count transitions into phase_id=0 (SUPPORT) — useful for counting full swing cycles
-print("\n  --- SUPPORT (phase_id=0) entries (full cycle markers) ---")
-for leg in LEGS:
-    pid_key = f"{leg}_phase_id"
-    support_entries = []
-    prev = rows[0][pid_key]
-    for i, r in enumerate(rows):
-        curr = r[pid_key]
-        if prev != 0 and curr == 0:
-            support_entries.append((i, r["elapsed_s"]))
-        prev = curr
-    print(f"  {leg.upper()}: {len(support_entries)} SUPPORT entries")
-
-print()
-
-# ============================================================
-# 3. Swing sequence analysis
-# ============================================================
-print("=" * 60)
-print("3. SWING SEQUENCE")
-print("=" * 60)
-
-# For each row, determine which leg(s) are NOT in SUPPORT (phase_id != 0)
-swing_events = []  # (elapsed_s, leg, phase_id)
-for r in rows:
-    t = r["elapsed_s"]
-    for leg in LEGS:
-        pid = r[f"{leg}_phase_id"]
-        if pid != 0:
-            swing_events.append((t, leg, pid))
-
-# Group into contiguous blocks per leg
-# For each leg, find contiguous non-zero phase_id blocks
-print("  Chronological swing phases (non-SUPPORT):")
-last_time = -1
-for t, leg, pid in swing_events:
-    if t - last_time < 0.01:
-        continue  # skip duplicates within same time step
-    print(f"    t={t:7.3f}s  {leg.upper()}  phase={pid} ({PHASE_NAMES.get(pid, '?')})")
-    last_time = t
-
-# Summarize the overall sequence
-# For a proper sequential crawl gait, we expect: ALL_HOLD → one leg swings → ALL_HOLD → next leg swings
-# So at any time, only ONE leg should be in non-SUPPORT phase
-print("\n  --- Concurrent swing analysis ---")
-for r in rows:
-    t = r["elapsed_s"]
-    non_support = [(leg, r[f"{leg}_phase_id"]) for leg in LEGS if r[f"{leg}_phase_id"] != 0]
-    if len(non_support) > 1:
-        phases_str = ", ".join(f"{leg}={pid}({PHASE_NAMES.get(pid,'?')})" for leg, pid in non_support)
-        print(f"    t={t:7.3f}s  MULTIPLE legs non-SUPPORT: {phases_str}")
-
-print()
-
-# ============================================================
-# 4. IK branch switching detection
-# ============================================================
-print("=" * 60)
-print("4. IK BRANCH SWITCHING DETECTION")
-print("=" * 60)
-
-# Look for sudden jumps in cmd_x/y/z during SUPPORT (phase_id=0)
-# Also look at cmd_support toggles
-print("  --- cmd_support toggles during SUPPORT ---")
-leg_pairs = [("lf", "rr"), ("rf", "lr")]  # diagonal pairs
-for leg_a, leg_b in leg_pairs:
-    print(f"\n  Diagonal pair: {leg_a.upper()} vs {leg_b.upper()}")
-    prev_support = {leg_a: rows[0][f"{leg_a}_cmd_support"],
-                    leg_b: rows[0][f"{leg_b}_cmd_support"]}
-    toggle_events = {leg_a: [], leg_b: []}
-    for i, r in enumerate(rows[1:], 1):
-        for leg in (leg_a, leg_b):
-            curr = r[f"{leg}_cmd_support"]
-            if curr != prev_support[leg]:
-                toggle_events[leg].append((i, r["elapsed_s"], curr))
-                prev_support[leg] = curr
-    for leg in (leg_a, leg_b):
-        print(f"    {leg.upper()} cmd_support toggles: {len(toggle_events[leg])} — times: " +
-              ", ".join(f"t={t:.2f}s" for _, t, _ in toggle_events[leg]))
-
-print("\n  --- Sudden cmd jumps analysis (during SUPPORT, phase_id=0) ---")
-# For each leg, during SUPPORT blocks, look at cmd_x, cmd_y, cmd_z differences between consecutive samples
-leg_support_jumps = {leg: {"x": [], "y": [], "z": [], "times": []} for leg in LEGS}
-for leg in LEGS:
-    prev_vals = None
-    prev_time = None
-    for r in rows:
-        if r[f"{leg}_phase_id"] == 0:
-            t = r["elapsed_s"]
-            vals = (r[f"{leg}_cmd_x"], r[f"{leg}_cmd_y"], r[f"{leg}_cmd_z"])
-            if prev_vals is not None:
-                dx = abs(vals[0] - prev_vals[0])
-                dy = abs(vals[1] - prev_vals[1])
-                dz = abs(vals[2] - prev_vals[2])
-                dt = t - prev_time
-                if dt > 0 and (dx > 0.01 or dy > 0.01 or dz > 0.01):
-                    speed_x = dx / dt
-                    speed_y = dy / dt
-                    speed_z = dz / dt
-                    if speed_x + speed_y + speed_z > 0.5:  # threshold for sudden jump
-                        leg_support_jumps[leg]["x"].append(dx)
-                        leg_support_jumps[leg]["y"].append(dy)
-                        leg_support_jumps[leg]["z"].append(dz)
-                        leg_support_jumps[leg]["times"].append((t, dx, dy, dz, dt))
-            prev_vals = vals
-            prev_time = t
-
-for leg in LEGS:
-    jumps = leg_support_jumps[leg]
-    if jumps["times"]:
-        print(f"\n  {leg.upper()}: {len(jumps['times'])} sudden jumps during SUPPORT")
-        for t, dx, dy, dz, dt in jumps["times"][:5]:
-            print(f"    t={t:.3f}s  Δx={dx:.4f} Δy={dy:.4f} Δz={dz:.4f}  (dt={dt:.3f}s)")
-        if len(jumps["times"]) > 5:
-            print(f"    ... and {len(jumps['times'])-5} more")
-    else:
-        print(f"\n  {leg.upper()}: No sudden jumps during SUPPORT")
-
-# Cross-check: look at diagonal legs during same phase
-print("\n  --- Cross-check: Diagonal leg cmd values correlation ---")
-for leg_a, leg_b in leg_pairs:
-    phase_key_a = f"{leg_a}_phase_id"
-    phase_key_b = f"{leg_b}_phase_id"
-    # Find times when BOTH diagonal legs are in SUPPORT
-    support_times = [(r["elapsed_s"],
-                      r[f"{leg_a}_cmd_x"], r[f"{leg_a}_cmd_y"], r[f"{leg_a}_cmd_z"],
-                      r[f"{leg_b}_cmd_x"], r[f"{leg_b}_cmd_y"], r[f"{leg_b}_cmd_z"])
-                     for r in rows if r[phase_key_a] == 0 and r[phase_key_b] == 0]
-    if support_times:
-        cmd_x_a = np.array([s[1] for s in support_times])
-        cmd_x_b = np.array([s[4] for s in support_times])
-        cmd_y_a = np.array([s[2] for s in support_times])
-        cmd_y_b = np.array([s[5] for s in support_times])
-        # Check if diagonal legs have mirrored cmd values
-        x_diff = np.abs(cmd_x_a + cmd_x_b).mean()  # should be ~0 if mirrored
-        y_diff = np.abs(cmd_y_a + cmd_y_b).mean()
-        print(f"    {leg_a.upper()}-{leg_b.upper()}: mean |cmd_x_a + cmd_x_b| = {x_diff:.4f}  "
-              f"mean |cmd_y_a + cmd_y_b| = {y_diff:.4f}")
-        # Check for sudden jumps in both legs simultaneously (branch switch indicator)
-        x_jumps_a = np.abs(np.diff(cmd_x_a))
-        x_jumps_b = np.abs(np.diff(cmd_x_b))
-        # Count simultaneous jumps
-        both_jump = np.sum((x_jumps_a > 0.01) & (x_jumps_b > 0.01))
-        print(f"    Simultaneous cmd_x jumps (>0.01): {both_jump} occurrences")
-
-print()
-
-# ============================================================
-# 5. Swing trajectory smoothness
-# ============================================================
-print("=" * 60)
-print("5. SWING TRAJECTORY SMOOTHNESS")
-print("=" * 60)
-
-for leg in LEGS:
-    # Extract ALL non-SUPPORT blocks (swing phases)
-    pid_key = f"{leg}_phase_id"
-    cmd_x_key = f"{leg}_cmd_x"
-    cmd_y_key = f"{leg}_cmd_y"
-    cmd_z_key = f"{leg}_cmd_z"
-
-    in_swing = False
-    swing_blocks = []
-    current_block = {"t": [], "x": [], "y": [], "z": []}
-    for r in rows:
-        t = r["elapsed_s"]
-        if r[pid_key] != 0 and r[pid_key] != 5:  # exclude PRELOAD_OR_COMPLIANT and SUPPORT
-            if not in_swing:
-                in_swing = True
-                current_block = {"t": [t], "x": [r[cmd_x_key]], "y": [r[cmd_y_key]], "z": [r[cmd_z_key]]}
+            if support:
+                support_errors[leg]["dx"].append(dx)
+                support_errors[leg]["dy"].append(dy)
+                support_errors[leg]["dz"].append(dz)
+                support_errors[leg]["d3d"].append(d3d)
             else:
-                current_block["t"].append(t)
-                current_block["x"].append(r[cmd_x_key])
-                current_block["y"].append(r[cmd_y_key])
-                current_block["z"].append(r[cmd_z_key])
-        else:
-            if in_swing and len(current_block["t"]) > 3:
-                swing_blocks.append(current_block)
-            in_swing = False
+                swing_errors[leg]["dx"].append(dx)
+                swing_errors[leg]["dy"].append(dy)
+                swing_errors[leg]["dz"].append(dz)
+                swing_errors[leg]["d3d"].append(d3d)
 
-    if in_swing and len(current_block["t"]) > 3:
-        swing_blocks.append(current_block)
+def stats(vals):
+    if not vals:
+        return {"mean": 0, "rms": 0, "max_abs": 0, "std": 0}
+    n = len(vals)
+    mean = sum(vals) / n
+    rms = math.sqrt(sum(v*v for v in vals) / n)
+    max_abs = max(abs(v) for v in vals)
+    std = math.sqrt(sum((v - mean)**2 for v in vals) / n)
+    return {"mean": mean, "rms": rms, "max_abs": max_abs, "std": std}
 
-    print(f"\n  {leg.upper()}: {len(swing_blocks)} swing trajectories")
-    for bi, block in enumerate(swing_blocks[:4]):  # show first 4
-        t_arr = np.array(block["t"])
-        x_arr = np.array(block["x"])
-        y_arr = np.array(block["y"])
-        z_arr = np.array(block["z"])
-        dur = t_arr[-1] - t_arr[0]
-        n_pts = len(t_arr)
+print("=" * 80)
+print("CRAWL GAIT ANALYSIS: Commanded vs Actual Foot Positions")
+print(f"File: {csv_path}")
+print(f"Duration: {total_duration:.1f}s, Samples: {len(body_x_vals)}")
+print(f"Body displacement: {body_x_vals[-1] - body_x_vals[0]:.4f}m ({(body_x_vals[-1] - body_x_vals[0])*1000:.1f}mm)")
+print(f"Nominal body vel: {round(sum(body_vx_vals)/len(body_vx_vals), 4)} m/s")
+print("=" * 80)
 
-        # Compute second differences as smoothness metric
-        if len(x_arr) >= 3:
-            x_dd = np.abs(np.diff(x_arr, n=2))
-            y_dd = np.abs(np.diff(y_arr, n=2))
-            z_dd = np.abs(np.diff(z_arr, n=2))
-            smoothness_x = np.mean(x_dd) if len(x_dd) > 0 else 0
-            smoothness_y = np.mean(y_dd) if len(y_dd) > 0 else 0
-            smoothness_z = np.mean(z_dd) if len(z_dd) > 0 else 0
-            # Lower = smoother
-            print(f"    Block #{bi+1}: {n_pts} pts, {dur:.2f}s, "
-                  f"mean|d2x/dt2|={smoothness_x:.6f}, "
-                  f"mean|d2y/dt2|={smoothness_y:.6f}, "
-                  f"mean|d2z/dt2|={smoothness_z:.6f}")
-        else:
-            print(f"    Block #{bi+1}: {n_pts} pts, {dur:.2f}s (too few points for smoothness calc)")
+# ============ Section 1: All samples per leg ============
+print("\n--- ALL SAMPLES: Per-leg XYZ error (UJC - CMD) ---")
+print(f"{'Leg':>4} | {'dx_mean':>8} {'dx_rms':>8} {'dx_max':>8} | "
+      f"{'dy_mean':>8} {'dy_rms':>8} {'dy_max':>8} | "
+      f"{'dz_mean':>8} {'dz_rms':>8} {'dz_max':>8} | "
+      f"{'3d_rms':>8} {'3d_max':>8}")
+print("-" * 98)
+for leg in legs:
+    s = leg_errors[leg]
+    dx_s = stats(s["dx"])
+    dy_s = stats(s["dy"])
+    dz_s = stats(s["dz"])
+    d3d_s = stats(s["d3d"])
+    print(f"{leg:>4} | "
+          f"{dx_s['mean']:>8.3f} {dx_s['rms']:>8.3f} {dx_s['max_abs']:>8.3f} | "
+          f"{dy_s['mean']:>8.3f} {dy_s['rms']:>8.3f} {dy_s['max_abs']:>8.3f} | "
+          f"{dz_s['mean']:>8.3f} {dz_s['rms']:>8.3f} {dz_s['max_abs']:>8.3f} | "
+          f"{d3d_s['rms']:>8.3f} {d3d_s['max_abs']:>8.3f}")
 
-        # Check for monotonic cmd_z (should go up then down in a smooth arc)
-        z_diff = np.diff(z_arr)
-        # Count sign changes in z direction
-        sign_changes = np.sum(np.diff(np.sign(z_diff)) != 0) if len(z_diff) > 1 else 0
-        print(f"           Z direction changes (sign changes in dz/dt): {sign_changes}")
+# ============ Section 2: Support phase errors ============
+print("\n--- SUPPORT PHASE: Per-leg XYZ error ---")
+print(f"{'Leg':>4} | {'dx_mean':>8} {'dx_rms':>8} {'dx_max':>8} | "
+      f"{'dy_mean':>8} {'dy_rms':>8} {'dy_max':>8} | "
+      f"{'dz_mean':>8} {'dz_rms':>8} {'dz_max':>8} | "
+      f"{'3d_rms':>8} {'3d_max':>8}")
+print("-" * 98)
+for leg in legs:
+    s = support_errors[leg]
+    dx_s = stats(s["dx"])
+    dy_s = stats(s["dy"])
+    dz_s = stats(s["dz"])
+    d3d_s = stats(s["d3d"])
+    print(f"{leg:>4} | "
+          f"{dx_s['mean']:>8.3f} {dx_s['rms']:>8.3f} {dx_s['max_abs']:>8.3f} | "
+          f"{dy_s['mean']:>8.3f} {dy_s['rms']:>8.3f} {dy_s['max_abs']:>8.3f} | "
+          f"{dz_s['mean']:>8.3f} {dz_s['rms']:>8.3f} {dz_s['max_abs']:>8.3f} | "
+          f"{d3d_s['rms']:>8.3f} {d3d_s['max_abs']:>8.3f}")
 
-print()
+# ============ Section 3: Swing phase errors ============
+print("\n--- SWING PHASE: Per-leg XYZ error ---")
+print(f"{'Leg':>4} | {'dx_mean':>8} {'dx_rms':>8} {'dx_max':>8} | "
+      f"{'dy_mean':>8} {'dy_rms':>8} {'dy_max':>8} | "
+      f"{'dz_mean':>8} {'dz_rms':>8} {'dz_max':>8} | "
+      f"{'3d_rms':>8} {'3d_max':>8}")
+print("-" * 98)
+for leg in legs:
+    s = swing_errors[leg]
+    dx_s = stats(s["dx"])
+    dy_s = stats(s["dy"])
+    dz_s = stats(s["dz"])
+    d3d_s = stats(s["d3d"])
+    print(f"{leg:>4} | "
+          f"{dx_s['mean']:>8.3f} {dx_s['rms']:>8.3f} {dx_s['max_abs']:>8.3f} | "
+          f"{dy_s['mean']:>8.3f} {dy_s['rms']:>8.3f} {dy_s['max_abs']:>8.3f} | "
+          f"{dz_s['mean']:>8.3f} {dz_s['rms']:>8.3f} {dz_s['max_abs']:>8.3f} | "
+          f"{d3d_s['rms']:>8.3f} {d3d_s['max_abs']:>8.3f}")
 
-# ============================================================
-# 6. Z tracking performance
-# ============================================================
-print("=" * 60)
-print("6. Z TRACKING (ujc_z vs cmd_z)")
-print("=" * 60)
+# ============ Section 4: Nominal foot positions ============
+print("\n--- NOMINAL COMMANDED FOOT POSITIONS (from INIT check in terminal) ---")
+print(f"{'Leg':>4} | {'cmd_x':>8} {'cmd_y':>8} {'cmd_z':>8} | "
+      f"{'ujc_x':>8} {'ujc_y':>8} {'ujc_z':>8}")
+print("-" * 56)
+# These came from INIT hold output (rows 24-27 of terminal output):
+nominal = {
+    "lf": {"cmd": (0.1007, 0.1007, -0.1000), "ujc": (0.3347, 0.3337, -0.1010)},
+    "rf": {"cmd": (0.1007, -0.1007, -0.1000), "ujc": (0.3329, -0.3339, -0.1025)},
+    "rr": {"cmd": (-0.1007, -0.1007, -0.1000), "ujc": (-0.3341, -0.3350, -0.1004)},
+    "lr": {"cmd": (-0.1007, 0.1007, -0.1000), "ujc": (-0.3331, 0.3341, -0.1023)},
+}
+for leg in legs:
+    cmd = nominal[leg]["cmd"]
+    ujc = nominal[leg]["ujc"]
+    dx = ujc[0] - cmd[0]
+    dy = ujc[1] - cmd[1]
+    dz = ujc[2] - cmd[2]
+    d3d = math.sqrt(dx*dx + dy*dy + dz*dz)
+    print(f"{leg:>4} | {cmd[0]:>8.4f} {cmd[1]:>8.4f} {cmd[2]:>8.4f} | "
+          f"{ujc[0]:>8.4f} {ujc[1]:>8.4f} {ujc[2]:>8.4f} | "
+          f"Δ={d3d*1000:5.1f}mm")
 
-for leg in LEGS:
-    pid_key = f"{leg}_phase_id"
-    cmd_z_key = f"{leg}_cmd_z"
-    ujc_z_key = f"{leg}_ujc_z"
+print("\n--- KEY FINDINGS ---")
 
-    # Analyze during swing phases (non-SUPPORT, non-PRELOAD_OR_COMPLIANT)
-    swing_errors = []
-    support_errors = []
+# Determine max support drift
+max_support_drift = 0
+for leg in legs:
+    d3d = stats(support_errors[leg]["d3d"])
+    if d3d["max_abs"] > max_support_drift:
+        max_support_drift = d3d["max_abs"]
+        worst_leg_support = leg
 
-    for r in rows:
-        t = r["elapsed_s"]
-        cmd_z = r[cmd_z_key]
-        ujc_z = r[ujc_z_key]
-        error = ujc_z - cmd_z  # actual - commanded
+# Determine max swing error
+max_swing_error = 0
+for leg in legs:
+    d3d = stats(swing_errors[leg]["d3d"])
+    if d3d["max_abs"] > max_swing_error:
+        max_swing_error = d3d["max_abs"]
+        worst_leg_swing = leg
 
-        if r[pid_key] == 1:  # DETACH_SLIDE
-            swing_errors.append((t, cmd_z, ujc_z, error))
-        elif r[pid_key] == 0:  # SUPPORT
-            support_errors.append((t, cmd_z, ujc_z, error))
+print(f"1. Support-phase foot drift: max 3D error = {max_support_drift*1000:.1f}mm ({worst_leg_support})")
+print(f"2. Swing-phase tracking error: max 3D error = {max_swing_error*1000:.1f}mm ({worst_leg_swing})")
+print(f"3. Body displacement: {(body_x_vals[-1] - body_x_vals[0])*1000:.1f}mm over {total_duration:.1f}s")
 
-    print(f"\n  {leg.upper()}:")
-
-    if swing_errors:
-        err_vals = np.array([e[3] for e in swing_errors])
-        cmd_vals = np.array([e[1] for e in swing_errors])
-        ujc_vals = np.array([e[2] for e in swing_errors])
-        print(f"    During DETACH_SLIDE (swing):")
-        print(f"      cmd_z range: [{cmd_vals.min():.4f}, {cmd_vals.max():.4f}]")
-        print(f"      ujc_z range: [{ujc_vals.min():.4f}, {ujc_vals.max():.4f}]")
-        print(f"      Mean error (ujc_z - cmd_z): {np.mean(err_vals):.4f}")
-        print(f"      RMSE: {np.sqrt(np.mean(err_vals**2)):.4f}")
-        print(f"      Max abs error: {np.max(np.abs(err_vals)):.4f}")
-        print(f"      Std error: {np.std(err_vals):.4f}")
-
-        # Check for unusually large errors
-        large_errors = [e for e in swing_errors if abs(e[3]) > 0.02]
-        if large_errors:
-            print(f"      ⚠ {len(large_errors)} samples with |error| > 0.02m")
-            for t, cmd, ujc, err in large_errors[:5]:
-                print(f"        t={t:.3f}s  cmd_z={cmd:.4f}  ujc_z={ujc:.4f}  error={err:.4f}")
-
-    if support_errors:
-        err_vals_s = np.array([e[3] for e in support_errors])
-        print(f"    During SUPPORT:")
-        print(f"      Mean error: {np.mean(err_vals_s):.4f}")
-        print(f"      RMSE: {np.sqrt(np.mean(err_vals_s**2)):.4f}")
-        print(f"      Max abs error: {np.max(np.abs(err_vals_s)):.4f}")
-
-print("\n" + "=" * 60)
-print("SUMMARY OF FINDINGS")
-print("=" * 60)
-print(f"1. Body displacement: Δx = {body_x_end - body_x_start:.4f}m, Δy = {body_y_end - body_y_start:.4f}m")
-print(f"   body_x range over test: [{bx_vals.min():.4f}, {bx_vals.max():.4f}]")
-print(f"   body_y range over test: [{by_vals.min():.4f}, {by_vals.max():.4f}]")
-
-# Count total swing cycles
-total_swings = {}
-for leg in LEGS:
-    pid_key = f"{leg}_phase_id"
-    count = 0
-    prev = rows[0][pid_key]
-    for r in rows:
-        if prev != 1 and r[pid_key] == 1:
-            count += 1
-        prev = r[pid_key]
-    total_swings[leg] = count
-print(f"2. Total detected swing cycles: {total_swings}")
-
-# IK branch switching summary
-ik_anomalies = sum(1 for leg in LEGS if leg_support_jumps[leg]["times"])
-print(f"4. {'⚠ IK branch switching suspected' if ik_anomalies > 0 else 'No evidence of IK branch switching detected'}")
-
-# Smoothness
-print(f"5. Swing trajectories appear {'smooth' if all(len(leg_support_jumps[leg]['times']) < 3 for leg in LEGS) else 'to be checked — see above for details'}")
-
-# Z tracking summary
-all_rmse = []
-for leg in LEGS:
-    pid_key = f"{leg}_phase_id"
-    cmd_z_key = f"{leg}_cmd_z"
-    ujc_z_key = f"{leg}_ujc_z"
-    errors = []
-    for r in rows:
-        if r[pid_key] == 1:
-            errors.append(r[ujc_z_key] - r[cmd_z_key])
-    if errors:
-        rmse = np.sqrt(np.mean(np.array(errors)**2))
-        all_rmse.append(rmse)
-        print(f"6. {leg.upper()} Z tracking RMSE during swing: {rmse:.4f}m")
-if all_rmse:
-    print(f"   Average Z tracking RMSE across legs: {np.mean(all_rmse):.4f}m")
+# Check if feet are moving during support (body drag)
+print(f"\n4. Foot drift during SUPPORT (should be ~0 if robot is rigid):")
+for leg in legs:
+    s = support_errors[leg]
+    dx_drift = max(abs(v) for v in s["dx"]) if s["dx"] else 0
+    dy_drift = max(abs(v) for v in s["dy"]) if s["dy"] else 0
+    dz_drift = max(abs(v) for v in s["dz"]) if s["dz"] else 0
+    print(f"   {leg}: dx_drift={dx_drift*1000:.1f}mm dy_drift={dy_drift*1000:.1f}mm dz_drift={dz_drift*1000:.1f}mm")

@@ -154,39 +154,26 @@ swing_leg_controller:
   clearance_m: 0.035
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
   swing_lift_normal_m: 0.01 
-  retraction_m: 0.015
-  touchdown_extension_m: 0.008
-  slip_clearance_gain: 0.5
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
   foot_delta_x_limit_m: 0.25
   foot_delta_y_limit_m: 0.25
   max_position_offset_m: [0.45, 0.35, 0.45]
-  max_velocity_mps: [0.30, 0.25, 0.30]
   feedforward_twist_gain: [0.16, 0.16, 0.0]
   body_position_gain: [0.70, 0.70, 0.35]
   body_velocity_gain: [0.12, 0.12, 0.08]
   body_angular_position_gain: [0.10, 0.10, 0.06]
   body_angular_velocity_gain: [0.02, 0.02, 0.01]
-  admittance_mass: [0.8, 0.8, 0.6]
-  admittance_damping: [18.0, 18.0, 16.0]
-  admittance_stiffness: [85.0, 85.0, 70.0]
   wall_normal_body: [0.0, 0.0, 1.0]
   # LIFT_SWING phases: retract + bezier swing to target
-  detach_contact_offset_m: 0.006
-  detach_slide_duration_s: 0.12
   tangential_align_duration_s: 0.28
   preload_duration_s: 0.16
   compliant_settle_timeout_s: 0.40
   preload_extra_normal_m: 0.004
   fan_attach_sink_m: 0.002
-  tangential_alignment_tolerance_m: 0.008
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
-  detach_velocity_limit_mps: [0.05, 0.05, 0.05]
-  tangential_velocity_limit_mps: [0.12, 0.12, 0.03]
-  preload_velocity_limit_mps: [0.04, 0.04, 0.03]
   compliant_velocity_limit_mps: [0.03, 0.03, 0.035]
   # ADMIT uses single-axis normal admittance driven by J^T F ~= tau_ext.
   compliant_normal_velocity_limit_mps: 0.035
