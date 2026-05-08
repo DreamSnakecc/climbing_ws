@@ -301,24 +301,21 @@ class FanSerialBridge(object):
             rospy.logwarn_throttle(2.0, "fan_serial_bridge leg %s is not present in command order", leg_name)
             return
 
-        # Record the desired target (holds the user's target even during soft-start ramp)
         self._desired_targets[leg_name] = float(msg.target_rpm)
-        self.leg_targets[leg_name] = {
-            "mode": int(msg.mode),
-            "target_rpm": float(msg.target_rpm),
-            "normal_force_limit": float(msg.normal_force_limit),
-            "required_adhesion_force": float(msg.required_adhesion_force),
-        }
+        self.leg_targets[leg_name]["mode"] = int(msg.mode)
+        self.leg_targets[leg_name]["normal_force_limit"] = float(msg.normal_force_limit)
+        self.leg_targets[leg_name]["required_adhesion_force"] = float(msg.required_adhesion_force)
 
         if self.protocol == "indexed_leg_rpm":
             fan_id = self.command_fan_ids[leg_name]
             self.send_leg_command(fan_id, msg.target_rpm)
             return
 
-        # total_rpm protocol: either soft-start ramp or direct send with forced resend
-        if self.soft_start_enabled:
-            self._soft_start_tick()  # kick-start the ramp
-        else:
+        # total_rpm: the soft-start timer or forced-resend logic on
+        # _send_total_rpm handles actual sending — don't send from callback
+        # to avoid burst-sending the same packet 4 times in <5ms.
+        if not self.soft_start_enabled:
+            self.leg_targets[leg_name]["target_rpm"] = float(msg.target_rpm)
             self._send_total_rpm()
 
     def _send_total_rpm(self):
@@ -360,11 +357,12 @@ class FanSerialBridge(object):
             self._send_total_rpm()
 
     def _soft_start_timer_cb(self, _event):
-        """Periodic callback to drive soft-start ramp when no new commands arrive."""
+        """Periodic callback: drives soft-start ramp and ensures forced resend."""
         if self.soft_start_enabled:
             self._soft_start_tick()
-        else:
-            self._send_total_rpm()
+        # Always attempt a send — _send_total_rpm's internal dedup
+        # (changed/stale check) prevents unnecessary serial writes.
+        self._send_total_rpm()
 
     def handle_set_fan_speed(self, req):
         accepted, message = self.send_rpm(req.target_rpm)
