@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import struct
+import time as _time
 
 import rospy
 from climbing_msgs.msg import AdhesionCommand
@@ -60,6 +61,18 @@ class FanSerialBridge(object):
         self.current_packet_size = len(self.current_frame_header) + self.current_payload_size
         self.stm32_packet_size = len(self.stm32_frame_header) + 1 + self.stm32_payload_length + self.stm32_checksum_size
 
+        # Soft-start: ramp up RPM gradually to limit inrush current
+        self.soft_start_enabled = bool(get_cfg("soft_start_enabled", True))
+        self.soft_start_step_rpm = float(get_cfg("soft_start_step_rpm", 5000.0))
+        self.soft_start_interval_s = float(get_cfg("soft_start_interval_s", 0.3))
+        self._desired_targets = dict(
+            (leg_name, 0.0) for leg_name in self.command_leg_order
+        )
+
+        # Forced resend: re-send same payload periodically even if unchanged
+        self.forced_resend_interval_s = float(get_cfg("forced_resend_interval_s", 0.5))
+        self._last_send_time = 0.0
+
         max_supported_legs = max(self.stm32_float_count // 2, 0)
         if self.leg_count > max_supported_legs:
             rospy.logwarn(
@@ -79,6 +92,11 @@ class FanSerialBridge(object):
         else:
             self.try_open_port()
         self.telemetry_timer = rospy.Timer(rospy.Duration(1.0 / max(self.telemetry_rate_hz, 1.0)), self.update_telemetry)
+
+        # Soft-start timer: drives ramp even without new adhesion commands
+        if self.soft_start_enabled:
+            soft_start_hz = max(1.0, 1.0 / max(self.soft_start_interval_s, 0.05))
+            rospy.Timer(rospy.Duration(1.0 / soft_start_hz), self._soft_start_timer_cb)
 
     @staticmethod
     def _parse_byte_list(values):
@@ -112,11 +130,12 @@ class FanSerialBridge(object):
 
     def _send_bytes(self, payload, log_value):
         if self.port is None:
-            rospy.logwarn_throttle(2.0, "fan serial port is not available; dropping command %.3f", log_value)
+            rospy.logwarn_throttle(2.0, "fan serial port is not available; dropping command %.3f", log_value or 0.0)
             return False, "serial port unavailable"
         try:
             self.port.write(payload)
-            self.echo_pub.publish(Float32(data=float(log_value)))
+            if log_value is not None:
+                self.echo_pub.publish(Float32(data=float(log_value)))
             return True, "command sent"
         except Exception as exc:
             rospy.logerr("Failed to send fan command: %s", exc)
@@ -254,13 +273,18 @@ class FanSerialBridge(object):
 
     def send_rpm(self, target_rpm):
         for leg_name in self.command_leg_order:
-            self.leg_targets[leg_name]["target_rpm"] = float(target_rpm)
+            self._desired_targets[leg_name] = float(target_rpm)
             self.leg_targets[leg_name]["mode"] = 1 if float(target_rpm) > 0.0 else 0
-        payload = self._pack_total_rpm_command()
-        accepted, message = self._send_bytes(payload, target_rpm)
-        if accepted:
-            self.last_total_payload = payload
-        return accepted, message
+        if not self.soft_start_enabled:
+            for leg_name in self.command_leg_order:
+                self.leg_targets[leg_name]["target_rpm"] = float(target_rpm)
+            payload = self._pack_total_rpm_command()
+            accepted, message = self._send_bytes(payload, target_rpm)
+            if accepted:
+                self.last_total_payload = payload
+                self._last_send_time = _time.time()
+            return accepted, message
+        return True, "ramp pending (soft-start active)"
 
     def send_leg_command(self, fan_id, target_rpm):
         payload = self._pack_indexed_leg_command(fan_id, target_rpm)
@@ -277,6 +301,8 @@ class FanSerialBridge(object):
             rospy.logwarn_throttle(2.0, "fan_serial_bridge leg %s is not present in command order", leg_name)
             return
 
+        # Record the desired target (holds the user's target even during soft-start ramp)
+        self._desired_targets[leg_name] = float(msg.target_rpm)
         self.leg_targets[leg_name] = {
             "mode": int(msg.mode),
             "target_rpm": float(msg.target_rpm),
@@ -289,11 +315,56 @@ class FanSerialBridge(object):
             self.send_leg_command(fan_id, msg.target_rpm)
             return
 
+        # total_rpm protocol: either soft-start ramp or direct send with forced resend
+        if self.soft_start_enabled:
+            self._soft_start_tick()  # kick-start the ramp
+        else:
+            self._send_total_rpm()
+
+    def _send_total_rpm(self):
+        """Build and send total RPM command with forced resend for reliability."""
         payload = self._pack_total_rpm_command()
-        if payload != self.last_total_payload:
-            accepted, _message = self._send_bytes(payload, msg.target_rpm)
+        now = _time.time()
+        changed = payload != self.last_total_payload
+        stale = (now - self._last_send_time) >= self.forced_resend_interval_s
+
+        if changed or stale:
+            # Log softly if this is a forced resend (no change)
+            accepted, _message = self._send_bytes(payload, 0.0 if not changed else None)
             if accepted:
                 self.last_total_payload = payload
+                self._last_send_time = now
+
+    def _soft_start_tick(self):
+        """
+        Ramp each leg's target_rpm toward _desired_targets in steps.
+        Called on each adhesion_callback and on the soft-start timer.
+        """
+        changed = False
+        for leg_name in self.command_leg_order:
+            current = self.leg_targets[leg_name]["target_rpm"]
+            desired = self._desired_targets[leg_name]
+
+            if abs(current - desired) < 1.0:
+                continue
+
+            if desired > current:
+                new_rpm = min(current + self.soft_start_step_rpm, desired)
+            else:
+                new_rpm = max(current - self.soft_start_step_rpm * 5, desired)
+
+            self.leg_targets[leg_name]["target_rpm"] = new_rpm
+            changed = True
+
+        if changed:
+            self._send_total_rpm()
+
+    def _soft_start_timer_cb(self, _event):
+        """Periodic callback to drive soft-start ramp when no new commands arrive."""
+        if self.soft_start_enabled:
+            self._soft_start_tick()
+        else:
+            self._send_total_rpm()
 
     def handle_set_fan_speed(self, req):
         accepted, message = self.send_rpm(req.target_rpm)
