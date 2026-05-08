@@ -71,6 +71,16 @@ fan_controller:
   current_leg_order: [lf, rf, rr, lr]
   current_scale: 1.0
 
+  # Soft-start: ramp RPM gradually to limit inrush current when multiple
+  # fans start simultaneously.  Each fan steps up by step_rpm every interval_s.
+  soft_start_enabled: true
+  soft_start_step_rpm: 5000
+  soft_start_interval_s: 0.3
+
+  # Forced resend: re-send the same command packet periodically even when
+  # RPM targets haven't changed, to guard against STM32-side packet loss.
+  forced_resend_interval_s: 0.5
+
 wall:
   default_friction_coefficient: 0.5
   max_normal_force_n: 150.0
