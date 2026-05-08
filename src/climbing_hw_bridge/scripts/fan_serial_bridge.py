@@ -312,7 +312,7 @@ class FanSerialBridge(object):
             return
 
         # total_rpm: the soft-start timer or forced-resend logic on
-        # _send_total_rpm handles actual sending — don't send from callback
+        # _send_total_rpm handles actual sending -- don't send from callback
         # to avoid burst-sending the same packet 4 times in <5ms.
         if not self.soft_start_enabled:
             self.leg_targets[leg_name]["target_rpm"] = float(msg.target_rpm)
@@ -360,7 +360,7 @@ class FanSerialBridge(object):
         """Periodic callback: drives soft-start ramp and ensures forced resend."""
         if self.soft_start_enabled:
             self._soft_start_tick()
-        # Always attempt a send — _send_total_rpm's internal dedup
+        # Always attempt a send -- _send_total_rpm's internal dedup
         # (changed/stale check) prevents unnecessary serial writes.
         self._send_total_rpm()
 
