@@ -716,6 +716,12 @@ class SwingLegController(object):
         body_velocity_term = vector_mul(self.body_velocity_gain, self._body_velocity_error())
         feedforward_term = vector_mul(self.feedforward_twist_gain, desired_twist)
 
+        # each swing cycle. Keep Z for normal force correction.
+        body_position_term[0] = 0.0
+        body_position_term[1] = 0.0
+        body_velocity_term[0] = 0.0
+        body_velocity_term[1] = 0.0
+
         angular_error = self._body_angular_position_error()
         angular_velocity_error = self._body_angular_velocity_error()
         angular_term = vector_add(
@@ -741,10 +747,13 @@ class SwingLegController(object):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
         support_target = self._operating_center_command(leg_name)
+        if self.have_body_reference:
+            support_target[0] -= self.body_reference.pose.position.x
+            support_target[1] -= self.body_reference.pose.position.y
         target = [
             support_target[0] + target_delta[0],
             support_target[1] + target_delta[1],
-            support_target[2] + target_delta[2],
+            support_target[2],
         ]
         start = list(state["position"])
         start_normal = vector_dot(start, self.wall_normal_body)
@@ -756,7 +765,7 @@ class SwingLegController(object):
 
         state["start"] = list(start)
         state["target"] = list(target)
-        state["support_target"] = list(self._operating_center_command(leg_name))
+        state["support_target"] = list(support_target)
         state["lift_swing_target"] = self._clamp_position(swing_target, state["support_target"])
         state["preload_target"] = self._clamp_position(preload_target, state["support_target"])
         state["attach_target"] = self._clamp_position(attach_target, state["support_target"])

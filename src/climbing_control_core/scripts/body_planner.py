@@ -100,6 +100,14 @@ class BodyPlanner(object):
         self._swing_progression = [0.0, 0.0, 0.0]   # cumulative body progression (m) contributed by completed swings
         self._leg_support_state = {leg: True for leg in self.leg_names}  # from swing_leg_target
         self._all_hold_start_time = None     # when ALL_HOLD was entered (for dwell)
+        # Guard against stale support_leg=True messages that race with self-acknowledge.
+        # The self-acknowledge sets _leg_support_state[leg]=False immediately, but
+        # swing_leg_controller may still have in-flight messages with support_leg=True
+        # that arrive later. To distinguish a genuine support transition from stale
+        # messages, we track whether a real support_leg=False message has been received
+        # from the controller. Only after receiving the False confirmation do we
+        # treat subsequent support_leg=True as a valid swing completion signal.
+        self._swing_confirmed = {leg: True for leg in self.leg_names}  # False after self-acknowledge; set True on controller's False
 
         self.pub = rospy.Publisher("/control/body_reference", BodyReference, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -131,12 +139,26 @@ class BodyPlanner(object):
             self._swing_start_time = None
             self._swing_progression = [0.0, 0.0, 0.0]
             self._leg_support_state = {leg: True for leg in self.leg_names}
+            self._swing_confirmed = {leg: True for leg in self.leg_names}
         self.mission_active = now_active
 
     def swing_target_callback(self, msg):
-        """Track per-leg support state from swing_leg_controller output."""
+        """Track per-leg support state from swing_leg_controller output.
+        Uses state-machine guard: support_leg=True is only accepted as a valid
+        swing-completion signal AFTER the controller has confirmed support_leg=False
+        (i.e. the swing has actually started). Stale True messages from before
+        the swing starts are ignored.
+        """
         if msg.leg_name in self._leg_support_state:
-            self._leg_support_state[msg.leg_name] = bool(msg.support_leg)
+            new_support = bool(msg.support_leg)
+            if new_support:
+                # support_leg=True is only valid if we've seen a False confirmation
+                if self._swing_confirmed[msg.leg_name]:
+                    self._leg_support_state[msg.leg_name] = True
+            else:
+                # Controller confirms it started swinging — allow future True to pass
+                self._leg_support_state[msg.leg_name] = False
+                self._swing_confirmed[msg.leg_name] = True
 
     def _gait_mode_id(self):
         if self.gait == "trot":
@@ -231,6 +253,7 @@ class BodyPlanner(object):
                 # swing_leg_controller's reply, causing the swing to be cancelled
                 # before it even starts.
                 self._leg_support_state[swing_leg] = False
+                self._swing_confirmed[swing_leg] = False  # reset: wait for controller's False
                 # Build mask: only the swing leg is False
                 mask = [True] * len(self.leg_names)
                 mask[self.leg_names.index(swing_leg)] = False
