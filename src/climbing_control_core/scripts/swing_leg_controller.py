@@ -711,7 +711,7 @@ class SwingLegController(object):
             raibert_time * (estimated_twist[1] - desired_twist[1]) + self.raibert_velocity_gain * stance_time * desired_twist[1],
             0.0,
         ]
-
+        
         body_position_term = vector_mul(self.body_position_gain, self._body_position_error())
         body_velocity_term = vector_mul(self.body_velocity_gain, self._body_velocity_error())
         feedforward_term = vector_mul(self.feedforward_twist_gain, desired_twist)
@@ -734,7 +734,7 @@ class SwingLegController(object):
         raw_target = vector_add(raibert_delta, feedforward_term)
         raw_target = vector_add(raw_target, body_position_term)
         raw_target = vector_add(raw_target, body_velocity_term)
-        raw_target = vector_add(raw_target, angular_correction)
+        # raw_target = vector_add(raw_target, angular_correction)
         raw_target = vector_add(raw_target, slip_bias)
 
         return [
@@ -755,12 +755,13 @@ class SwingLegController(object):
             support_target[1] + target_delta[1],
             support_target[2],
         ]
+        
         start = list(state["position"])
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
 
         swing_target = self._compose_tangent_and_normal(target, start_normal + self.swing_lift_normal_m)
-        preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)
+        preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)     
         attach_target = list(preload_target)
 
         state["start"] = list(start)

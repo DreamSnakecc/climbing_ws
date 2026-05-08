@@ -151,7 +151,7 @@ state_logger:
 swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
-  clearance_m: 0.035
+  clearance_m: 0.01
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
   swing_lift_normal_m: 0.01 
   raibert_height_gain: 1.0
