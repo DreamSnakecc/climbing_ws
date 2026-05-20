@@ -75,7 +75,7 @@ fan_controller:
   # fans start simultaneously.  Each fan steps up by step_rpm every interval_s.
   soft_start_enabled: true
   soft_start_step_rpm: 5000
-  soft_start_interval_s: 0.3
+  soft_start_interval_s: 0.2
 
   # Forced resend: re-send the same command packet periodically even when
   # RPM targets haven't changed, to guard against STM32-side packet loss.
