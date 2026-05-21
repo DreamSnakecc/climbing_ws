@@ -446,7 +446,11 @@ class CrawlGaitWithFanTester(object):
             rospy.sleep(0.05)
 
     def _fan_sequential_off(self):
-        """Turn off fans one by one with delay to avoid simultaneous current surge."""
+        """Turn off fans one by one with delay to avoid simultaneous current surge.
+        
+        Uses time.sleep() instead of rospy.sleep() because after test ends,
+        ROS clock may be unreliable and rospy.sleep() can block indefinitely.
+        """
         rospy.loginfo("test_crawl_gait_with_fan: sequential fan shutdown...")
         for idx, leg in enumerate(LEG_NAMES):
             msg = AdhesionCommand()
@@ -457,10 +461,10 @@ class CrawlGaitWithFanTester(object):
             msg.normal_force_limit = 0.0
             msg.required_adhesion_force = 0.0
             self._adhesion_pub.publish(msg)
-            rospy.sleep(0.3)
+            time.sleep(1.0)
             rospy.loginfo("  %s fan: OFF", leg)
         # Send one more round to ensure delivery
-        rospy.sleep(0.1)
+        time.sleep(0.1)
         for idx in range(4):
             msg = AdhesionCommand()
             msg.header.stamp = rospy.Time.now()
@@ -693,8 +697,8 @@ class CrawlGaitWithFanTester(object):
                     break
             rospy.sleep(0.1)
 
-        # Sequential fan shutdown to avoid simultaneous current surge
-        self._fan_sequential_off()
+        # Note: fans remain on (suction holds robot on wall).
+        # Remove this comment if sequential shutdown becomes needed again.
 
         self._close_csv()
         self._print_summary()
@@ -799,10 +803,7 @@ def main():
             tester._publish_pause()
         except Exception:  # pylint: disable=broad-except
             pass
-        try:
-            tester._fan_sequential_off()
-        except Exception:  # pylint: disable=broad-except
-            pass
+        # Fans stay on: mission_supervisor in PAUSE uses release_rpm=5000.
         tester._close_csv()
     finally:
         tester._close_csv()
