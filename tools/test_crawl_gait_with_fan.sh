@@ -140,9 +140,9 @@ wait_for_node() {
 }
 
 echo "=== test_crawl_gait_with_fan: waiting for nodes ==="
-wait_for_node "fan_serial_bridge"     "fan_serial_bridge"
+wait_for_node "fan_serial_bridge"     "fan_serial_bridge (Jetson)"
 wait_for_node "mission_supervisor"    "mission_supervisor"
-wait_for_node "gait_controller"       "gait_controller"
+wait_for_node "swing_leg_controller"  "swing_leg_controller"
 echo ""
 
 # ---------------------------------------------------------------------------

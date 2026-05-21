@@ -181,6 +181,7 @@ swing_leg_controller:
   compliant_settle_timeout_s: 0.40
   preload_extra_normal_m: 0.004
   fan_attach_sink_m: 0.002
+  fan_off_dwell_s: 0.5
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
