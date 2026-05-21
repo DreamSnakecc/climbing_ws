@@ -210,7 +210,7 @@ dynamixel_telemetry:
   current_service: /get_current
   current_lsb_ma: 2.69
   support_operating_mode: 5
-  default_operating_mode_marker: 255
+  default_operating_mode_marker: 255 
   jacobian_delta_rad: 0.001
   support_current_margin_a: 0.08
   max_goal_current_a: 4.8

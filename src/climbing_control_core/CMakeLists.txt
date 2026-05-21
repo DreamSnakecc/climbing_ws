@@ -21,6 +21,7 @@ catkin_install_python(PROGRAMS
   scripts/state_logger.py
   scripts/test_swing_admittance.py
   scripts/test_crawl_gait.py
+  scripts/test_crawl_gait_with_fan.py
   scripts/test_single_leg_swing.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
