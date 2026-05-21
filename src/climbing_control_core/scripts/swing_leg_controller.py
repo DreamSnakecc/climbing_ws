@@ -169,6 +169,7 @@ class SwingLegController(object):
         self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.005)), 0.0)
         self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
         self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 0.5)), 0.0)
+        self.fan_off_rpm_threshold = float(get_cfg("fan_off_rpm_threshold", 10000.0))
         self.normal_alignment_tolerance_m = max(float(get_cfg("normal_alignment_tolerance_m", 0.002)), 1e-4)
         self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)
         self.attach_normal_force_limit_n = max(float(get_cfg("attach_normal_force_limit_n", 25.0)), 0.0)
@@ -253,6 +254,8 @@ class SwingLegController(object):
         self.mission_state = "INIT"
         self.swing_phase_start = {}
         self._fan_off_request_time = {}  # leg_name -> time when fan-off was requested
+        self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]  # [lf, rf, rr, lr]
+        self._fan_rpm_timeout_s = 3.0  # max wait for RPM check fallback
         self.swing_states = {}
         for leg_name in self.leg_names:
             nominal = self._operating_center_command(leg_name)
@@ -308,6 +311,16 @@ class SwingLegController(object):
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
         rospy.Subscriber("/control/mission_state", String, self._mission_state_callback, queue_size=10)
+        rospy.Subscriber(
+            "/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray,
+            self._fan_rpm_callback, queue_size=10,
+        )
+
+    def _fan_rpm_callback(self, msg):
+        values = [float(v) for v in msg.data[:4]]
+        while len(values) < 4:
+            values.append(0.0)
+        self._latest_fan_rpm = values
 
     def _mission_state_callback(self, msg):
         try:
@@ -1007,8 +1020,22 @@ class SwingLegController(object):
                             )
                             continue
                         else:
-                            # Dwell complete, clear request and start swing
+                            # Dwell time elapsed, check fan RPM as best-effort.
+                            # Fan may not reach swing_release_rpm due to minimum
+                            # stable speed (~29750 RPM). Log improvement but
+                            # proceed regardless to avoid stalling the gait.
+                            leg_idx = self.leg_names.index(leg_name)
+                            actual_rpm = abs(self._latest_fan_rpm[leg_idx])
                             self._fan_off_request_time.pop(leg_name, None)
+                            if actual_rpm > self.fan_off_rpm_threshold:
+                                rospy.loginfo_throttle(
+                                    5.0,
+                                    "%s fan at %.0f RPM (>%d), swing proceeds "
+                                    "(dwell=%.1fs)",
+                                    leg_name, actual_rpm,
+                                    self.fan_off_rpm_threshold,
+                                    self.fan_off_dwell_s,
+                                )
                     self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
