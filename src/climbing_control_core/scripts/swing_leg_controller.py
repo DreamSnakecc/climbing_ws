@@ -168,7 +168,7 @@ class SwingLegController(object):
         self.compliant_settle_timeout_s = max(float(get_cfg("compliant_settle_timeout_s", 0.40)), 0.05)
         self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.005)), 0.0)
         self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
-        self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 0.5)), 0.0)
+        self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 1.0)), 0.0)
         self.fan_off_rpm_threshold = float(get_cfg("fan_off_rpm_threshold", 10000.0))
         self.normal_alignment_tolerance_m = max(float(get_cfg("normal_alignment_tolerance_m", 0.002)), 1e-4)
         self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)

@@ -36,8 +36,8 @@ mission_supervisor:
   adhesion_required_count: 4
   attach_rpm: 35000.0
   climb_rpm: 35000.0
-  pause_rpm: 35000.0
-  fault_rpm: 35000.0
+  # pause_rpm: 35000.0
+  # fault_rpm: 35000.0
   release_rpm: 0.0
   swing_release_rpm: 0.0
 
@@ -46,8 +46,8 @@ mission_supervisor:
   default_normal_force_limit: 150.0
   # Fan activation for swing leg: mission_supervisor detects normal_force_limit >= attach_normal_force_limit_n
   adhesion_force_reference_n: 100.0
-  adhesion_rpm_min_scale: 0.85
-  adhesion_rpm_max_scale: 1.35
+  adhesion_rpm_min_scale: 1    #0.85
+  adhesion_rpm_max_scale: 1    #1.35
   # Swing-leg attachment via normal_force_limit trigger
   leg_count: 4
   leg_names: [lf, rf, rr, lr]

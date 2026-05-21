@@ -9,8 +9,6 @@ class MissionSupervisor(object):
     STATE_INIT = "INIT"
     STATE_STICK = "STICK"
     STATE_CLIMB = "CLIMB"
-    STATE_PAUSE = "PAUSE"
-    STATE_FAULT = "FAULT"
 
     def __init__(self):
         rospy.init_node("mission_supervisor", anonymous=False)
@@ -21,33 +19,20 @@ class MissionSupervisor(object):
         self.rate_hz = float(get_cfg("publish_rate_hz", 20.0))
         self.auto_start = bool(get_cfg("auto_start", True))
         self.enable_auto_adhesion_commands = bool(get_cfg("enable_auto_adhesion_commands", True))
-        self.auto_resume = bool(get_cfg("auto_resume", False))
         self.init_duration_s = max(float(get_cfg("init_duration_s", 1.0)), 0.0)
-        self.stick_timeout_s = max(float(get_cfg("stick_timeout_s", 3.0)), 0.1)
-        self.pause_on_safe_mode = bool(get_cfg("pause_on_safe_mode", True))
-        self.pause_on_high_slip = bool(get_cfg("pause_on_high_slip", True))
-        self.pause_on_adhesion_loss = bool(get_cfg("pause_on_adhesion_loss", True))
-        self.high_slip_threshold = float(get_cfg("high_slip_threshold", 0.92))
         self.adhesion_required_count = int(get_cfg("adhesion_required_count", 4))
         self.attach_rpm = float(get_cfg("attach_rpm", 3200.0))
         self.climb_rpm = float(get_cfg("climb_rpm", 3200.0))
-        self.pause_rpm = float(get_cfg("pause_rpm", 3200.0))
-        self.fault_rpm = float(get_cfg("fault_rpm", 3400.0))
         self.release_rpm = float(get_cfg("release_rpm", 0.0))
         self.swing_release_rpm = float(get_cfg("swing_release_rpm", 0.0))
         self.touchdown_rpm = float(get_cfg("touchdown_rpm", 3400.0))
         self.touchdown_boost_duration_s = max(float(get_cfg("touchdown_boost_duration_s", 0.25)), 0.0)
-        self.swing_duration_s = max(float(get_cfg("swing_duration_s", rospy.get_param("/swing_leg_controller/swing_duration_s", 0.65))), 0.1)
         self.default_normal_force_limit = float(get_cfg("default_normal_force_limit", rospy.get_param("/wall/max_normal_force_n", 150.0)))
-        self.preload_normal_force_limit_n = float(
-            get_cfg("preload_normal_force_limit_n", rospy.get_param("/swing_leg_controller/preload_normal_force_limit_n", 15.0))
-        )
         self.attach_normal_force_limit_n = float(
             get_cfg("attach_normal_force_limit_n", rospy.get_param("/swing_leg_controller/attach_normal_force_limit_n", 25.0)))
         self.adhesion_force_reference_n = max(float(get_cfg("adhesion_force_reference_n", 35.0)), 1e-3)
         self.adhesion_rpm_min_scale = float(get_cfg("adhesion_rpm_min_scale", 0.85))
         self.adhesion_rpm_max_scale = max(float(get_cfg("adhesion_rpm_max_scale", 1.35)), self.adhesion_rpm_min_scale)
-        self.leg_count = int(get_cfg("leg_count", 4))
         self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
 
         self.state = self.STATE_INIT
@@ -55,10 +40,8 @@ class MissionSupervisor(object):
         self.last_state_pub = None
         self.last_estimated_state = EstimatedState()
         self.has_estimated_state = False
-        self.jetson_safe_mode = False
         self.manual_pause = False
         self.start_requested = self.auto_start
-        self.reset_fault_requested = False
         self.leg_support_state = {leg_name: True for leg_name in self.leg_names}
         self.leg_support_transition_time = {leg_name: rospy.Time.now() for leg_name in self.leg_names}
         self.leg_last_normal_force_limit = {leg_name: self.default_normal_force_limit for leg_name in self.leg_names}
@@ -71,10 +54,8 @@ class MissionSupervisor(object):
         self.adhesion_pub = rospy.Publisher("/jetson/fan_serial_bridge/adhesion_command", AdhesionCommand, queue_size=20)
 
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
-        rospy.Subscriber("/jetson/local_safety_supervisor/safe_mode", Bool, self.safe_mode_callback, queue_size=20)
         rospy.Subscriber("/control/mission_pause", Bool, self.pause_callback, queue_size=20)
         rospy.Subscriber("/control/mission_start", Bool, self.start_callback, queue_size=20)
-        rospy.Subscriber("/control/mission_reset_fault", Bool, self.reset_fault_callback, queue_size=20)
         rospy.Subscriber("/control/swing_leg_target", LegCenterCommand, self.swing_target_callback, queue_size=50)
         for leg_name in self.leg_names:
             rospy.Subscriber(
@@ -91,17 +72,11 @@ class MissionSupervisor(object):
         self.last_estimated_state = msg
         self.has_estimated_state = True
 
-    def safe_mode_callback(self, msg):
-        self.jetson_safe_mode = bool(msg.data)
-
     def pause_callback(self, msg):
         self.manual_pause = bool(msg.data)
 
     def start_callback(self, msg):
         self.start_requested = bool(msg.data)
-
-    def reset_fault_callback(self, msg):
-        self.reset_fault_requested = bool(msg.data)
 
     def swing_target_callback(self, msg):
         if msg.leg_name not in self.leg_support_state:
@@ -119,7 +94,7 @@ class MissionSupervisor(object):
             leg_name = msg.leg_name
             if leg_name not in self.leg_required_adhesion_force:
                 return
-        self.leg_last_normal_force_limit[leg_name] = float(msg.normal_force_limit) if msg.normal_force_limit > 0.0 else self.default_normal_force_limit
+        
         self.leg_required_adhesion_force[leg_name] = max(float(msg.required_adhesion_force), 0.0)
 
     def _set_state(self, new_state):
@@ -137,22 +112,6 @@ class MissionSupervisor(object):
         if not self.has_estimated_state:
             return 0
         return sum([1 for value in self.last_estimated_state.attachment_ready_mask if bool(value)])
-
-    def _max_slip_risk(self):
-        if not self.has_estimated_state or len(self.last_estimated_state.slip_risk) == 0:
-            return 0.0
-        return max([float(value) for value in self.last_estimated_state.slip_risk])
-
-    def _adhesion_loss_detected(self):
-        if not self.has_estimated_state:
-            return False
-        support_mask = list(self.last_estimated_state.support_mask)
-        attachment_ready_mask = list(self.last_estimated_state.attachment_ready_mask)
-        paired_count = min(len(support_mask), len(attachment_ready_mask))
-        for index in range(paired_count):
-            if bool(support_mask[index]) and not bool(attachment_ready_mask[index]):
-                return True
-        return False
 
     def _publish_state(self, force=False):
         if force or self.last_state_pub != self.state:
@@ -176,15 +135,13 @@ class MissionSupervisor(object):
         return base_rpm * scale
 
     def _leg_fan_target(self, leg_name):
-        if self.state in (self.STATE_INIT, self.STATE_PAUSE):
+        if self.state == self.STATE_INIT:
             return 0, self.release_rpm
         if self.state == self.STATE_STICK:
             return 1, self._scale_rpm_by_required_adhesion(self.attach_rpm, leg_name)
-        if self.state == self.STATE_FAULT:
-            return 2, self._scale_rpm_by_required_adhesion(self.fault_rpm, leg_name)
 
+        # CLIMB
         support_leg = bool(self.leg_support_state.get(leg_name, True))
-
         if support_leg:
             elapsed = self._leg_support_elapsed(leg_name)
             if elapsed <= self.touchdown_boost_duration_s:
@@ -213,18 +170,9 @@ class MissionSupervisor(object):
             self.adhesion_pub.publish(msg)
 
     def _update_state_machine(self):
-        if self.state == self.STATE_FAULT:
-            if self.reset_fault_requested and not self.jetson_safe_mode:
-                self.reset_fault_requested = False
-                self._set_state(self.STATE_INIT)
-            return
-
-        if self.pause_on_safe_mode and self.jetson_safe_mode:
-            self._set_state(self.STATE_FAULT)
-            return
-
         if self.manual_pause:
-            self._set_state(self.STATE_PAUSE)
+            self.manual_pause = False
+            self._set_state(self.STATE_STICK)
             return
 
         if self.state == self.STATE_INIT:
@@ -235,36 +183,10 @@ class MissionSupervisor(object):
         if self.state == self.STATE_STICK:
             if self._adhesion_count() >= self.adhesion_required_count:
                 self._set_state(self.STATE_CLIMB)
-                return
-            if self._state_elapsed() >= self.stick_timeout_s:
-                self._set_state(self.STATE_FAULT)
             return
 
         if self.state == self.STATE_CLIMB:
-            if self.pause_on_high_slip and self._max_slip_risk() >= self.high_slip_threshold:
-                self._set_state(self.STATE_PAUSE)
-                return
-            if self.pause_on_adhesion_loss and self._adhesion_loss_detected():
-                self._set_state(self.STATE_PAUSE)
             return
-
-        if self.state == self.STATE_PAUSE:
-            if self.pause_on_safe_mode and self.jetson_safe_mode:
-                self._set_state(self.STATE_FAULT)
-                return
-            if not self.manual_pause and self.auto_resume and self._max_slip_risk() < self.high_slip_threshold:
-                self._set_state(self.STATE_STICK)
-
-    def _state_rpm(self):
-        if self.state == self.STATE_INIT:
-            return self.release_rpm
-        if self.state == self.STATE_STICK:
-            return self.attach_rpm
-        if self.state == self.STATE_CLIMB:
-            return self.climb_rpm
-        if self.state == self.STATE_PAUSE:
-            return self.pause_rpm
-        return self.fault_rpm
 
     def spin(self):
         rate = rospy.Rate(self.rate_hz)

@@ -475,6 +475,28 @@ class CrawlGaitWithFanTester(object):
             msg.required_adhesion_force = 0.0
             self._adhesion_pub.publish(msg)
 
+    def _publish_fan_state(self):
+        """Control fans directly based on swing leg detection.
+        
+        Call this in the recording loop to actively control fans per leg.
+        Swing leg gets --fan-swing-rpm, support legs get --fan-target-rpm.
+        Requires mission_supervisor enable_auto_adhesion_commands=false.
+        """
+        with self._lock:
+            swings = dict(self._latest_swing_targets)
+        for idx, leg in enumerate(LEG_NAMES):
+            cmd = swings.get(leg)
+            is_support = cmd is None or bool(cmd.support_leg)
+            rpm = self.args.fan_target_rpm if is_support else self.args.fan_swing_rpm
+            msg = AdhesionCommand()
+            msg.header.stamp = rospy.Time.now()
+            msg.leg_index = idx
+            msg.mode = 0 if rpm <= 0.0 else 1
+            msg.target_rpm = float(rpm)
+            msg.normal_force_limit = 150.0
+            msg.required_adhesion_force = 100.0
+            self._adhesion_pub.publish(msg)
+
     # ------------------------------------------------------------------ #
     # CSV (simplified unified format)
     # ------------------------------------------------------------------ #
@@ -674,6 +696,10 @@ class CrawlGaitWithFanTester(object):
             if state == STATE_FAULT:
                 rospy.logerr("test_crawl_gait_with_fan: FAULT during CLIMB; aborting.")
                 break
+
+            # Direct fan control based on swing state
+            self._publish_fan_state()
+
             row = self._sample_row()
             try:
                 self._csv_writer.writerow(row)
@@ -787,6 +813,14 @@ def parse_args(argv):
     parser.add_argument(
         "--no-confirm", action="store_true",
         help="Skip manual confirmation (unattended batch mode)",
+    )
+    parser.add_argument(
+        "--fan-target-rpm", type=float, default=35000.0,
+        help="Fan RPM when leg is in support (default 35000)",
+    )
+    parser.add_argument(
+        "--fan-swing-rpm", type=float, default=0.0,
+        help="Fan RPM when leg is swinging (default 0, fully off)",
     )
     return parser.parse_args(argv)
 
