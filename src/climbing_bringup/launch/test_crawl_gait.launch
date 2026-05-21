@@ -57,7 +57,7 @@
   <param name="/swing_leg_controller/raibert_velocity_gain" value="1.5" type="double" />
   <param name="/swing_leg_controller/fan_off_dwell_s" value="0.5" type="double" />
   <param name="/swing_leg_controller/tangential_align_duration_s" value="0.5" type="double" />
-  <param name="/swing_leg_controller/clearance_m" value="0.015" type="double" />
+  <param name="/swing_leg_controller/clearance_m" value="0.025" type="double" />
   <param name="/mission_supervisor/adhesion_required_count" value="4" type="int" />
   <param name="/mission_supervisor/auto_start" value="false" />
   <!-- Disable current-force control on dynamixel_bridge so supporting legs

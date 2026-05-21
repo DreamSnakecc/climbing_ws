@@ -870,6 +870,7 @@ class SwingLegController(object):
                 support_leg = False
             if phase_elapsed >= self.compliant_settle_timeout_s and not support_leg:
                 support_leg = True
+                self._freeze_compliant_state(state, cmd_position)
             normal_force_limit = self.attach_normal_force_limit_n
 
         else:

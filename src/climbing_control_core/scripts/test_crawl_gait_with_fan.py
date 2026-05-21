@@ -483,7 +483,7 @@ class CrawlGaitWithFanTester(object):
             "wall_time", "elapsed_s",
             "mission_state", "mission_active",
             "swing_leg", "swing_cycle_idx",
-            "body_vx",
+            "body_vx", "est_vx",
         ]
         for leg in LEG_NAMES:
             cols.extend([
@@ -540,10 +540,13 @@ class CrawlGaitWithFanTester(object):
         wall_time = time.time()
         elapsed = self._rel_now()
 
-        # body forward velocity
+        # body forward velocity (commanded vs estimated)
         body_vx = 0.0
+        est_vx = 0.0
         if body is not None:
             body_vx = float(body.twist.linear.x)
+        if est is not None:
+            est_vx = float(est.twist.linear.x)
 
         # detect current swing leg
         new_swing_leg = self._detect_swing_leg(swings)
@@ -587,6 +590,7 @@ class CrawlGaitWithFanTester(object):
             self._current_swing_leg,
             self._swing_cycle_idx,
             "%.4f" % body_vx,
+            "%.4f" % est_vx,
         ]
 
         for leg_index, leg in enumerate(LEG_NAMES):
