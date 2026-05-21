@@ -44,6 +44,7 @@ import rospy
 from std_msgs.msg import Bool, Float32MultiArray, String
 
 from climbing_msgs.msg import (
+    AdhesionCommand,
     BodyReference,
     EstimatedState,
     LegCenterCommand,
@@ -90,6 +91,11 @@ class CrawlGaitWithFanTester(object):
         )
         self._mission_pause_pub = rospy.Publisher(
             "/control/mission_pause", Bool, queue_size=2,
+        )
+        self._adhesion_pub = rospy.Publisher(
+            "/jetson/fan_serial_bridge/adhesion_command",
+            AdhesionCommand,
+            queue_size=20,
         )
 
         # Initialize timing markers BEFORE creating subscribers so that
@@ -439,6 +445,32 @@ class CrawlGaitWithFanTester(object):
             self._mission_pause_pub.publish(Bool(data=True))
             rospy.sleep(0.05)
 
+    def _fan_sequential_off(self):
+        """Turn off fans one by one with delay to avoid simultaneous current surge."""
+        rospy.loginfo("test_crawl_gait_with_fan: sequential fan shutdown...")
+        for idx, leg in enumerate(LEG_NAMES):
+            msg = AdhesionCommand()
+            msg.header.stamp = rospy.Time.now()
+            msg.leg_index = idx
+            msg.mode = 0  # RELEASE
+            msg.target_rpm = 0.0
+            msg.normal_force_limit = 0.0
+            msg.required_adhesion_force = 0.0
+            self._adhesion_pub.publish(msg)
+            rospy.sleep(0.3)
+            rospy.loginfo("  %s fan: OFF", leg)
+        # Send one more round to ensure delivery
+        rospy.sleep(0.1)
+        for idx in range(4):
+            msg = AdhesionCommand()
+            msg.header.stamp = rospy.Time.now()
+            msg.leg_index = idx
+            msg.mode = 0
+            msg.target_rpm = 0.0
+            msg.normal_force_limit = 0.0
+            msg.required_adhesion_force = 0.0
+            self._adhesion_pub.publish(msg)
+
     # ------------------------------------------------------------------ #
     # CSV (simplified unified format)
     # ------------------------------------------------------------------ #
@@ -661,6 +693,9 @@ class CrawlGaitWithFanTester(object):
                     break
             rospy.sleep(0.1)
 
+        # Sequential fan shutdown to avoid simultaneous current surge
+        self._fan_sequential_off()
+
         self._close_csv()
         self._print_summary()
         return 0 if not self._fault_seen else 6
@@ -762,6 +797,10 @@ def main():
         code = 130
         try:
             tester._publish_pause()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        try:
+            tester._fan_sequential_off()
         except Exception:  # pylint: disable=broad-except
             pass
         tester._close_csv()

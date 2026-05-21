@@ -833,7 +833,9 @@ class SwingLegController(object):
             cmd_velocity = [0.0, 0.0, 0.0]
             if phase_elapsed >= lift_duration:
                 self._set_phase(state, self.PHASE_PRELOAD, now_sec)
-            normal_force_limit = 0.0
+            # Use tiny positive value so mission_supervisor does NOT replace
+            # with default_normal_force_limit (150N) which would keep fan ON.
+            normal_force_limit = 0.001
             support_leg = False
 
         elif phase == self.PHASE_PRELOAD:
@@ -985,7 +987,10 @@ class SwingLegController(object):
                             # First cycle: request fan off, stay at operating position
                             self._fan_off_request_time[leg_name] = now_sec
                             op_pos = self._operating_center_command(leg_name)
-                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.0)
+                            # Use tiny positive normal_force_limit so mission_supervisor
+                            # does NOT replace it with default_normal_force_limit (150N)
+                            # which would trigger fan-ON via attach threshold check.
+                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
                             self._publish_leg_diagnostic(
                                 leg_name, leg_index, op_pos, now_sec,
@@ -994,7 +999,7 @@ class SwingLegController(object):
                         elif now_sec - fan_off_time < self.fan_off_dwell_s:
                             # Still waiting for fan to spin down
                             op_pos = self._operating_center_command(leg_name)
-                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.0)
+                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
                             self._publish_leg_diagnostic(
                                 leg_name, leg_index, op_pos, now_sec,
