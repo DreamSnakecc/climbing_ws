@@ -505,7 +505,7 @@ class CrawlGaitWithFanTester(object):
             "wall_time", "elapsed_s",
             "mission_state", "mission_active",
             "swing_leg", "swing_cycle_idx",
-            "body_vx", "est_vx",
+            "body_x", "body_vx", "est_vx",
         ]
         for leg in LEG_NAMES:
             cols.extend([
@@ -513,6 +513,7 @@ class CrawlGaitWithFanTester(object):
                 "%s_fan_rpm" % leg,
                 "%s_fan_current_a" % leg,
                 "%s_attachment_ready" % leg,
+                "%s_ujc_x" % leg,
                 "%s_ujc_z" % leg,
             ])
         return cols
@@ -563,9 +564,11 @@ class CrawlGaitWithFanTester(object):
         elapsed = self._rel_now()
 
         # body forward velocity (commanded vs estimated)
+        body_x = 0.0
         body_vx = 0.0
         est_vx = 0.0
         if body is not None:
+            body_x = float(body.pose.position.x)
             body_vx = float(body.twist.linear.x)
         if est is not None:
             est_vx = float(est.twist.linear.x)
@@ -611,6 +614,7 @@ class CrawlGaitWithFanTester(object):
             int(bool(mission_active)),
             self._current_swing_leg,
             self._swing_cycle_idx,
+            "%.4f" % body_x,
             "%.4f" % body_vx,
             "%.4f" % est_vx,
         ]
@@ -621,8 +625,10 @@ class CrawlGaitWithFanTester(object):
             if cmd is not None:
                 cmd_support = int(bool(cmd.support_leg))
 
+            ujc_x = 0.0
             ujc_z = 0.0
             if est is not None and len(est.universal_joint_center_positions) > leg_index:
+                ujc_x = float(est.universal_joint_center_positions[leg_index].x)
                 ujc_z = float(est.universal_joint_center_positions[leg_index].z)
 
             attach = 0
@@ -634,6 +640,7 @@ class CrawlGaitWithFanTester(object):
                 "%.1f" % float(fan_rpm[leg_index]),
                 "%.4f" % float(fan_curr[leg_index]),
                 attach,
+                "%.4f" % ujc_x,
                 "%.4f" % ujc_z,
             ])
 

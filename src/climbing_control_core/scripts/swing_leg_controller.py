@@ -155,6 +155,7 @@ class SwingLegController(object):
         self.clearance_m = float(get_cfg("clearance_m", 0.035))
         self.raibert_height_gain = float(get_cfg("raibert_height_gain", 1.0))
         self.raibert_velocity_gain = float(get_cfg("raibert_velocity_gain", 1.0))
+        self.fixed_swing_distance_m = float(get_cfg("fixed_swing_distance_m", 0.0))
         self.foot_delta_x_limit = float(get_cfg("foot_delta_x_limit_m", 0.10))
         self.foot_delta_y_limit = float(get_cfg("foot_delta_y_limit_m", 0.10))
         self.max_position_offset = [float(value) for value in get_cfg("max_position_offset_m", [0.45, 0.35, 0.45])]
@@ -170,6 +171,7 @@ class SwingLegController(object):
         self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
         self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 1.0)), 0.0)
         self.fan_off_rpm_threshold = float(get_cfg("fan_off_rpm_threshold", 10000.0))
+        self.fan_recovery_rpm_threshold = float(get_cfg("fan_recovery_rpm_threshold", 30000.0))
         self.normal_alignment_tolerance_m = max(float(get_cfg("normal_alignment_tolerance_m", 0.002)), 1e-4)
         self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)
         self.attach_normal_force_limit_n = max(float(get_cfg("attach_normal_force_limit_n", 25.0)), 0.0)
@@ -709,6 +711,16 @@ class SwingLegController(object):
         state["compliant_normal_velocity"] = 0.0
 
     def _target_delta(self, leg_name, leg_index):
+        # Fixed-distance mode: each leg swings the same forward distance,
+        # decoupled from body velocity tracking.
+        if self.fixed_swing_distance_m > 0.0:
+            leg_fwd = self._base_delta_to_leg_delta(leg_name, self.fixed_swing_distance_m, 0.0)
+            return [
+                clamp(leg_fwd[0], -self.foot_delta_x_limit, self.foot_delta_x_limit),
+                clamp(leg_fwd[1], -self.foot_delta_y_limit, self.foot_delta_y_limit),
+                0.0,
+            ]
+
         desired_twist = self._desired_twist_body()
         estimated_twist = [0.0, 0.0, 0.0]
         if self.have_estimated_state:
@@ -998,12 +1010,17 @@ class SwingLegController(object):
                     if self.fan_off_dwell_s > 0:
                         fan_off_time = self._fan_off_request_time.get(leg_name)
                         if fan_off_time is None:
+                            # Before entering dwell, check that previous leg's
+                            # fan has recovered to full suction speed.
+                            prev_idx = (leg_index - 1) % len(self.leg_names)
+                            prev_rpm = abs(self._latest_fan_rpm[prev_idx])
+                            if prev_rpm < self.fan_recovery_rpm_threshold:
+                                # Previous leg fan still recovering → skip this cycle
+                                continue
+
                             # First cycle: request fan off, stay at operating position
                             self._fan_off_request_time[leg_name] = now_sec
                             op_pos = self._operating_center_command(leg_name)
-                            # Use tiny positive normal_force_limit so mission_supervisor
-                            # does NOT replace it with default_normal_force_limit (150N)
-                            # which would trigger fan-ON via attach threshold check.
                             dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
                             self._publish_leg_diagnostic(
@@ -1011,7 +1028,7 @@ class SwingLegController(object):
                             )
                             continue
                         elif now_sec - fan_off_time < self.fan_off_dwell_s:
-                            # Still waiting for fan to spin down
+                            # Still waiting for minimum dwell time
                             op_pos = self._operating_center_command(leg_name)
                             dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
@@ -1020,22 +1037,35 @@ class SwingLegController(object):
                             )
                             continue
                         else:
-                            # Dwell time elapsed, check fan RPM as best-effort.
-                            # Fan may not reach swing_release_rpm due to minimum
-                            # stable speed (~29750 RPM). Log improvement but
-                            # proceed regardless to avoid stalling the gait.
+                            # Dwell time elapsed, check actual fan RPM feedback
                             leg_idx = self.leg_names.index(leg_name)
                             actual_rpm = abs(self._latest_fan_rpm[leg_idx])
-                            self._fan_off_request_time.pop(leg_name, None)
-                            if actual_rpm > self.fan_off_rpm_threshold:
-                                rospy.loginfo_throttle(
-                                    5.0,
-                                    "%s fan at %.0f RPM (>%d), swing proceeds "
-                                    "(dwell=%.1fs)",
-                                    leg_name, actual_rpm,
-                                    self.fan_off_rpm_threshold,
-                                    self.fan_off_dwell_s,
+                            total_wait = now_sec - fan_off_time
+                            rpm_ok = actual_rpm <= self.fan_off_rpm_threshold
+                            timed_out = total_wait >= self._fan_rpm_timeout_s
+
+                            if rpm_ok or timed_out:
+                                # RPM confirmed low, or timeout fallback
+                                self._fan_off_request_time.pop(leg_name, None)
+                                if timed_out and not rpm_ok:
+                                    rospy.logwarn_throttle(
+                                        5.0,
+                                        "fan off timeout for %s "
+                                        "(rpm=%.0f, threshold=%.0f, waited=%.1fs)",
+                                        leg_name, actual_rpm,
+                                        self.fan_off_rpm_threshold, total_wait,
+                                    )
+                            else:
+                                # Fan not yet at target RPM, continue waiting
+                                op_pos = self._operating_center_command(leg_name)
+                                dwell_msg = self._build_message(
+                                    leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001,
                                 )
+                                self.pub.publish(dwell_msg)
+                                self._publish_leg_diagnostic(
+                                    leg_name, leg_index, op_pos, now_sec,
+                                )
+                                continue
                     self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:

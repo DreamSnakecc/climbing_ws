@@ -162,13 +162,14 @@ state_logger:
 swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
-  clearance_m: 0.025
+  clearance_m: 0.01
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.025 
+  swing_lift_normal_m: 0.01 
   raibert_height_gain: 1.0
-  raibert_velocity_gain: 1.5
-  foot_delta_x_limit_m: 0.25
-  foot_delta_y_limit_m: 0.25
+  raibert_velocity_gain: 1.0
+  fixed_swing_distance_m: 0.04
+  foot_delta_x_limit_m: 0.45
+  foot_delta_y_limit_m: 0.45
   max_position_offset_m: [0.45, 0.35, 0.45]
   feedforward_twist_gain: [0.16, 0.16, 0.0]
   body_position_gain: [0.70, 0.70, 0.35]
@@ -182,8 +183,9 @@ swing_leg_controller:
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.004
   fan_attach_sink_m: 0.002
-  fan_off_dwell_s: 0.5
+  fan_off_dwell_s: 1.0
   fan_off_rpm_threshold: 10000.0
+  fan_recovery_rpm_threshold: 30000.0
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
