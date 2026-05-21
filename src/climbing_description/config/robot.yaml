@@ -179,7 +179,7 @@ swing_leg_controller:
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
   preload_duration_s: 0.16
-  compliant_settle_timeout_s: 0.40
+  compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.004
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 0.5

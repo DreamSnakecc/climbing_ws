@@ -30,7 +30,7 @@
   <arg name="compliant_start_requires_contact" default="false" />
   <arg name="enable_state_logger" default="false" />
   <arg name="linear_velocity_x" default="0.005" />
-  <arg name="use_contact_feedback" default="true" />
+  <arg name="use_contact_feedback" default="false" />
 
   <!-- pc_bringup.launch does rosparam load robot.yaml internally.
        All param overrides go AFTER this include to avoid being overwritten. -->
