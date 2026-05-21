@@ -168,6 +168,7 @@ class SwingLegController(object):
         self.compliant_settle_timeout_s = max(float(get_cfg("compliant_settle_timeout_s", 0.40)), 0.05)
         self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.005)), 0.0)
         self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
+        self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 0.5)), 0.0)
         self.normal_alignment_tolerance_m = max(float(get_cfg("normal_alignment_tolerance_m", 0.002)), 1e-4)
         self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)
         self.attach_normal_force_limit_n = max(float(get_cfg("attach_normal_force_limit_n", 25.0)), 0.0)
@@ -251,6 +252,7 @@ class SwingLegController(object):
         self.last_update_time = None
         self.mission_state = "INIT"
         self.swing_phase_start = {}
+        self._fan_off_request_time = {}  # leg_name -> time when fan-off was requested
         self.swing_states = {}
         for leg_name in self.leg_names:
             nominal = self._operating_center_command(leg_name)
@@ -976,6 +978,31 @@ class SwingLegController(object):
                     continue
 
                 if self.swing_phase_start[leg_name] is None and not desired_support:
+                    # Fan-off dwell: let fan spin down before starting swing motion
+                    if self.fan_off_dwell_s > 0:
+                        fan_off_time = self._fan_off_request_time.get(leg_name)
+                        if fan_off_time is None:
+                            # First cycle: request fan off, stay at operating position
+                            self._fan_off_request_time[leg_name] = now_sec
+                            op_pos = self._operating_center_command(leg_name)
+                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.0)
+                            self.pub.publish(dwell_msg)
+                            self._publish_leg_diagnostic(
+                                leg_name, leg_index, op_pos, now_sec,
+                            )
+                            continue
+                        elif now_sec - fan_off_time < self.fan_off_dwell_s:
+                            # Still waiting for fan to spin down
+                            op_pos = self._operating_center_command(leg_name)
+                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.0)
+                            self.pub.publish(dwell_msg)
+                            self._publish_leg_diagnostic(
+                                leg_name, leg_index, op_pos, now_sec,
+                            )
+                            continue
+                        else:
+                            # Dwell complete, clear request and start swing
+                            self._fan_off_request_time.pop(leg_name, None)
                     self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
