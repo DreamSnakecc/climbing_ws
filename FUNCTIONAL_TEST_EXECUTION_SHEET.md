@@ -1276,6 +1276,173 @@ grep -n "joint_currents" ~/.ros/climbing_logs/<session_dir>/events.jsonl | head
 
 ---
 
+
+<!-- ...existing code... -->
+
+### A05 Jetson 侧风机通信单测（统一话题名，不启动舵机）
+
+- 目标：仅验证风机串口收发与 ROS 发布，统一到 `/jetson/fan_serial_bridge/fan_currents`，不启动任何舵机节点
+- 验证方式：上机
+- 前置条件：Jetson 串口设备可用（`/dev/ttyUSB_fan`）
+
+执行步骤：
+
+终端 1（Jetson）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roscore
+```
+
+终端 2（Jetson，启动风机桥）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosparam load src/climbing_description/config/robot.yaml
+rosrun climbing_hw_bridge fan_serial_bridge.py
+```
+
+终端 3（Jetson，统一话题名 relay）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosrun topic_tools relay /fan_currents /jetson/fan_serial_bridge/fan_currents
+```
+
+终端 4（Jetson，本地检查）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosnode list | grep -E "fan_serial_bridge|relay"
+rostopic list | grep -E "fan_currents"
+rostopic hz /fan_currents
+rostopic hz /jetson/fan_serial_bridge/fan_currents
+rostopic echo -n 1 /fan_currents
+rostopic echo -n 1 /jetson/fan_serial_bridge/fan_currents
+```
+
+终端 5（PC，远端检查）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rostopic info /jetson/fan_serial_bridge/fan_currents
+rostopic hz /jetson/fan_serial_bridge/fan_currents
+rostopic echo -n 1 /jetson/fan_serial_bridge/fan_currents
+```
+
+观测点：
+
+- `fan_serial_bridge.py` 成功启动且无持续报错
+- `/fan_currents` 与 `/jetson/fan_serial_bridge/fan_currents` 均持续更新
+- PC 侧能看到 `Publishers` 非空
+
+通过标准：
+
+- 不启动舵机链路时，风机电流反馈仍可稳定发布并跨机可见
+
+记录：
+
+- 实际现象：
+- 关键观测数据：
+- 结果： [ ] 通过 [ ] 失败 [ ] 阻塞
+- 问题与备注：
+
+### A06 Jetson 侧 IMU 接收单测（统一话题名，不启动舵机）
+
+- 目标：仅验证 IMU 串口接收与 ROS 发布，统一到 `/jetson/imu_serial_bridge/imu`，不启动任何舵机节点
+- 验证方式：上机
+- 前置条件：Jetson 串口设备可用（`/dev/ttyUSB_imu`）
+
+执行步骤：
+
+终端 1（Jetson）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+roscore
+```
+
+终端 2（Jetson，启动 IMU 桥）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosparam load src/climbing_description/config/robot.yaml
+rosrun climbing_hw_bridge imu_serial_bridge.py
+```
+
+终端 3（Jetson，统一话题名 relay）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosrun topic_tools relay /imu /jetson/imu_serial_bridge/imu
+```
+
+终端 4（Jetson，本地检查）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rosnode list | grep -E "imu_serial_bridge|relay"
+rostopic list | grep -E "^/imu$|/jetson/imu_serial_bridge/imu"
+rostopic hz /imu
+rostopic hz /jetson/imu_serial_bridge/imu
+rostopic echo -n 1 /imu
+rostopic echo -n 1 /jetson/imu_serial_bridge/imu
+```
+
+终端 5（PC，远端检查）：
+
+```bash
+cd ~/climbing_ws
+source /opt/ros/noetic/setup.bash
+source devel/setup.bash
+rostopic info /jetson/imu_serial_bridge/imu
+rostopic hz /jetson/imu_serial_bridge/imu
+rostopic echo -n 1 /jetson/imu_serial_bridge/imu
+```
+
+静态快速检查（Jetson）：
+
+```bash
+rostopic echo /imu | grep -E "orientation:|angular_velocity:|linear_acceleration:" -A 12
+```
+
+观测点：
+
+- `imu_serial_bridge.py` 成功启动且无持续 CRC/重连报错
+- `/imu` 与 `/jetson/imu_serial_bridge/imu` 频率稳定（接近配置值）
+- 静止时角速度接近 0，线加速度模量接近 `9.8 m/s^2`
+
+通过标准：
+
+- 不启动舵机链路时，IMU 数据可稳定发布并跨机可见，数值语义正常
+
+记录：
+
+- 实际现象：
+- 关键观测数据：
+- 结果： [ ] 通过 [ ] 失败 [ ] 阻塞
+- 问题与备注：
+
+<!-- ...existing code... -->
+
 ## 13. 最小执行闭环建议
 
 如果只做一轮最小有效验证，建议按下列顺序打勾：
