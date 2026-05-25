@@ -156,6 +156,13 @@ class SwingLegController(object):
         self.raibert_height_gain = float(get_cfg("raibert_height_gain", 1.0))
         self.raibert_velocity_gain = float(get_cfg("raibert_velocity_gain", 1.0))
         self.fixed_swing_distance_m = float(get_cfg("fixed_swing_distance_m", 0.0))
+        self.stride_length_m = float(get_cfg("stride_length_m", 0.0))
+        if self.stride_length_m > 0.0:
+            self._swing_distance_m = 0.75 * self.stride_length_m   # 3L/4
+            self._body_advance_per_swing_m = 0.25 * self.stride_length_m  # L/4
+        else:
+            self._swing_distance_m = 0.0
+            self._body_advance_per_swing_m = 0.0
         self.foot_delta_x_limit = float(get_cfg("foot_delta_x_limit_m", 0.10))
         self.foot_delta_y_limit = float(get_cfg("foot_delta_y_limit_m", 0.10))
         self.max_position_offset = [float(value) for value in get_cfg("max_position_offset_m", [0.45, 0.35, 0.45])]
@@ -280,6 +287,8 @@ class SwingLegController(object):
                 "compliant_normal_velocity": 0.0,
                 "last_joint_vector": [0.0, 0.0, 0.0],
                 "attach_confirmed_time": None,
+                "support_world_x": None,
+                "support_world_y": None,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -711,15 +720,15 @@ class SwingLegController(object):
         state["compliant_normal_velocity"] = 0.0
 
     def _target_delta(self, leg_name, leg_index):
-        # Fixed-distance mode: each leg swings the same forward distance,
-        # decoupled from body velocity tracking.
-        if self.fixed_swing_distance_m > 0.0:
-            leg_fwd = self._base_delta_to_leg_delta(leg_name, self.fixed_swing_distance_m, 0.0)
+        # Stride gait: fixed 3L/4 swing, body advances L/4 per leg.
+        if self.stride_length_m > 0.0:
             return [
-                clamp(leg_fwd[0], -self.foot_delta_x_limit, self.foot_delta_x_limit),
-                clamp(leg_fwd[1], -self.foot_delta_y_limit, self.foot_delta_y_limit),
+                clamp(self._swing_distance_m, -self.foot_delta_x_limit, self.foot_delta_x_limit),
+                0.0,
                 0.0,
             ]
+
+  
 
         desired_twist = self._desired_twist_body()
         estimated_twist = [0.0, 0.0, 0.0]
@@ -773,10 +782,16 @@ class SwingLegController(object):
     def _start_swing(self, leg_name, leg_index, stamp_sec):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
-        support_target = self._operating_center_command(leg_name)
-        if self.have_body_reference:
-            support_target[0] -= self.body_reference.pose.position.x
-            support_target[1] -= self.body_reference.pose.position.y
+
+        if self.stride_length_m > 0.0:
+            # Stride gait: use the leg's current support position
+            # (maintains world position) as the swing reference.
+            support_target = list(state["position"])
+        else:
+            support_target = self._operating_center_command(leg_name)
+            if self.have_body_reference:
+                support_target[0] -= self.body_reference.pose.position.x
+                support_target[1] -= self.body_reference.pose.position.y
         target = [
             support_target[0] + target_delta[0],
             support_target[1] + target_delta[1],
@@ -807,15 +822,41 @@ class SwingLegController(object):
         self._set_phase(state, self.PHASE_LIFT_SWING, stamp_sec)
         self.swing_phase_start[leg_name] = stamp_sec
 
+    def _dwell_position(self, leg_name):
+        """Return the position to hold during fan-off dwell.
+        
+        In stride gait mode, stay at the leg's current position (which may
+        be forward of operating center after a swing).  Otherwise use the
+        operating center (legacy behaviour)."""
+        if self.stride_length_m > 0.0:
+            state = self.swing_states.get(leg_name, {})
+            return list(state.get("position", self._operating_center_command(leg_name)))
+        return self._operating_center_command(leg_name)
+
     def _support_command(self, leg_name, leg_index):
         state = self.swing_states[leg_name]
         state["support"] = True
         self.swing_phase_start[leg_name] = None
         state["velocity"] = [0.0, 0.0, 0.0]
-        support_target = self._operating_center_command(leg_name)
-        if self.have_body_reference:
-            support_target[0] -= self.body_reference.pose.position.x
-            support_target[1] -= self.body_reference.pose.position.y
+
+        if self.stride_length_m > 0.0 and state.get("support_world_x") is not None:
+            # Stride gait: maintain the world position recorded when this leg
+            # first entered support after its swing.  As body_x advances
+            # (L/4 per subsequent swing), the body-frame target automatically
+            # shifts backward, keeping the foot planted in world frame.
+            body_x = self.body_reference.pose.position.x if self.have_body_reference else 0.0
+            body_y = self.body_reference.pose.position.y if self.have_body_reference else 0.0
+            support_target = [
+                state["support_world_x"] - body_x,
+                state["support_world_y"] - body_y,
+                self.operating_z_m,
+            ]
+        else:
+            support_target = self._operating_center_command(leg_name)
+            if self.have_body_reference:
+                support_target[0] -= self.body_reference.pose.position.x
+                support_target[1] -= self.body_reference.pose.position.y
+
         state["support_target"] = list(support_target)
         state["position"] = list(support_target)
         state["start"] = list(support_target)
@@ -1018,22 +1059,22 @@ class SwingLegController(object):
                                 # Previous leg fan still recovering → skip this cycle
                                 continue
 
-                            # First cycle: request fan off, stay at operating position
+                            # First cycle: request fan off, stay at current position
                             self._fan_off_request_time[leg_name] = now_sec
-                            op_pos = self._operating_center_command(leg_name)
-                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
+                            dwell_pos = self._dwell_position(leg_name)
+                            dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
                             self._publish_leg_diagnostic(
-                                leg_name, leg_index, op_pos, now_sec,
+                                leg_name, leg_index, dwell_pos, now_sec,
                             )
                             continue
                         elif now_sec - fan_off_time < self.fan_off_dwell_s:
                             # Still waiting for minimum dwell time
-                            op_pos = self._operating_center_command(leg_name)
-                            dwell_msg = self._build_message(leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001)
+                            dwell_pos = self._dwell_position(leg_name)
+                            dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                             self.pub.publish(dwell_msg)
                             self._publish_leg_diagnostic(
-                                leg_name, leg_index, op_pos, now_sec,
+                                leg_name, leg_index, dwell_pos, now_sec,
                             )
                             continue
                         else:
@@ -1057,13 +1098,13 @@ class SwingLegController(object):
                                     )
                             else:
                                 # Fan not yet at target RPM, continue waiting
-                                op_pos = self._operating_center_command(leg_name)
+                                dwell_pos = self._dwell_position(leg_name)
                                 dwell_msg = self._build_message(
-                                    leg_name, op_pos, [0.0, 0.0, 0.0], False, 0.001,
+                                    leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001,
                                 )
                                 self.pub.publish(dwell_msg)
                                 self._publish_leg_diagnostic(
-                                    leg_name, leg_index, op_pos, now_sec,
+                                    leg_name, leg_index, dwell_pos, now_sec,
                                 )
                                 continue
                     self._start_swing(leg_name, leg_index, now_sec)
@@ -1084,6 +1125,17 @@ class SwingLegController(object):
                 # If support_leg=True (state 2), transition back to SUPPORT
                 if support_leg and desired_support:
                     self.swing_phase_start[leg_name] = None
+                    # Stride gait: advance body first (simulates support legs
+                    # pushing body forward DURING the swing), then record
+                    # world position at the new body_x so the following
+                    # _support_command yields the same body-frame position as
+                    # the landing position — no backward jump.
+                    if self.stride_length_m > 0.0 and self.have_body_reference:
+                        state = self.swing_states[leg_name]
+                        self.body_reference.pose.position.x += self._body_advance_per_swing_m
+                        self.body_reference.pose.position.y += 0.0
+                        state["support_world_x"] = state["position"][0] + self.body_reference.pose.position.x
+                        state["support_world_y"] = state["position"][1] + self.body_reference.pose.position.y
                     support_msg = self._support_command(leg_name, leg_index)
                     self.pub.publish(support_msg)
                     self._publish_leg_diagnostic(

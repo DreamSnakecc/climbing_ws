@@ -514,6 +514,7 @@ class CrawlGaitWithFanTester(object):
                 "%s_fan_current_a" % leg,
                 "%s_attachment_ready" % leg,
                 "%s_ujc_x" % leg,
+                "%s_ujc_y" % leg,
                 "%s_ujc_z" % leg,
             ])
         return cols
@@ -626,9 +627,11 @@ class CrawlGaitWithFanTester(object):
                 cmd_support = int(bool(cmd.support_leg))
 
             ujc_x = 0.0
+            ujc_y = 0.0
             ujc_z = 0.0
             if est is not None and len(est.universal_joint_center_positions) > leg_index:
                 ujc_x = float(est.universal_joint_center_positions[leg_index].x)
+                ujc_y = float(est.universal_joint_center_positions[leg_index].y)
                 ujc_z = float(est.universal_joint_center_positions[leg_index].z)
 
             attach = 0
@@ -641,6 +644,7 @@ class CrawlGaitWithFanTester(object):
                 "%.4f" % float(fan_curr[leg_index]),
                 attach,
                 "%.4f" % ujc_x,
+                "%.4f" % ujc_y,
                 "%.4f" % ujc_z,
             ])
 

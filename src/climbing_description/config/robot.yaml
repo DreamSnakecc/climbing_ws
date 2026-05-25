@@ -167,7 +167,11 @@ swing_leg_controller:
   swing_lift_normal_m: 0.01 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  fixed_swing_distance_m: 0.04
+  stride_length_m: 0.06
+  # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
+  # where swing distance = 3*stride_length_m/4 and body advances
+  # stride_length_m/4 per leg swing.  No body_planner velocity needed.
+  # stride_length_m: 0.0
   foot_delta_x_limit_m: 0.45
   foot_delta_y_limit_m: 0.45
   max_position_offset_m: [0.45, 0.35, 0.45]
