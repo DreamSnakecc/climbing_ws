@@ -14,7 +14,7 @@
 #   # 等四腿稳定停在 operating UJC (270.21, 0, -100) mm
 #
 #   # PC (另一台机或另一个终端):
-#   roslaunch climbing_bringup test_crawl_gait.launch ujc_z_mm:=-195.5
+#   roslaunch climbing_bringup pc_bringup.launch mission_auto_start:=false enable_auto_adhesion_commands:=true
 #   # mission_state 进入 INIT, 四腿在位置模式下持位
 #
 #   # 然后跑测试 (监控模式, mission_supervisor 自动控制风机):
@@ -59,7 +59,7 @@ Usage:
 
 前置条件 (脚本不会代为启动):
     Jetson:  roslaunch climbing_bringup jetson_bringup.launch
-    PC:      roslaunch climbing_bringup test_crawl_gait.launch ujc_z_mm:=-195.5
+    PC:      roslaunch climbing_bringup pc_bringup.launch mission_auto_start:=false enable_auto_adhesion_commands:=true
     (mission_supervisor enable_auto_adhesion_commands=true, 默认开启)
 EOF
 }

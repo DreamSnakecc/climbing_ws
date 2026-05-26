@@ -64,6 +64,9 @@ PHASE_ID_MAP = {
     "LIFT_SWING": 1,
     "PRELOAD": 2,
     "ADMIT": 3,
+    "RELEASE_WAIT": 4,
+    "LIFT": 5,
+    "TRANSFER": 6,
 }
 
 STATE_INIT = "INIT"

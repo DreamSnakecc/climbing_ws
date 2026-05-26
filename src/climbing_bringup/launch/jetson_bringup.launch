@@ -1,7 +1,7 @@
 <launch>
   <arg name="enable_auto_position_commands" default="true" />
   <arg name="enable_auto_mode_switching" default="true" />
-  <arg name="enable_auto_current_control" default="true" />
+  <arg name="enable_auto_current_control" default="false" />
   <arg name="leg_ik_input_mode" default="absolute_center_m" />
 
   <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />

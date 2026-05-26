@@ -43,6 +43,11 @@ def bezier4_derivative(points, phase):
     return sum([coefficients[index] * derivative_points[index] for index in range(4)])
 
 
+def smoothstep5(phase):
+    phase = clamp(phase, 0.0, 1.0)
+    return phase * phase * phase * (10.0 + phase * (-15.0 + 6.0 * phase))
+
+
 def vector_add(lhs, rhs):
     return [lhs[index] + rhs[index] for index in range(len(lhs))]
 
@@ -142,6 +147,9 @@ class SwingLegController(object):
     PHASE_LIFT_SWING = "LIFT_SWING"
     PHASE_PRELOAD = "PRELOAD"
     PHASE_ADMIT = "ADMIT"
+    PHASE_RELEASE_WAIT = "RELEASE_WAIT"
+    PHASE_LIFT = "LIFT"
+    PHASE_TRANSFER = "TRANSFER"
 
     def __init__(self):
         rospy.init_node("swing_leg_controller", anonymous=False)
@@ -172,6 +180,8 @@ class SwingLegController(object):
         self.body_angular_position_gain = [float(value) for value in get_cfg("body_angular_position_gain", [0.10, 0.10, 0.06])]
         self.body_angular_velocity_gain = [float(value) for value in get_cfg("body_angular_velocity_gain", [0.02, 0.02, 0.01])]
         self.tangential_align_duration_s = max(float(get_cfg("tangential_align_duration_s", 0.28)), 0.05)
+        self.lift_duration_s = max(float(get_cfg("lift_duration_s", 0.20)), 0.05)
+        self.transfer_duration_s = max(float(get_cfg("transfer_duration_s", self.tangential_align_duration_s)), 0.05)
         self.preload_duration_s = max(float(get_cfg("preload_duration_s", 0.16)), 0.05)
         self.compliant_settle_timeout_s = max(float(get_cfg("compliant_settle_timeout_s", 0.40)), 0.05)
         self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.005)), 0.0)
@@ -259,6 +269,9 @@ class SwingLegController(object):
         self.estimated_state = EstimatedState()
         self.have_body_reference = False
         self.have_estimated_state = False
+        self._body_x_offset = 0.0  # stride gait: accumulated L/4 body advance
+        self._body_y_offset = 0.0
+        self._inflight_body_advance_m = 0.0
         self.last_update_time = None
         self.mission_state = "INIT"
         self.swing_phase_start = {}
@@ -278,6 +291,7 @@ class SwingLegController(object):
                 "support": True,
                 "phase": self.PHASE_SUPPORT,
                 "phase_started_at": None,
+                "lift_target": list(nominal),
                 "lift_swing_target": list(nominal),
                 "preload_target": list(nominal),
                 "attach_target": list(nominal),
@@ -289,6 +303,8 @@ class SwingLegController(object):
                 "attach_confirmed_time": None,
                 "support_world_x": None,
                 "support_world_y": None,
+                "transfer_fraction": 0.0,
+                "transfer_committed": False,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -303,6 +319,9 @@ class SwingLegController(object):
             self.PHASE_LIFT_SWING: 1,
             self.PHASE_PRELOAD: 2,
             self.PHASE_ADMIT: 3,
+            self.PHASE_RELEASE_WAIT: 4,
+            self.PHASE_LIFT: 5,
+            self.PHASE_TRANSFER: 6,
         }
         self.diagnostic_field_labels = [
             "leg_index",
@@ -784,9 +803,15 @@ class SwingLegController(object):
         target_delta = self._target_delta(leg_name, leg_index)
 
         if self.stride_length_m > 0.0:
-            # Stride gait: use the leg's current support position
-            # (maintains world position) as the swing reference.
-            support_target = list(state["position"])
+            # Stride gait: use actual leg position from state estimator
+            # as the swing reference.  This avoids compounding tracking
+            # errors from support commands that the leg couldn't follow.
+            if (self.have_estimated_state
+                    and leg_index < len(self.estimated_state.universal_joint_center_positions)):
+                p = self.estimated_state.universal_joint_center_positions[leg_index]
+                support_target = [float(p.x), float(p.y), float(p.z)]
+            else:
+                support_target = list(state["position"])
         else:
             support_target = self._operating_center_command(leg_name)
             if self.have_body_reference:
@@ -797,11 +822,14 @@ class SwingLegController(object):
             support_target[1] + target_delta[1],
             support_target[2],
         ]
-        
-        start = list(state["position"])
+
+        # start = support_target (actual ujc in stride mode, or body-frame
+        # position otherwise)
+        start = list(support_target)
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
 
+        lift_target = self._compose_tangent_and_normal(start, start_normal + self.swing_lift_normal_m)
         swing_target = self._compose_tangent_and_normal(target, start_normal + self.swing_lift_normal_m)
         preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)     
         attach_target = list(preload_target)
@@ -809,6 +837,7 @@ class SwingLegController(object):
         state["start"] = list(start)
         state["target"] = list(target)
         state["support_target"] = list(support_target)
+        state["lift_target"] = self._clamp_position(lift_target, state["support_target"])
         state["lift_swing_target"] = self._clamp_position(swing_target, state["support_target"])
         state["preload_target"] = self._clamp_position(preload_target, state["support_target"])
         state["attach_target"] = self._clamp_position(attach_target, state["support_target"])
@@ -819,7 +848,12 @@ class SwingLegController(object):
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
         state["attach_confirmed_time"] = None
-        self._set_phase(state, self.PHASE_LIFT_SWING, stamp_sec)
+        state["transfer_fraction"] = 0.0
+        state["transfer_committed"] = False
+        if self.stride_length_m > 0.0:
+            self._set_phase(state, self.PHASE_LIFT, stamp_sec)
+        else:
+            self._set_phase(state, self.PHASE_LIFT_SWING, stamp_sec)
         self.swing_phase_start[leg_name] = stamp_sec
 
     def _dwell_position(self, leg_name):
@@ -833,19 +867,97 @@ class SwingLegController(object):
             return list(state.get("position", self._operating_center_command(leg_name)))
         return self._operating_center_command(leg_name)
 
+    def _stride_body_position(self):
+        body_x = float(self.body_reference.pose.position.x) if self.have_body_reference else 0.0
+        body_y = float(self.body_reference.pose.position.y) if self.have_body_reference else 0.0
+        return [
+            body_x + self._body_x_offset + self._inflight_body_advance_m,
+            body_y + self._body_y_offset,
+        ]
+
+    def _capture_support_anchor(self, leg_name, position=None):
+        if self.stride_length_m <= 0.0:
+            return
+        state = self.swing_states[leg_name]
+        if position is None:
+            position = state.get("position", self._operating_center_command(leg_name))
+        body_x, body_y = self._stride_body_position()
+        state["support_world_x"] = float(position[0]) + body_x
+        state["support_world_y"] = float(position[1]) + body_y
+
+    def _initialize_stride_anchors(self):
+        if self.stride_length_m <= 0.0:
+            return
+        for support_leg in self.leg_names:
+            state = self.swing_states[support_leg]
+            if state.get("support_world_x") is None:
+                self._capture_support_anchor(support_leg)
+
+    def _support_fans_ready(self, swing_leg):
+        for leg_index, leg_name in enumerate(self.leg_names):
+            if leg_name == swing_leg:
+                continue
+            actual_rpm = abs(self._latest_fan_rpm[leg_index])
+            if actual_rpm < self.fan_recovery_rpm_threshold:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "stride gait holding %s: support fan %s rpm=%.0f below %.0f",
+                    swing_leg, leg_name, actual_rpm, self.fan_recovery_rpm_threshold,
+                )
+                return False
+        return True
+
+    def _begin_release_wait(self, leg_name, now_sec):
+        state = self.swing_states[leg_name]
+        self._initialize_stride_anchors()
+        state["support"] = False
+        state["velocity"] = [0.0, 0.0, 0.0]
+        state["transfer_fraction"] = 0.0
+        state["transfer_committed"] = False
+        self._fan_off_request_time[leg_name] = now_sec
+        self._set_phase(state, self.PHASE_RELEASE_WAIT, now_sec)
+        self.swing_phase_start[leg_name] = now_sec
+
+    def _update_stride_transfer_progress(self, dt):
+        self._inflight_body_advance_m = 0.0
+        if self.stride_length_m <= 0.0:
+            return
+        for leg_name in self.leg_names:
+            state = self.swing_states[leg_name]
+            if state.get("phase") != self.PHASE_TRANSFER or self.swing_phase_start[leg_name] is None:
+                continue
+            fraction = clamp(float(state.get("transfer_fraction", 0.0)), 0.0, 1.0)
+            self._inflight_body_advance_m = smoothstep5(fraction) * self._body_advance_per_swing_m
+            if not self._support_fans_ready(leg_name):
+                return
+            fraction = clamp(
+                fraction + dt / self.transfer_duration_s,
+                0.0,
+                1.0,
+            )
+            state["transfer_fraction"] = fraction
+            progress = smoothstep5(fraction)
+            self._inflight_body_advance_m = progress * self._body_advance_per_swing_m
+            if fraction >= 1.0 and not bool(state.get("transfer_committed", False)):
+                self._body_x_offset += self._body_advance_per_swing_m
+                state["transfer_committed"] = True
+                self._inflight_body_advance_m = 0.0
+            return
+
     def _support_command(self, leg_name, leg_index):
         state = self.swing_states[leg_name]
         state["support"] = True
         self.swing_phase_start[leg_name] = None
         state["velocity"] = [0.0, 0.0, 0.0]
 
-        if self.stride_length_m > 0.0 and state.get("support_world_x") is not None:
-            # Stride gait: maintain the world position recorded when this leg
-            # first entered support after its swing.  As body_x advances
-            # (L/4 per subsequent swing), the body-frame target automatically
-            # shifts backward, keeping the foot planted in world frame.
-            body_x = self.body_reference.pose.position.x if self.have_body_reference else 0.0
-            body_y = self.body_reference.pose.position.y if self.have_body_reference else 0.0
+        if self.stride_length_m > 0.0:
+            if state.get("support_world_x") is None:
+                self._capture_support_anchor(leg_name)
+            # Stride gait: command the support leg backward in body frame
+            # (support_world - body_x).  The leg is attached to the wall
+            # (fan suction) and cannot move in world frame, so the backward
+            # command pushes the body forward by L/4 per leg swing.
+            body_x, body_y = self._stride_body_position()
             support_target = [
                 state["support_world_x"] - body_x,
                 state["support_world_y"] - body_y,
@@ -861,6 +973,7 @@ class SwingLegController(object):
         state["position"] = list(support_target)
         state["start"] = list(support_target)
         state["target"] = list(support_target)
+        state["lift_target"] = list(support_target)
         state["lift_swing_target"] = list(support_target)
         state["preload_target"] = list(support_target)
         state["attach_target"] = list(support_target)
@@ -884,11 +997,56 @@ class SwingLegController(object):
         phase = state["phase"]
         phase_elapsed = self._phase_elapsed(state, now_sec)
         attachment_ready = self._leg_mask_value(self.estimated_state.attachment_ready_mask, leg_index, False)
-        if not self.use_contact_feedback:
-            attachment_ready = False
         clamp_center = state.get("support_target", self._operating_center_command(leg_name))
 
-        if phase == self.PHASE_LIFT_SWING:
+        if phase == self.PHASE_RELEASE_WAIT:
+            actual_rpm = abs(self._latest_fan_rpm[leg_index])
+            if actual_rpm <= self.fan_off_rpm_threshold:
+                self._fan_off_request_time.pop(leg_name, None)
+                self._start_swing(leg_name, leg_index, now_sec)
+                return self._guided_swing_command(leg_name, leg_index, now_sec, dt)
+            if phase_elapsed >= self._fan_rpm_timeout_s:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "stride gait waiting to lift %s: fan rpm=%.0f above release threshold %.0f",
+                    leg_name, actual_rpm, self.fan_off_rpm_threshold,
+                )
+            cmd_position = list(state["position"])
+            cmd_velocity = [0.0, 0.0, 0.0]
+            normal_force_limit = 0.001
+            support_leg = False
+
+        elif phase == self.PHASE_LIFT:
+            start_pos = list(state["phase_start_pos"])
+            cmd_position = self._bezier_interp(start_pos, list(state["lift_target"]), self.lift_duration_s, phase_elapsed)
+            cmd_velocity = [0.0, 0.0, 0.0]
+            if phase_elapsed >= self.lift_duration_s:
+                cmd_position = list(state["lift_target"])
+                state["position"] = list(cmd_position)
+                state["transfer_fraction"] = 0.0
+                state["transfer_committed"] = False
+                self._set_phase(state, self.PHASE_TRANSFER, now_sec)
+            normal_force_limit = 0.001
+            support_leg = False
+
+        elif phase == self.PHASE_TRANSFER:
+            fraction = clamp(float(state.get("transfer_fraction", 0.0)), 0.0, 1.0)
+            progress = smoothstep5(fraction)
+            start_pos = list(state["phase_start_pos"])
+            target_pos = list(state["lift_swing_target"])
+            cmd_position = [
+                start_pos[axis] + progress * (target_pos[axis] - start_pos[axis])
+                for axis in [0, 1, 2]
+            ]
+            cmd_velocity = [0.0, 0.0, 0.0]
+            if fraction >= 1.0:
+                cmd_position = list(target_pos)
+                state["position"] = list(cmd_position)
+                self._set_phase(state, self.PHASE_PRELOAD, now_sec)
+            normal_force_limit = 0.001
+            support_leg = False
+
+        elif phase == self.PHASE_LIFT_SWING:
             lift_duration = max(self.tangential_align_duration_s, 0.05)
             start_pos = list(state["phase_start_pos"])
             lift_swing_target = list(state["lift_swing_target"])
@@ -923,7 +1081,15 @@ class SwingLegController(object):
                 clamp_center,
             )
             cmd_velocity = vector_scale(self.wall_normal_body, normal_velocity)
-            if attachment_ready:
+            if self.stride_length_m > 0.0:
+                rpm_ready = abs(self._latest_fan_rpm[leg_index]) >= self.fan_recovery_rpm_threshold
+                attachment_confirmed = attachment_ready if self.use_contact_feedback else True
+                attach_ready = rpm_ready and attachment_confirmed
+            else:
+                attach_ready = attachment_ready
+                if not self.use_contact_feedback:
+                    attach_ready = False
+            if attach_ready:
                 if state["attach_confirmed_time"] is None:
                     self._freeze_compliant_state(state, cmd_position)
                     state["attach_confirmed_time"] = now_sec
@@ -934,7 +1100,14 @@ class SwingLegController(object):
             else:
                 state["attach_confirmed_time"] = None
                 support_leg = False
-            if phase_elapsed >= self.compliant_settle_timeout_s and not support_leg:
+            if self.stride_length_m > 0.0 and phase_elapsed >= self.compliant_settle_timeout_s and not support_leg:
+                rospy.logwarn_throttle(
+                    2.0,
+                    "stride gait waiting to attach %s: fan rpm=%.0f threshold=%.0f contact=%s",
+                    leg_name, abs(self._latest_fan_rpm[leg_index]),
+                    self.fan_recovery_rpm_threshold, bool(attachment_ready),
+                )
+            if self.stride_length_m <= 0.0 and phase_elapsed >= self.compliant_settle_timeout_s and not support_leg:
                 support_leg = True
                 self._freeze_compliant_state(state, cmd_position)
             normal_force_limit = self.attach_normal_force_limit_n
@@ -1031,6 +1204,7 @@ class SwingLegController(object):
             self.last_update_time = now_sec
 
             desired_support_mask = self._desired_support_mask()
+            self._update_stride_transfer_progress(dt)
 
             for leg_index, leg_name in enumerate(self.leg_names):
                 desired_support = desired_support_mask[leg_index] if leg_index < len(desired_support_mask) else True
@@ -1047,67 +1221,75 @@ class SwingLegController(object):
                     continue
 
                 if self.swing_phase_start[leg_name] is None and not desired_support:
-                    # Fan-off dwell: let fan spin down before starting swing motion
-                    if self.fan_off_dwell_s > 0:
-                        fan_off_time = self._fan_off_request_time.get(leg_name)
-                        if fan_off_time is None:
-                            # Before entering dwell, check that previous leg's
-                            # fan has recovered to full suction speed.
-                            prev_idx = (leg_index - 1) % len(self.leg_names)
-                            prev_rpm = abs(self._latest_fan_rpm[prev_idx])
-                            if prev_rpm < self.fan_recovery_rpm_threshold:
-                                # Previous leg fan still recovering → skip this cycle
-                                continue
-
-                            # First cycle: request fan off, stay at current position
-                            self._fan_off_request_time[leg_name] = now_sec
-                            dwell_pos = self._dwell_position(leg_name)
-                            dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
-                            self.pub.publish(dwell_msg)
-                            self._publish_leg_diagnostic(
-                                leg_name, leg_index, dwell_pos, now_sec,
-                            )
+                    if self.stride_length_m > 0.0:
+                        if not self._support_fans_ready(leg_name):
                             continue
-                        elif now_sec - fan_off_time < self.fan_off_dwell_s:
-                            # Still waiting for minimum dwell time
-                            dwell_pos = self._dwell_position(leg_name)
-                            dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
-                            self.pub.publish(dwell_msg)
-                            self._publish_leg_diagnostic(
-                                leg_name, leg_index, dwell_pos, now_sec,
-                            )
-                            continue
-                        else:
-                            # Dwell time elapsed, check actual fan RPM feedback
-                            leg_idx = self.leg_names.index(leg_name)
-                            actual_rpm = abs(self._latest_fan_rpm[leg_idx])
-                            total_wait = now_sec - fan_off_time
-                            rpm_ok = actual_rpm <= self.fan_off_rpm_threshold
-                            timed_out = total_wait >= self._fan_rpm_timeout_s
+                        self._begin_release_wait(leg_name, now_sec)
+                    else:
+                        # Legacy dwell mode: let the fan spin down before motion.
+                        if self.fan_off_dwell_s > 0:
+                            fan_off_time = self._fan_off_request_time.get(leg_name)
+                            if fan_off_time is None:
+                                # With adhesion feedback, wait for the previous
+                                # support fan before releasing this leg.
+                                prev_idx = (leg_index - 1) % len(self.leg_names)
+                                prev_rpm = abs(self._latest_fan_rpm[prev_idx])
+                                if self.use_contact_feedback and prev_rpm < self.fan_recovery_rpm_threshold:
+                                    continue
 
-                            if rpm_ok or timed_out:
-                                # RPM confirmed low, or timeout fallback
-                                self._fan_off_request_time.pop(leg_name, None)
-                                if timed_out and not rpm_ok:
-                                    rospy.logwarn_throttle(
-                                        5.0,
-                                        "fan off timeout for %s "
-                                        "(rpm=%.0f, threshold=%.0f, waited=%.1fs)",
-                                        leg_name, actual_rpm,
-                                        self.fan_off_rpm_threshold, total_wait,
-                                    )
-                            else:
-                                # Fan not yet at target RPM, continue waiting
+                                # First cycle: request fan off and hold position.
+                                self._fan_off_request_time[leg_name] = now_sec
                                 dwell_pos = self._dwell_position(leg_name)
-                                dwell_msg = self._build_message(
-                                    leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001,
-                                )
+                                dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                                 self.pub.publish(dwell_msg)
                                 self._publish_leg_diagnostic(
                                     leg_name, leg_index, dwell_pos, now_sec,
                                 )
                                 continue
-                    self._start_swing(leg_name, leg_index, now_sec)
+                            elif now_sec - fan_off_time < self.fan_off_dwell_s:
+                                # Still waiting for minimum dwell time.
+                                dwell_pos = self._dwell_position(leg_name)
+                                dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
+                                self.pub.publish(dwell_msg)
+                                self._publish_leg_diagnostic(
+                                    leg_name, leg_index, dwell_pos, now_sec,
+                                )
+                                continue
+                            else:
+                                # Dwell elapsed; enforce RPM only when feedback
+                                # is part of this legacy-mode test.
+                                leg_idx = self.leg_names.index(leg_name)
+                                actual_rpm = abs(self._latest_fan_rpm[leg_idx])
+                                total_wait = now_sec - fan_off_time
+                                rpm_ok = (
+                                    not self.use_contact_feedback
+                                    or actual_rpm <= self.fan_off_rpm_threshold
+                                )
+                                timed_out = total_wait >= self._fan_rpm_timeout_s
+
+                                if rpm_ok or timed_out:
+                                    # RPM confirmed low, or timeout fallback.
+                                    self._fan_off_request_time.pop(leg_name, None)
+                                    if timed_out and not rpm_ok:
+                                        rospy.logwarn_throttle(
+                                            5.0,
+                                            "fan off timeout for %s "
+                                            "(rpm=%.0f, threshold=%.0f, waited=%.1fs)",
+                                            leg_name, actual_rpm,
+                                            self.fan_off_rpm_threshold, total_wait,
+                                        )
+                                else:
+                                    # Fan not yet at target RPM; hold position.
+                                    dwell_pos = self._dwell_position(leg_name)
+                                    dwell_msg = self._build_message(
+                                        leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001,
+                                    )
+                                    self.pub.publish(dwell_msg)
+                                    self._publish_leg_diagnostic(
+                                        leg_name, leg_index, dwell_pos, now_sec,
+                                    )
+                                    continue
+                        self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
@@ -1125,17 +1307,9 @@ class SwingLegController(object):
                 # If support_leg=True (state 2), transition back to SUPPORT
                 if support_leg and desired_support:
                     self.swing_phase_start[leg_name] = None
-                    # Stride gait: advance body first (simulates support legs
-                    # pushing body forward DURING the swing), then record
-                    # world position at the new body_x so the following
-                    # _support_command yields the same body-frame position as
-                    # the landing position — no backward jump.
-                    if self.stride_length_m > 0.0 and self.have_body_reference:
+                    if self.stride_length_m > 0.0:
                         state = self.swing_states[leg_name]
-                        self.body_reference.pose.position.x += self._body_advance_per_swing_m
-                        self.body_reference.pose.position.y += 0.0
-                        state["support_world_x"] = state["position"][0] + self.body_reference.pose.position.x
-                        state["support_world_y"] = state["position"][1] + self.body_reference.pose.position.y
+                        self._capture_support_anchor(leg_name, state["position"])
                     support_msg = self._support_command(leg_name, leg_index)
                     self.pub.publish(support_msg)
                     self._publish_leg_diagnostic(

@@ -18,7 +18,8 @@ body_planner:
   step_transition_margin: 0.08
   nominal_position_m: [0.0, 0.0, 0.0]
   nominal_rpy_deg: [0.0, 0.0, 0.0]
-  linear_velocity_world_mps: [0.01, 0.0, 0.0]
+  # Fixed-stride sequential gait advances through attached support-leg motion.
+  linear_velocity_world_mps: [0.0, 0.0, 0.0]
   angular_velocity_world_rps: [0.0, 0.0, 0.0]
   slip_pause_threshold: 0.92
   slip_hold_all_support: false
@@ -183,6 +184,9 @@ swing_leg_controller:
   wall_normal_body: [0.0, 0.0, 1.0]
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
+  # Fixed-stride phases: normal lift first, then parallel transfer with L/4 body advance.
+  lift_duration_s: 0.20
+  transfer_duration_s: 0.28
   preload_duration_s: 0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.004

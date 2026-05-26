@@ -10,9 +10,13 @@ import math
 CSV_PATH = "/home/cc/climbing_ws/test_logs/crawl_gait_20260430_113450.csv"
 LEGS = ["lf", "rf", "rr", "lr"]
 PHASE_MAP = {
-    0: "SUPPORT", 1: "TEST_LIFT_CLEARANCE", 2: "TEST_PRESS_CONTACT",
-    3: "DETACH_SLIDE", 4: "TANGENTIAL_ALIGN", 5: "PRELOAD_COMPRESS",
-    6: "COMPLIANT_SETTLE", 7: "ATTACHED_HOLD",
+    0: "SUPPORT",
+    1: "LIFT_SWING",
+    2: "PRELOAD",
+    3: "ADMIT",
+    4: "RELEASE_WAIT",
+    5: "LIFT",
+    6: "TRANSFER",
 }
 ZERO_TOL = 1e-6
 
