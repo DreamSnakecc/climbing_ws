@@ -209,6 +209,11 @@ swing_leg_controller:
   compliant_force_limit_n: 200.0
   compliant_force_sign: 1.0
   jacobian_delta_rad: 0.001
+  workspace_check_enabled: true
+  workspace_check_mode: per_cycle
+  workspace_clamp_max_iter: 10
+  workspace_warn_throttle_s: 2.0
+  workspace_fk_tolerance_m: 0.002
   hold_position_states: ["INIT"]
   # Global contact feedback. false=suppress all contact/adhesion feedback.
   use_contact_feedback: true
@@ -330,11 +335,11 @@ legs:
 gait_controller:
   nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -195.5
+  nominal_universal_joint_center_z: 312.8 #-195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 237.04 # 270.21 237.04
+  operating_universal_joint_center_x: 269.07 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -150.0 # -100.0 -150.0
+  operating_universal_joint_center_z: -220.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
@@ -346,7 +351,7 @@ gait_controller:
   link_coxa: 44.75
   link_femur: 83.0
   link_tibia: 154.0
-  link_a3: 41.5
+  link_a3: 158.8
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421

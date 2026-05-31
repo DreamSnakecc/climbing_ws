@@ -8,6 +8,7 @@ import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout, String
+from workspace_guard import workspace_guard
 
 
 def clamp(value, lower_bound, upper_bound):
@@ -214,6 +215,11 @@ class SwingLegController(object):
         self.use_contact_feedback = bool(get_cfg("use_contact_feedback", True))
         self.swing_lift_normal_m = max(float(get_cfg("swing_lift_normal_m", self.clearance_m)), 0.0)
         self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
+        self.workspace_check_enabled = bool(get_cfg("workspace_check_enabled", True))
+        self.workspace_check_mode = str(get_cfg("workspace_check_mode", "per_cycle")).strip().lower()
+        self.workspace_clamp_max_iter = max(int(get_cfg("workspace_clamp_max_iter", 10)), 1)
+        self.workspace_warn_throttle_s = max(float(get_cfg("workspace_warn_throttle_s", 2.0)), 0.1)
+        self.workspace_fk_tolerance_m = max(float(get_cfg("workspace_fk_tolerance_m", 0.002)), 1e-5)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -247,6 +253,10 @@ class SwingLegController(object):
             )
         ) / 1000.0
         self.base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
+        self.joint_limit_deg = rospy.get_param(
+            "/gait_controller/joint_limit_deg",
+            {"j1": [-90.0, 90.0], "j2": [-10.0, 190.0], "j3": [-100.0, 100.0]},
+        )
         self.leg_yaw_rad = self._build_leg_yaw_map()
         self.leg_to_motors = self._build_leg_motor_map()
         default_joint_order = []
@@ -302,6 +312,10 @@ class SwingLegController(object):
                 "support_world_y": None,
                 "transfer_fraction": 0.0,
                 "transfer_committed": False,
+                "workspace_clamped": 0.0,
+                "workspace_margin_m": 0.0,
+                "workspace_check_us": 0.0,
+                "workspace_last_joint_deg": [0.0, 0.0, 0.0],
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -334,6 +348,9 @@ class SwingLegController(object):
             "estimated_leg_normal_force_n",
             "joint_torque_bias_norm_nm",
             "attach_confirmed_time_s",
+            "workspace_clamped",
+            "workspace_margin_m",
+            "workspace_check_us",
         ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -1195,8 +1212,75 @@ class SwingLegController(object):
             float(measured_force),
             float(bias_norm),
             float(attach_confirmed_age),
+            float(state.get("workspace_clamped", 0.0)),
+            float(state.get("workspace_margin_m", 0.0)),
+            float(state.get("workspace_check_us", 0.0)),
         ]
         publisher.publish(msg)
+
+    def _workspace_guarded_position(self, leg_name, candidate_position, reference_position):
+        state = self.swing_states[leg_name]
+        if not self.workspace_check_enabled or self.workspace_check_mode != "per_cycle":
+            state["workspace_clamped"] = 0.0
+            state["workspace_margin_m"] = 0.0
+            state["workspace_check_us"] = 0.0
+            return list(candidate_position)
+
+        checked_position, is_clamped, margin_m, joint_solution_deg, elapsed_us = workspace_guard(
+            leg_name=leg_name,
+            candidate_center_body_m=list(candidate_position),
+            reference_center_body_m=list(reference_position),
+            last_joint_deg=state.get("workspace_last_joint_deg", [0.0, 0.0, 0.0]),
+            model={
+                "nominal_x_m": self.nominal_x_m,
+                "nominal_y_m": self.nominal_y_m,
+                "nominal_z_m": self.nominal_z_m,
+                "operating_x_m": self.operating_x_m,
+                "operating_y_m": self.operating_y_m,
+                "operating_z_m": self.operating_z_m,
+                "l_coxa": self.l_coxa_m,
+                "l_femur": self.l_femur_m,
+                "l_tibia": self.l_tibia_m,
+                "l_a3": self.l_a3_m,
+                "leg_yaw_rad": self.leg_yaw_rad,
+            },
+            joint_limits_deg=self.joint_limit_deg,
+            clamp_max_iter=self.workspace_clamp_max_iter,
+            fk_tol_m=self.workspace_fk_tolerance_m,
+        )
+        state["workspace_last_joint_deg"] = list(joint_solution_deg)
+        state["workspace_clamped"] = 1.0 if is_clamped else 0.0
+        state["workspace_margin_m"] = float(margin_m)
+        state["workspace_check_us"] = float(elapsed_us)
+        if is_clamped:
+            rospy.logwarn_throttle(
+                self.workspace_warn_throttle_s,
+                "workspace_guard clamped %s from [%.3f %.3f %.3f] to [%.3f %.3f %.3f] margin=%.4f",
+                leg_name,
+                float(candidate_position[0]),
+                float(candidate_position[1]),
+                float(candidate_position[2]),
+                float(checked_position[0]),
+                float(checked_position[1]),
+                float(checked_position[2]),
+                float(margin_m),
+            )
+        return list(checked_position)
+
+    def _publish_guarded_command(self, leg_name, leg_index, position, velocity, support_leg, normal_force_limit):
+        reference_position = self.swing_states[leg_name].get("support_target", self._operating_center_command(leg_name))
+        guarded_position = self._workspace_guarded_position(leg_name, position, reference_position)
+        self.swing_states[leg_name]["position"] = list(guarded_position)
+        msg = self._build_message(
+            leg_name,
+            guarded_position,
+            velocity,
+            support_leg,
+            normal_force_limit,
+        )
+        self.pub.publish(msg)
+        self._publish_leg_diagnostic(leg_name, leg_index, guarded_position, rospy.Time.now().to_sec())
+        return msg
 
     def spin(self):
         rate = rospy.Rate(self.rate_hz)
@@ -1217,12 +1301,13 @@ class SwingLegController(object):
 
                 if desired_support and self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(support_msg)
-                    self._publish_leg_diagnostic(
+                    self._publish_guarded_command(
                         leg_name,
                         leg_index,
                         [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        now_sec,
+                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
+                        support_msg.support_leg,
+                        support_msg.desired_normal_force_limit,
                     )
                     continue
 
@@ -1246,20 +1331,12 @@ class SwingLegController(object):
                                 # First cycle: request fan off and hold position.
                                 self._fan_off_request_time[leg_name] = now_sec
                                 dwell_pos = self._dwell_position(leg_name)
-                                dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
-                                self.pub.publish(dwell_msg)
-                                self._publish_leg_diagnostic(
-                                    leg_name, leg_index, dwell_pos, now_sec,
-                                )
+                                self._publish_guarded_command(leg_name, leg_index, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                                 continue
                             elif now_sec - fan_off_time < self.fan_off_dwell_s:
                                 # Still waiting for minimum dwell time.
                                 dwell_pos = self._dwell_position(leg_name)
-                                dwell_msg = self._build_message(leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
-                                self.pub.publish(dwell_msg)
-                                self._publish_leg_diagnostic(
-                                    leg_name, leg_index, dwell_pos, now_sec,
-                                )
+                                self._publish_guarded_command(leg_name, leg_index, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                                 continue
                             else:
                                 # Dwell elapsed; enforce RPM only when feedback
@@ -1287,24 +1364,19 @@ class SwingLegController(object):
                                 else:
                                     # Fan not yet at target RPM; hold position.
                                     dwell_pos = self._dwell_position(leg_name)
-                                    dwell_msg = self._build_message(
-                                        leg_name, dwell_pos, [0.0, 0.0, 0.0], False, 0.001,
-                                    )
-                                    self.pub.publish(dwell_msg)
-                                    self._publish_leg_diagnostic(
-                                        leg_name, leg_index, dwell_pos, now_sec,
-                                    )
+                                    self._publish_guarded_command(leg_name, leg_index, dwell_pos, [0.0, 0.0, 0.0], False, 0.001)
                                     continue
                         self._start_swing(leg_name, leg_index, now_sec)
 
                 if self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(support_msg)
-                    self._publish_leg_diagnostic(
+                    self._publish_guarded_command(
                         leg_name,
                         leg_index,
                         [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        now_sec,
+                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
+                        support_msg.support_leg,
+                        support_msg.desired_normal_force_limit,
                     )
                     continue
 
@@ -1317,24 +1389,23 @@ class SwingLegController(object):
                         state = self.swing_states[leg_name]
                         self._capture_support_anchor(leg_name, state["position"])
                     support_msg = self._support_command(leg_name, leg_index)
-                    self.pub.publish(support_msg)
-                    self._publish_leg_diagnostic(
+                    self._publish_guarded_command(
                         leg_name,
                         leg_index,
                         [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        now_sec,
+                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
+                        support_msg.support_leg,
+                        support_msg.desired_normal_force_limit,
                     )
                     continue
 
-                self._publish_leg_diagnostic(leg_name, leg_index, cmd_position, now_sec)
-                self.pub.publish(
-                    self._build_message(
-                        leg_name,
-                        cmd_position,
-                        cmd_velocity,
-                        support_leg,
-                        normal_force_limit,
-                    )
+                self._publish_guarded_command(
+                    leg_name,
+                    leg_index,
+                    cmd_position,
+                    cmd_velocity,
+                    support_leg,
+                    normal_force_limit,
                 )
             rate.sleep()
 
