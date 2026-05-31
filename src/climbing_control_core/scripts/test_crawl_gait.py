@@ -68,6 +68,7 @@ PHASE_ID_MAP = {
     "LIFT": 5,
     "TRANSFER": 6,
 }
+PHASE_NAMES_BY_ID = {value: key for key, value in PHASE_ID_MAP.items()}
 
 STATE_INIT = "INIT"
 STATE_STICK = "STICK"
@@ -87,6 +88,7 @@ class CrawlGaitTester(object):
         self._latest_body_reference = None
         self._latest_estimated_state = None
         self._latest_swing_targets = {leg: None for leg in LEG_NAMES}
+        self._latest_phase_ids = {leg: 0 for leg in LEG_NAMES}
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
 
@@ -135,6 +137,11 @@ class CrawlGaitTester(object):
             "/control/swing_leg_target", LegCenterCommand,
             self._cb_swing_target, queue_size=50,
         )
+        for leg in LEG_NAMES:
+            rospy.Subscriber(
+                "/control/swing_leg_diag/" + leg, Float32MultiArray,
+                self._cb_swing_diag, callback_args=leg, queue_size=20,
+            )
         rospy.Subscriber(
             "/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray,
             self._cb_fan_rpm, queue_size=10,
@@ -189,6 +196,12 @@ class CrawlGaitTester(object):
             return
         with self._lock:
             self._latest_swing_targets[msg.leg_name] = msg
+
+    def _cb_swing_diag(self, msg, leg_name):
+        if len(msg.data) < 2:
+            return
+        with self._lock:
+            self._latest_phase_ids[leg_name] = int(round(float(msg.data[1])))
 
     def _cb_fan_rpm(self, msg):
         values = [float(value) for value in msg.data[:4]]
@@ -518,10 +531,13 @@ class CrawlGaitTester(object):
             self._csv_file = None
             self._csv_writer = None
 
-    def _phase_label_from_swing(self, leg_index, swing_msg):
-        # LegCenterCommand has no phase field; infer from support_leg and force_limit
-        # Infer coarse phase for CSV only. Detailed phase in swing_leg_diag
-        # Not subscribed to avoid column explosion.
+    def _phase_label_from_swing(self, leg_index, swing_msg, phase_id=None):
+        if phase_id is not None and int(phase_id) in PHASE_NAMES_BY_ID:
+            phase_id = int(phase_id)
+            return PHASE_NAMES_BY_ID[phase_id], phase_id
+
+        # LegCenterCommand has no phase field; keep a coarse fallback for early
+        # samples before swing_leg_diag arrives.
         if swing_msg is None:
             return "UNKNOWN", -1
         if bool(swing_msg.support_leg):
@@ -540,6 +556,7 @@ class CrawlGaitTester(object):
             body = self._latest_body_reference
             est = self._latest_estimated_state
             swings = dict(self._latest_swing_targets)
+            phase_ids = dict(self._latest_phase_ids)
             fan_rpm = list(self._latest_fan_rpm)
             fan_curr = list(self._latest_fan_currents)
 
@@ -578,7 +595,9 @@ class CrawlGaitTester(object):
 
         for leg_index, leg in enumerate(LEG_NAMES):
             cmd = swings.get(leg)
-            phase_name, phase_id = self._phase_label_from_swing(leg_index, cmd)
+            phase_name, phase_id = self._phase_label_from_swing(
+                leg_index, cmd, phase_ids.get(leg)
+            )
             cmd_x = cmd_y = cmd_z = 0.0
             cmd_support = 0
             if cmd is not None:

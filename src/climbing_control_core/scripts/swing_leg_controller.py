@@ -222,13 +222,10 @@ class SwingLegController(object):
         self.l_femur_m = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
         self.l_tibia_m = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
         self.l_a3_m = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
-        self.universal_joint_rigid_offset_m = abs(
-            float(rospy.get_param("/gait_controller/link_d6", -13.5)) + float(rospy.get_param("/gait_controller/link_d7", -106.7))
-        ) / 1000.0
         self.nominal_z_m = float(
             rospy.get_param(
                 "/gait_controller/nominal_universal_joint_center_z",
-                legacy_nominal_z_mm + self.universal_joint_rigid_offset_m * 1000.0,
+                legacy_nominal_z_mm,
             )
         ) / 1000.0
         self.operating_x_m = float(
@@ -457,6 +454,14 @@ class SwingLegController(object):
             cp = [start_pos[axis], start_pos[axis], target_pos[axis], target_pos[axis], target_pos[axis]]
             pos[axis] = bezier4(cp, phase)
         return pos
+
+    def _smooth_interp(self, start_pos, target_pos, duration_s, phase_elapsed):
+        phase = min(phase_elapsed / max(duration_s, 1e-3), 1.0)
+        progress = smoothstep5(phase)
+        return [
+            start_pos[axis] + progress * (target_pos[axis] - start_pos[axis])
+            for axis in [0, 1, 2]
+        ]
 
     def _clamp_position(self, position, center=None):
         if center is None:
@@ -803,15 +808,10 @@ class SwingLegController(object):
         target_delta = self._target_delta(leg_name, leg_index)
 
         if self.stride_length_m > 0.0:
-            # Stride gait: use actual leg position from state estimator
-            # as the swing reference.  This avoids compounding tracking
-            # errors from support commands that the leg couldn't follow.
-            if (self.have_estimated_state
-                    and leg_index < len(self.estimated_state.universal_joint_center_positions)):
-                p = self.estimated_state.universal_joint_center_positions[leg_index]
-                support_target = [float(p.x), float(p.y), float(p.z)]
-            else:
-                support_target = list(state["position"])
+            # Estimated UJC positions include the hip-origin transform, whereas
+            # LegCenterCommand.center is expressed in the controller command
+            # frame. Keep the stride reference in the command frame.
+            support_target = list(state["position"])
         else:
             support_target = self._operating_center_command(leg_name)
             if self.have_body_reference:
@@ -1018,7 +1018,7 @@ class SwingLegController(object):
 
         elif phase == self.PHASE_LIFT:
             start_pos = list(state["phase_start_pos"])
-            cmd_position = self._bezier_interp(start_pos, list(state["lift_target"]), self.lift_duration_s, phase_elapsed)
+            cmd_position = self._smooth_interp(start_pos, list(state["lift_target"]), self.lift_duration_s, phase_elapsed)
             cmd_velocity = [0.0, 0.0, 0.0]
             if phase_elapsed >= self.lift_duration_s:
                 cmd_position = list(state["lift_target"])
@@ -1064,9 +1064,15 @@ class SwingLegController(object):
 
         elif phase == self.PHASE_PRELOAD:
             start_pos = list(state["phase_start_pos"])
-            cmd_position = self._bezier_interp(start_pos, list(state["preload_target"]), self.preload_duration_s, phase_elapsed)
+            cmd_position = self._smooth_interp(start_pos, list(state["preload_target"]), self.preload_duration_s, phase_elapsed)
             cmd_velocity = [0.0, 0.0, 0.0]
-            if abs(self._normal_error(state["preload_target"], cmd_position)) <= self.normal_alignment_tolerance_m or phase_elapsed >= self.preload_duration_s:
+            preload_complete = phase_elapsed >= self.preload_duration_s
+            if self.stride_length_m <= 0.0:
+                preload_complete = preload_complete or (
+                    abs(self._normal_error(state["preload_target"], cmd_position))
+                    <= self.normal_alignment_tolerance_m
+                )
+            if preload_complete:
                 self._capture_compliant_torque_bias(leg_name, state)
                 self._set_phase(state, self.PHASE_ADMIT, now_sec)
             normal_force_limit = self.preload_normal_force_limit_n

@@ -163,9 +163,9 @@ state_logger:
 swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
-  clearance_m: 0.01
+  clearance_m: 0.02
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.01 
+  swing_lift_normal_m: 0.02 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
   stride_length_m: 0.06
@@ -332,9 +332,9 @@ gait_controller:
   nominal_y: 0.0
   nominal_universal_joint_center_z: -195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 237.04 # 270.21
+  operating_universal_joint_center_x: 237.04 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -150.0 # -100.0
+  operating_universal_joint_center_z: -150.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
@@ -347,8 +347,6 @@ gait_controller:
   link_femur: 83.0
   link_tibia: 154.0
   link_a3: 41.5
-  link_d6: -13.5
-  link_d7: -106.7
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421
