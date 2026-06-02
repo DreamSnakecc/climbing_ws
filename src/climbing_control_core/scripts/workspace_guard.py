@@ -58,11 +58,17 @@ def _joint_cost(candidate_deg, reference_deg):
     return sum((float(candidate_deg[i]) - float(reference_deg[i])) ** 2 for i in [0, 1, 2])
 
 
-def _within_limits(candidate_deg, joint_limits_deg):
+def _within_limits(candidate_deg, joint_limits_deg, q23_sum_limit_deg=None):
     for idx, key in enumerate(["j1", "j2", "j3"]):
         lo = float(joint_limits_deg[key][0])
         hi = float(joint_limits_deg[key][1])
         if float(candidate_deg[idx]) < lo or float(candidate_deg[idx]) > hi:
+            return False
+    if q23_sum_limit_deg is not None:
+        q23_sum = float(candidate_deg[1]) + float(candidate_deg[2])
+        lo = float(q23_sum_limit_deg[0])
+        hi = float(q23_sum_limit_deg[1])
+        if q23_sum < lo or q23_sum > hi:
             return False
     return True
 
@@ -81,11 +87,11 @@ def _coarse_margin_m(x_m, y_m, z_m, geom):
     return min(upper - d, d - lower)
 
 
-def _solve_reachable(point_leg_m, geom, joint_limits_deg, reference_joint_deg, fk_tol_m):
+def _solve_reachable(point_leg_m, geom, joint_limits_deg, reference_joint_deg, fk_tol_m, q23_sum_limit_deg):
     candidates = _ik_candidates_deg(point_leg_m[0], point_leg_m[1], point_leg_m[2], geom)
     valid = []
     for candidate in candidates:
-        if not _within_limits(candidate, joint_limits_deg):
+        if not _within_limits(candidate, joint_limits_deg, q23_sum_limit_deg):
             continue
         fk = _fk_from_joint_deg(candidate, geom)
         err = math.sqrt(
@@ -129,6 +135,7 @@ def workspace_guard(
     joint_limits_deg,
     clamp_max_iter=12,
     fk_tol_m=0.002,
+    q23_sum_limit_deg=None,
 ):
     """
     Returns:
@@ -138,13 +145,13 @@ def workspace_guard(
     ref_joint = list(last_joint_deg) if isinstance(last_joint_deg, (list, tuple)) and len(last_joint_deg) == 3 else [0.0, 0.0, 0.0]
     candidate_leg = _to_leg_frame_m(leg_name, candidate_center_body_m, model)
     margin = _coarse_margin_m(candidate_leg[0], candidate_leg[1], candidate_leg[2], model)
-    direct = _solve_reachable(candidate_leg, model, joint_limits_deg, ref_joint, fk_tol_m)
+    direct = _solve_reachable(candidate_leg, model, joint_limits_deg, ref_joint, fk_tol_m, q23_sum_limit_deg)
     if direct is not None:
         return list(candidate_center_body_m), False, float(margin), direct, (time.time() - start) * 1e6
 
     anchor = list(reference_center_body_m)
     anchor_leg = _to_leg_frame_m(leg_name, anchor, model)
-    anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m)
+    anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m, q23_sum_limit_deg)
     if anchor_joint is None:
         fallback = [
             float(model["operating_x_m"]),
@@ -153,7 +160,7 @@ def workspace_guard(
         ]
         anchor = fallback
         anchor_leg = _to_leg_frame_m(leg_name, anchor, model)
-        anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m)
+        anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m, q23_sum_limit_deg)
         if anchor_joint is None:
             return list(anchor), True, float(margin), ref_joint, (time.time() - start) * 1e6
 
@@ -169,7 +176,7 @@ def workspace_guard(
             anchor[2] + alpha * (candidate_center_body_m[2] - anchor[2]),
         ]
         point_leg = _to_leg_frame_m(leg_name, point, model)
-        joint = _solve_reachable(point_leg, model, joint_limits_deg, best_joint, fk_tol_m)
+        joint = _solve_reachable(point_leg, model, joint_limits_deg, best_joint, fk_tol_m, q23_sum_limit_deg)
         if joint is not None:
             lo = alpha
             best = point

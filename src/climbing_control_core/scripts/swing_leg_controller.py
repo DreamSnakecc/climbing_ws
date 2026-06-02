@@ -220,6 +220,9 @@ class SwingLegController(object):
         self.workspace_clamp_max_iter = max(int(get_cfg("workspace_clamp_max_iter", 10)), 1)
         self.workspace_warn_throttle_s = max(float(get_cfg("workspace_warn_throttle_s", 2.0)), 0.1)
         self.workspace_fk_tolerance_m = max(float(get_cfg("workspace_fk_tolerance_m", 0.002)), 1e-5)
+        self.workspace_q23_sum_limit_deg = [
+            float(value) for value in get_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
+        ]
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -1247,6 +1250,7 @@ class SwingLegController(object):
             joint_limits_deg=self.joint_limit_deg,
             clamp_max_iter=self.workspace_clamp_max_iter,
             fk_tol_m=self.workspace_fk_tolerance_m,
+            q23_sum_limit_deg=self.workspace_q23_sum_limit_deg,
         )
         state["workspace_last_joint_deg"] = list(joint_solution_deg)
         state["workspace_clamped"] = 1.0 if is_clamped else 0.0

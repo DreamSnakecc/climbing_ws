@@ -70,6 +70,22 @@ def run_tests():
     assert margin > -0.05
     assert max(abs(checked[i] - reachable[i]) for i in [0, 1, 2]) < 1e-6
 
+    # q2 + q3 constraint: individual joints are valid, but the sum must be limited.
+    q23_sum_violation = _reachable_center_body_from_joint(model, "lf", [0.0, 40.0, 0.0])
+    _, clamped, _, joint, _ = workspace_guard(
+        leg_name="lf",
+        candidate_center_body_m=q23_sum_violation,
+        reference_center_body_m=anchor,
+        last_joint_deg=[0.0, 0.0, 0.0],
+        model=model,
+        joint_limits_deg=limits,
+        clamp_max_iter=10,
+        fk_tol_m=0.003,
+        q23_sum_limit_deg=[-10.0, 10.0],
+    )
+    assert clamped, "q2+q3 violation should clamp"
+    assert -10.0 <= joint[1] + joint[2] <= 10.0
+
     # unreachable far target: should clamp
     unreachable = [0.60, 0.50, -0.45]
     checked, clamped, margin, joint, _ = workspace_guard(
