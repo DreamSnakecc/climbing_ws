@@ -332,9 +332,9 @@ gait_controller:
   nominal_y: 0.0
   nominal_universal_joint_center_z: -195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 237.04 # 270.21
+  operating_universal_joint_center_x: 237.04 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -150.0 # -100.0
+  operating_universal_joint_center_z: -150.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
