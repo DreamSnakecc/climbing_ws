@@ -351,7 +351,7 @@ gait_controller:
   operating_universal_joint_center_z: -222.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
-  startup_target_enabled: true
+  startup_target_enabled: false
   startup_target_hold_s: 0.5
   startup_target_move_duration_s: 5.0
   # Startup target defaults to the operating UJC in each leg's local frame-0 coordinates.
@@ -376,18 +376,18 @@ gait_controller:
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
   motor_home_ticks:
-    "1": 2033
-    "2": 2160
-    "3": 2025
-    "4": 2042
-    "5": 2141
-    "6": 2047
-    "7": 2030
-    "8": 2259
-    "11": 2034
-    "12": 1909
+    "1": 2045
+    "2": 2060
+    "3": 2023
+    "4": 2041
+    "5": 2142
+    "6": 2044
+    "7": 2039
+    "8": 2078
+    "11": 2035
+    "12": 1911
     "13": 2050
-    "14": 1035
+    "14": 1036
   motor_dir:
     "1": 1
     "2": 1
