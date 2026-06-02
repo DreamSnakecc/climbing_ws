@@ -59,11 +59,9 @@ class DynamixelBridge(object):
         self.l_femur = float(get_gait_cfg("link_femur", 74.0)) / 1000.0
         self.l_tibia = float(get_gait_cfg("link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(get_gait_cfg("link_a3", 41.5)) / 1000.0
-        self.l_d6 = float(get_gait_cfg("link_d6", -13.5)) / 1000.0
-        self.l_d7 = float(get_gait_cfg("link_d7", -106.7)) / 1000.0
         self.joint_zero_deg = get_gait_cfg("joint_zero_deg", {"j1": 0.0, "j2": 90.0, "j3": 0.0})
         self.nominal_universal_joint_center_z = float(
-            get_gait_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z + abs(self.l_d6 * 1000.0 + self.l_d7 * 1000.0))
+            get_gait_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z)
         )
         self.startup_pose_mode = str(get_gait_cfg("startup_pose_mode", "use_motor_home_ticks"))
         self.motor_home = get_gait_cfg("motor_home_ticks", {})

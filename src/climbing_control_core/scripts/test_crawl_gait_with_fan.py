@@ -16,11 +16,11 @@ Test flow:
      - Record fan RPM/current, body_vx, attachment state for correlation
   6. Pause, save CSV, print summary
 
-CSV fields (25 cols):
-  Common  (5): wall_time, elapsed_s, mission_state, mission_active,
+CSV fields:
+  Common: wall_time, elapsed_s, mission_state, mission_active,
                swing_leg, swing_cycle_idx
-  Body    (1): body_vx
-  Legx4: phase/command, fan RPM/current, attachment state and measured UJC.
+  Body: body_x, body_vx, est_vx
+  Legx4: phase, command xyz/support, fan RPM/current, attachment state and measured UJC.
 
 Prerequisites:
   - Jetson: roslaunch climbing_bringup jetson_bringup.launch
@@ -510,6 +510,8 @@ class CrawlGaitWithFanTester(object):
                 "%s_phase" % leg,
                 "%s_phase_id" % leg,
                 "%s_cmd_x" % leg,
+                "%s_cmd_y" % leg,
+                "%s_cmd_z" % leg,
                 "%s_cmd_support" % leg,
                 "%s_fan_rpm" % leg,
                 "%s_fan_current_a" % leg,
@@ -625,9 +627,11 @@ class CrawlGaitWithFanTester(object):
         for leg_index, leg in enumerate(LEG_NAMES):
             cmd = swings.get(leg)
             cmd_support = 0
-            cmd_x = 0.0
+            cmd_x = cmd_y = cmd_z = 0.0
             if cmd is not None:
                 cmd_x = float(cmd.center.x)
+                cmd_y = float(cmd.center.y)
+                cmd_z = float(cmd.center.z)
                 cmd_support = int(bool(cmd.support_leg))
             phase_id = int(phase_ids.get(leg, -1))
             phase_name = PHASE_NAMES.get(phase_id, "UNKNOWN")
@@ -648,6 +652,8 @@ class CrawlGaitWithFanTester(object):
                 phase_name,
                 phase_id,
                 "%.4f" % cmd_x,
+                "%.4f" % cmd_y,
+                "%.4f" % cmd_z,
                 cmd_support,
                 "%.1f" % float(fan_rpm[leg_index]),
                 "%.4f" % float(fan_curr[leg_index]),

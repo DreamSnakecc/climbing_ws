@@ -13,6 +13,7 @@ __pycache__/
 
 .vscode/
 .idea/
+.codegraph/
 
 .DS_Store
 Thumbs.db

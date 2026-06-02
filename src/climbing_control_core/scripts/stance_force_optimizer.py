@@ -135,8 +135,7 @@ class StanceForceOptimizer(object):
         nominal_z = float(
             rospy.get_param(
                 "/gait_controller/nominal_universal_joint_center_z",
-                float(rospy.get_param("/gait_controller/nominal_z", -299.2))
-                + abs(float(rospy.get_param("/gait_controller/link_d6", -13.5)) + float(rospy.get_param("/gait_controller/link_d7", -106.7))),
+                float(rospy.get_param("/gait_controller/nominal_z", -299.2)),
             )
         ) / 1000.0
         operating_x = float(

@@ -41,10 +41,8 @@ class LegIkExecutor(object):
         self.l_femur = float(get_cfg("link_femur", 74.0))
         self.l_tibia = float(get_cfg("link_tibia", 150.0))
         self.l_a3 = float(get_cfg("link_a3", 41.5))
-        self.l_d6 = float(get_cfg("link_d6", -13.5))
-        self.l_d7 = float(get_cfg("link_d7", -106.7))
         self.nominal_universal_joint_center_z = float(
-            get_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z + abs(self.l_d6 + self.l_d7))
+            get_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z)
         )
         self.operating_universal_joint_center_x = float(
             get_cfg("operating_universal_joint_center_x", self.nominal_x)

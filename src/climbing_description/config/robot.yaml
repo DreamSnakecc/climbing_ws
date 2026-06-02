@@ -121,9 +121,9 @@ state_estimator:
   fan_min_active_rpm: 300.0
   # Adhesion is judged primarily from fan current under a commanded RPM.
   # Attached: lower current; detached: higher current.
-  fan_adhesion_reference_rpm: [30000.0, 40000.0]
-  fan_attached_current_min_a: [1.2, 2.5]
-  fan_attached_current_max_a: [1.5, 3.0]
+  fan_adhesion_reference_rpm: [30000.0, 40000.0, 50000.0, 60000.0, 70000.0]
+  fan_attached_current_min_a: [1.45, 1.80, 2.15, 2.65, 3.15]
+  fan_attached_current_max_a: [1.75, 2.10, 2.45, 2.95, 3.45]
   fan_detached_current_min_a: [5.0, 7.0]
   fan_detached_current_max_a: [5.0, 9.0]
   fan_adhesion_confidence_threshold: 0.75
@@ -163,9 +163,9 @@ state_logger:
 swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
-  clearance_m: 0.01
+  clearance_m: 0.02
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.01 
+  swing_lift_normal_m: 0.02 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
   stride_length_m: 0.06
@@ -209,6 +209,12 @@ swing_leg_controller:
   compliant_force_limit_n: 200.0
   compliant_force_sign: 1.0
   jacobian_delta_rad: 0.001
+  workspace_check_enabled: true
+  workspace_check_mode: per_cycle 
+  workspace_clamp_max_iter: 10
+  workspace_warn_throttle_s: 2.0
+  workspace_fk_tolerance_m: 0.002
+  workspace_q23_sum_limit_deg: [-10.0, 10.0]
   hold_position_states: ["INIT"]
   # Global contact feedback. false=suppress all contact/adhesion feedback.
   use_contact_feedback: true
@@ -249,18 +255,26 @@ dynamixel_telemetry:
       torque_bias_nm: -0.32
     xw430:
       current_to_torque_points:
+        - current_a: 0.00
+          torque_nm: 0.00
         - current_a: 0.14
-          torque_nm: 0.10
-        - current_a: 0.32
-          torque_nm: 0.35
-        - current_a: 0.68
-          torque_nm: 0.85
-        - current_a: 0.97
-          torque_nm: 1.15
-        - current_a: 1.24
-          torque_nm: 1.45
-      torque_constant_nm_per_a: 1.28
-      torque_bias_nm: -0.06
+          torque_nm: 0.24
+        - current_a: 0.28
+          torque_nm: 0.55
+        - current_a: 0.42
+          torque_nm: 0.90
+        - current_a: 0.56
+          torque_nm: 1.20
+        - current_a: 0.70
+          torque_nm: 1.50
+        - current_a: 0.84
+          torque_nm: 1.75
+        - current_a: 0.98
+          torque_nm: 2.05
+        - current_a: 1.12
+          torque_nm: 2.40
+      torque_constant_nm_per_a: 2.14
+      torque_bias_nm: 0.0
   torque_model_by_motor:
     "1": xw540
     "2": xw430
@@ -330,11 +344,11 @@ legs:
 gait_controller:
   nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -195.5
+  nominal_universal_joint_center_z: -314.8 #-195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 237.04 # 270.21 237.04
+  operating_universal_joint_center_x: 269.07 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -150.0 # -100.0 -150.0
+  operating_universal_joint_center_z: -222.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
@@ -346,9 +360,7 @@ gait_controller:
   link_coxa: 44.75
   link_femur: 83.0
   link_tibia: 154.0
-  link_a3: 41.5
-  link_d6: -13.5
-  link_d7: -106.7
+  link_a3: 160.8
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421

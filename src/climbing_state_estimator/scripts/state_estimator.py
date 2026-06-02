@@ -176,12 +176,10 @@ class StateEstimator(object):
         self.l_femur = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
         self.l_tibia = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
-        self.l_d6 = float(rospy.get_param("/gait_controller/link_d6", -13.5)) / 1000.0
-        self.l_d7 = float(rospy.get_param("/gait_controller/link_d7", -106.7)) / 1000.0
         self.nominal_universal_joint_center_z_m = float(
             rospy.get_param(
                 "/gait_controller/nominal_universal_joint_center_z",
-                (self.legacy_nominal_control_point_z_m + abs(self.l_d6 + self.l_d7)) * 1000.0,
+                self.legacy_nominal_control_point_z_m * 1000.0,
             )
         ) / 1000.0
         self.operating_universal_joint_center_x_m = float(

@@ -31,7 +31,7 @@
   <arg name="enable_state_logger" default="false" />
   <arg name="linear_velocity_x" default="0.0" />
   <arg name="use_contact_feedback" default="false" />
-  <arg name="stride_length_m" default="0.0" />
+  <arg name="stride_length_m" default="0.06" />
   <!--
     Flat-ground testing explicitly defaults stride_length_m to 0 because fixed-stride
     wall gait requires live fan RPM gating.  Override only when fan commands and
