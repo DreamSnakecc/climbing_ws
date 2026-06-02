@@ -35,14 +35,14 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 4
-  attach_rpm: 35000.0
-  climb_rpm: 35000.0
+  attach_rpm: 50000.0
+  climb_rpm: 50000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
-  release_rpm: 0.0
-  swing_release_rpm: 0.0
+  release_rpm: 0.0  #Init
+  swing_release_rpm: 9000.0
 
-  touchdown_rpm: 35000.0
+  touchdown_rpm: 50000.0
   touchdown_boost_duration_s: 0.25
   default_normal_force_limit: 150.0
   # Fan activation for swing leg: mission_supervisor detects normal_force_limit >= attach_normal_force_limit_n
@@ -193,7 +193,7 @@ swing_leg_controller:
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 1.0
   fan_off_rpm_threshold: 10000.0
-  fan_recovery_rpm_threshold: 30000.0
+  fan_recovery_rpm_threshold: 45000.0
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
@@ -217,7 +217,7 @@ swing_leg_controller:
   workspace_q23_sum_limit_deg: [-10.0, 10.0]
   hold_position_states: ["INIT"]
   # Global contact feedback. false=suppress all contact/adhesion feedback.
-  use_contact_feedback: true
+  use_contact_feedback: false
 
 jetson:
   command_rate_hz: 100.0

@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import math
+import os
+import sys
 
 import numpy as np
 
@@ -8,6 +10,11 @@ import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout, String
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
 from workspace_guard import workspace_guard
 
 
