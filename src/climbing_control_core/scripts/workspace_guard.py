@@ -153,11 +153,7 @@ def workspace_guard(
     anchor_leg = _to_leg_frame_m(leg_name, anchor, model)
     anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m, q23_sum_limit_deg)
     if anchor_joint is None:
-        fallback = [
-            float(model["operating_x_m"]),
-            float(model["operating_y_m"]),
-            float(model["operating_z_m"]),
-        ]
+        fallback = list(model.get("operating_center_body_m", reference_center_body_m))
         anchor = fallback
         anchor_leg = _to_leg_frame_m(leg_name, anchor, model)
         anchor_joint = _solve_reachable(anchor_leg, model, joint_limits_deg, ref_joint, fk_tol_m, q23_sum_limit_deg)

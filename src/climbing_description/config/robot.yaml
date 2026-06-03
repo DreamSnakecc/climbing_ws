@@ -168,7 +168,7 @@ swing_leg_controller:
   swing_lift_normal_m: 0.02 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  stride_length_m: 0.06
+  stride_length_m: 0.04
   # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
   # where swing distance = 3*stride_length_m/4 and body advances
   # stride_length_m/4 per leg swing.  No body_planner velocity needed.
@@ -189,7 +189,7 @@ swing_leg_controller:
   transfer_duration_s: 0.28
   preload_duration_s: 0.16
   compliant_settle_timeout_s: 0.80
-  preload_extra_normal_m: 0.004
+  preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 1.0
   fan_off_rpm_threshold: 10000.0

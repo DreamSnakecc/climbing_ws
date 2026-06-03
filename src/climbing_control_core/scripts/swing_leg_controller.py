@@ -1248,6 +1248,7 @@ class SwingLegController(object):
                 "operating_x_m": self.operating_x_m,
                 "operating_y_m": self.operating_y_m,
                 "operating_z_m": self.operating_z_m,
+                "operating_center_body_m": self._operating_center_command(leg_name),
                 "l_coxa": self.l_coxa_m,
                 "l_femur": self.l_femur_m,
                 "l_tibia": self.l_tibia_m,
