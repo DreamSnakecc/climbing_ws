@@ -215,6 +215,12 @@ swing_leg_controller:
   workspace_warn_throttle_s: 2.0
   workspace_fk_tolerance_m: 0.002
   workspace_q23_sum_limit_deg: [-10.0, 10.0]
+  actual_tracking_enabled: true
+  actual_tracking_tangent_tolerance_m: 0.006
+  actual_tracking_normal_tolerance_m: 0.004
+  actual_tracking_lift_min_ratio: 0.75
+  actual_tracking_phase_timeout_s: 0.8
+  actual_tracking_warn_throttle_s: 1.0
   hold_position_states: ["INIT"]
   # Global contact feedback. false=suppress all contact/adhesion feedback.
   use_contact_feedback: false

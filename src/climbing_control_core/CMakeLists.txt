@@ -18,11 +18,13 @@ catkin_install_python(PROGRAMS
   scripts/mission_supervisor.py
   scripts/stance_force_optimizer.py
   scripts/swing_leg_controller.py
+  scripts/actual_tracking.py
   scripts/state_logger.py
   scripts/test_swing_admittance.py
   scripts/test_crawl_gait.py
   scripts/test_crawl_gait_with_fan.py
   scripts/test_single_leg_swing.py
+  scripts/test_actual_tracking_unit.py
   scripts/test_workspace_guard_unit.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

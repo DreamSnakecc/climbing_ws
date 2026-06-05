@@ -16,6 +16,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from workspace_guard import workspace_guard
+from actual_tracking import tracking_readiness
 
 
 def clamp(value, lower_bound, upper_bound):
@@ -230,6 +231,28 @@ class SwingLegController(object):
         self.workspace_q23_sum_limit_deg = [
             float(value) for value in get_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
         ]
+        self.actual_tracking_enabled = bool(get_cfg("actual_tracking_enabled", True))
+        self.actual_tracking_tangent_tolerance_m = max(
+            float(get_cfg("actual_tracking_tangent_tolerance_m", 0.006)),
+            0.0,
+        )
+        self.actual_tracking_normal_tolerance_m = max(
+            float(get_cfg("actual_tracking_normal_tolerance_m", 0.004)),
+            0.0,
+        )
+        self.actual_tracking_lift_min_ratio = clamp(
+            float(get_cfg("actual_tracking_lift_min_ratio", 0.75)),
+            0.0,
+            1.0,
+        )
+        self.actual_tracking_phase_timeout_s = max(
+            float(get_cfg("actual_tracking_phase_timeout_s", 0.8)),
+            0.0,
+        )
+        self.actual_tracking_warn_throttle_s = max(
+            float(get_cfg("actual_tracking_warn_throttle_s", 1.0)),
+            0.1,
+        )
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -326,6 +349,11 @@ class SwingLegController(object):
                 "workspace_margin_m": 0.0,
                 "workspace_check_us": 0.0,
                 "workspace_last_joint_deg": [0.0, 0.0, 0.0],
+                "actual_tracking_error_m": 0.0,
+                "actual_tracking_normal_error_m": 0.0,
+                "actual_tracking_tangent_error_m": 0.0,
+                "actual_tracking_ready": 1.0,
+                "actual_tracking_wait_started_at": None,
             }
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
@@ -361,6 +389,11 @@ class SwingLegController(object):
             "workspace_clamped",
             "workspace_margin_m",
             "workspace_check_us",
+            "actual_tracking_error_m",
+            "actual_tracking_normal_error_m",
+            "actual_tracking_tangent_error_m",
+            "actual_tracking_ready",
+            "actual_tracking_wait_s",
         ]
         rospy.Subscriber("/control/body_reference", BodyReference, self.body_reference_callback, queue_size=20)
         rospy.Subscriber("/state/estimated", EstimatedState, self.estimated_state_callback, queue_size=20)
@@ -440,6 +473,21 @@ class SwingLegController(object):
             return float(values[leg_index])
         return float(default)
 
+    def _actual_ujc_command_position(self, leg_name, leg_index):
+        if not self.have_estimated_state:
+            return None
+        if leg_index >= len(self.estimated_state.universal_joint_center_positions):
+            return None
+        ujc = self.estimated_state.universal_joint_center_positions[leg_index]
+        hip = self._hip_offset(leg_name)
+        dx_base = float(ujc.x) - hip[0]
+        dy_base = float(ujc.y) - hip[1]
+        dx_leg, dy_leg = self._base_delta_to_leg_delta(leg_name, dx_base, dy_base)
+        cmd_dx_leg = dx_leg - self.nominal_x_m
+        cmd_dy_leg = dy_leg - self.nominal_y_m
+        cmd_dx_base, cmd_dy_base = self._leg_delta_to_base_delta(leg_name, cmd_dx_leg, cmd_dy_leg)
+        return [cmd_dx_base, cmd_dy_base, float(ujc.z)]
+
     def _normal_component(self, vector):
         normal_scalar = vector_dot(vector, self.wall_normal_body)
         return vector_scale(self.wall_normal_body, normal_scalar)
@@ -459,6 +507,85 @@ class SwingLegController(object):
         state["phase"] = phase_name
         state["phase_started_at"] = now_sec
         state["phase_start_pos"] = list(state.get("position", [0.0, 0.0, 0.0]))
+        state["actual_tracking_wait_started_at"] = None
+
+    def _actual_tracking_wait_s(self, state, now_sec):
+        started_at = state.get("actual_tracking_wait_started_at")
+        if started_at is None:
+            return 0.0
+        return max(0.0, float(now_sec) - float(started_at))
+
+    def _mark_actual_tracking_ready(self, state):
+        state["actual_tracking_error_m"] = 0.0
+        state["actual_tracking_normal_error_m"] = 0.0
+        state["actual_tracking_tangent_error_m"] = 0.0
+        state["actual_tracking_ready"] = 1.0
+        state["actual_tracking_wait_started_at"] = None
+
+    def _actual_tracking_ready_for_phase(self, leg_name, leg_index, phase_name, start_position, target_position, now_sec):
+        state = self.swing_states[leg_name]
+        if not self.actual_tracking_enabled:
+            self._mark_actual_tracking_ready(state)
+            return True
+
+        actual_position = self._actual_ujc_command_position(leg_name, leg_index)
+        if actual_position is None:
+            metrics = {
+                "ready": False,
+                "total_error_m": 0.0,
+                "normal_error_m": 0.0,
+                "tangent_error_m": 0.0,
+            }
+        else:
+            metrics = tracking_readiness(
+                phase_name,
+                start_position,
+                target_position,
+                actual_position,
+                self.wall_normal_body,
+                self.actual_tracking_tangent_tolerance_m,
+                self.actual_tracking_normal_tolerance_m,
+                self.actual_tracking_lift_min_ratio,
+            )
+
+        state["actual_tracking_error_m"] = float(metrics["total_error_m"])
+        state["actual_tracking_normal_error_m"] = float(metrics["normal_error_m"])
+        state["actual_tracking_tangent_error_m"] = float(metrics["tangent_error_m"])
+        state["actual_tracking_ready"] = 1.0 if metrics["ready"] else 0.0
+        if metrics["ready"]:
+            state["actual_tracking_wait_started_at"] = None
+            return True
+
+        if state.get("actual_tracking_wait_started_at") is None:
+            state["actual_tracking_wait_started_at"] = now_sec
+        wait_s = self._actual_tracking_wait_s(state, now_sec)
+        if wait_s >= self.actual_tracking_phase_timeout_s:
+            if actual_position is None:
+                rospy.logwarn_throttle(
+                    self.actual_tracking_warn_throttle_s,
+                    "actual_tracking waiting %s %s: no estimated UJC feedback wait=%.2fs",
+                    leg_name,
+                    phase_name,
+                    wait_s,
+                )
+            else:
+                rospy.logwarn_throttle(
+                    self.actual_tracking_warn_throttle_s,
+                    "actual_tracking waiting %s %s: error=%.4f normal=%.4f tangent=%.4f wait=%.2fs target=[%.3f %.3f %.3f] actual=[%.3f %.3f %.3f]",
+                    leg_name,
+                    phase_name,
+                    float(metrics["total_error_m"]),
+                    float(metrics["normal_error_m"]),
+                    float(metrics["tangent_error_m"]),
+                    wait_s,
+                    float(target_position[0]),
+                    float(target_position[1]),
+                    float(target_position[2]),
+                    float(actual_position[0]),
+                    float(actual_position[1]),
+                    float(actual_position[2]),
+                )
+        return False
 
     def _step_toward_target(self, current_position, target_position, velocity_limits, dt, clamp_center=None):
         next_position = []
@@ -877,6 +1004,7 @@ class SwingLegController(object):
         state["attach_confirmed_time"] = None
         state["transfer_fraction"] = 0.0
         state["transfer_committed"] = False
+        self._mark_actual_tracking_ready(state)
         if self.stride_length_m > 0.0:
             self._set_phase(state, self.PHASE_LIFT, stamp_sec)
         else:
@@ -1009,6 +1137,7 @@ class SwingLegController(object):
         state["compliant_normal_offset"] = 0.0
         state["compliant_normal_velocity"] = 0.0
         state["attach_confirmed_time"] = None
+        self._mark_actual_tracking_ready(state)
         state["phase"] = self.PHASE_SUPPORT
         state["phase_started_at"] = None
         return self._build_message(
@@ -1048,11 +1177,21 @@ class SwingLegController(object):
             cmd_position = self._smooth_interp(start_pos, list(state["lift_target"]), self.lift_duration_s, phase_elapsed)
             cmd_velocity = [0.0, 0.0, 0.0]
             if phase_elapsed >= self.lift_duration_s:
-                cmd_position = list(state["lift_target"])
+                tracking_target = self._workspace_guarded_position(leg_name, state["lift_target"], clamp_center)
+                state["lift_target"] = list(tracking_target)
+                cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
-                state["transfer_fraction"] = 0.0
-                state["transfer_committed"] = False
-                self._set_phase(state, self.PHASE_TRANSFER, now_sec)
+                if self._actual_tracking_ready_for_phase(
+                    leg_name,
+                    leg_index,
+                    self.PHASE_LIFT,
+                    start_pos,
+                    tracking_target,
+                    now_sec,
+                ):
+                    state["transfer_fraction"] = 0.0
+                    state["transfer_committed"] = False
+                    self._set_phase(state, self.PHASE_TRANSFER, now_sec)
             normal_force_limit = 0.001
             support_leg = False
 
@@ -1067,9 +1206,19 @@ class SwingLegController(object):
             ]
             cmd_velocity = [0.0, 0.0, 0.0]
             if fraction >= 1.0:
-                cmd_position = list(target_pos)
+                tracking_target = self._workspace_guarded_position(leg_name, target_pos, clamp_center)
+                state["lift_swing_target"] = list(tracking_target)
+                cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
-                self._set_phase(state, self.PHASE_PRELOAD, now_sec)
+                if self._actual_tracking_ready_for_phase(
+                    leg_name,
+                    leg_index,
+                    self.PHASE_TRANSFER,
+                    state.get("start", start_pos),
+                    tracking_target,
+                    now_sec,
+                ):
+                    self._set_phase(state, self.PHASE_PRELOAD, now_sec)
             normal_force_limit = 0.001
             support_leg = False
 
@@ -1100,8 +1249,20 @@ class SwingLegController(object):
                     <= self.normal_alignment_tolerance_m
                 )
             if preload_complete:
-                self._capture_compliant_torque_bias(leg_name, state)
-                self._set_phase(state, self.PHASE_ADMIT, now_sec)
+                tracking_target = self._workspace_guarded_position(leg_name, state["preload_target"], clamp_center)
+                state["preload_target"] = list(tracking_target)
+                cmd_position = list(tracking_target)
+                state["position"] = list(cmd_position)
+                if self._actual_tracking_ready_for_phase(
+                    leg_name,
+                    leg_index,
+                    self.PHASE_PRELOAD,
+                    start_pos,
+                    tracking_target,
+                    now_sec,
+                ):
+                    self._capture_compliant_torque_bias(leg_name, state)
+                    self._set_phase(state, self.PHASE_ADMIT, now_sec)
             normal_force_limit = self.preload_normal_force_limit_n
             support_leg = False
 
@@ -1225,6 +1386,11 @@ class SwingLegController(object):
             float(state.get("workspace_clamped", 0.0)),
             float(state.get("workspace_margin_m", 0.0)),
             float(state.get("workspace_check_us", 0.0)),
+            float(state.get("actual_tracking_error_m", 0.0)),
+            float(state.get("actual_tracking_normal_error_m", 0.0)),
+            float(state.get("actual_tracking_tangent_error_m", 0.0)),
+            float(state.get("actual_tracking_ready", 1.0)),
+            float(self._actual_tracking_wait_s(state, now_sec)),
         ]
         publisher.publish(msg)
 
