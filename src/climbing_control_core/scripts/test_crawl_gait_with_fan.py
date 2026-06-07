@@ -20,7 +20,8 @@ CSV fields:
   Common: wall_time, elapsed_s, mission_state, mission_active,
                swing_leg, swing_cycle_idx
   Body: body_x, body_vx, est_vx
-  Legx4: phase, command xyz/support, fan RPM/current, attachment state and measured UJC.
+  Legx4: phase, command xyz/support, fan RPM/current, attachment state,
+         measured UJC and actual-tracking diagnostics.
 
 Prerequisites:
   - Jetson: roslaunch climbing_bringup jetson_bringup.launch
@@ -51,6 +52,13 @@ from climbing_msgs.msg import (
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
+ACTUAL_TRACKING_DIAG_FIELDS = [
+    ("actual_tracking_error_m", 16, 0.0),
+    ("actual_tracking_normal_error_m", 17, 0.0),
+    ("actual_tracking_tangent_error_m", 18, 0.0),
+    ("actual_tracking_ready", 19, 1.0),
+    ("actual_tracking_wait_s", 20, 0.0),
+]
 PHASE_NAMES = {
     0: "SUPPORT",
     1: "LIFT_SWING",
@@ -80,6 +88,7 @@ class CrawlGaitWithFanTester(object):
         self._latest_estimated_state = None
         self._latest_swing_targets = {leg: None for leg in LEG_NAMES}
         self._latest_phase_ids = {leg: 0 for leg in LEG_NAMES}
+        self._latest_swing_diag = {leg: [] for leg in LEG_NAMES}
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
 
@@ -200,6 +209,7 @@ class CrawlGaitWithFanTester(object):
             return
         with self._lock:
             self._latest_phase_ids[leg_name] = int(round(float(msg.data[1])))
+            self._latest_swing_diag[leg_name] = [float(value) for value in msg.data]
 
     def _cb_swing_target(self, msg):
         if msg.leg_name not in LEG_NAMES:
@@ -520,6 +530,10 @@ class CrawlGaitWithFanTester(object):
                 "%s_ujc_y" % leg,
                 "%s_ujc_z" % leg,
             ])
+            cols.extend([
+                "%s_%s" % (leg, field[0])
+                for field in ACTUAL_TRACKING_DIAG_FIELDS
+            ])
         return cols
 
     def _open_csv(self):
@@ -562,6 +576,7 @@ class CrawlGaitWithFanTester(object):
             est = self._latest_estimated_state
             swings = dict(self._latest_swing_targets)
             phase_ids = dict(self._latest_phase_ids)
+            swing_diag = {leg: list(values) for leg, values in self._latest_swing_diag.items()}
             fan_rpm = list(self._latest_fan_rpm)
             fan_curr = list(self._latest_fan_currents)
 
@@ -647,6 +662,7 @@ class CrawlGaitWithFanTester(object):
             attach = 0
             if est is not None and leg_index < len(est.attachment_ready_mask):
                 attach = int(bool(est.attachment_ready_mask[leg_index]))
+            diag_values = swing_diag.get(leg, [])
 
             row.extend([
                 phase_name,
@@ -661,6 +677,10 @@ class CrawlGaitWithFanTester(object):
                 "%.4f" % ujc_x,
                 "%.4f" % ujc_y,
                 "%.4f" % ujc_z,
+            ])
+            row.extend([
+                "%.6f" % float(diag_values[index] if index < len(diag_values) else default)
+                for _, index, default in ACTUAL_TRACKING_DIAG_FIELDS
             ])
 
         return row

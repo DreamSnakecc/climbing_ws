@@ -33,7 +33,8 @@ CSV fields compact (~102 cols):
                {leg}_cmd_x, {leg}_cmd_y, {leg}_cmd_z, {leg}_cmd_support,
                {leg}_ujc_x, {leg}_ujc_y, {leg}_ujc_z,
                {leg}_attachment_ready, {leg}_fan_rpm, {leg}_fan_current_a,
-               {leg}_lift_x/y/z, {leg}_preload_x/y/z, {leg}_attach_x/y/z
+               {leg}_lift_x/y/z, {leg}_preload_x/y/z, {leg}_attach_x/y/z,
+               {leg}_actual_tracking_*
 """
 
 from __future__ import print_function
@@ -58,6 +59,13 @@ from climbing_msgs.msg import (
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
+ACTUAL_TRACKING_DIAG_FIELDS = [
+    ("actual_tracking_error_m", 16, 0.0),
+    ("actual_tracking_normal_error_m", 17, 0.0),
+    ("actual_tracking_tangent_error_m", 18, 0.0),
+    ("actual_tracking_ready", 19, 1.0),
+    ("actual_tracking_wait_s", 20, 0.0),
+]
 
 PHASE_ID_MAP = {
     "SUPPORT": 0,
@@ -89,6 +97,7 @@ class CrawlGaitTester(object):
         self._latest_estimated_state = None
         self._latest_swing_targets = {leg: None for leg in LEG_NAMES}
         self._latest_phase_ids = {leg: 0 for leg in LEG_NAMES}
+        self._latest_swing_diag = {leg: [] for leg in LEG_NAMES}
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
 
@@ -202,6 +211,7 @@ class CrawlGaitTester(object):
             return
         with self._lock:
             self._latest_phase_ids[leg_name] = int(round(float(msg.data[1])))
+            self._latest_swing_diag[leg_name] = [float(value) for value in msg.data]
 
     def _cb_fan_rpm(self, msg):
         values = [float(value) for value in msg.data[:4]]
@@ -505,6 +515,10 @@ class CrawlGaitTester(object):
                 "%s_attach_y" % leg,
                 "%s_attach_z" % leg,
             ])
+            cols.extend([
+                "%s_%s" % (leg, field[0])
+                for field in ACTUAL_TRACKING_DIAG_FIELDS
+            ])
         return cols
 
     def _open_csv(self):
@@ -557,6 +571,7 @@ class CrawlGaitTester(object):
             est = self._latest_estimated_state
             swings = dict(self._latest_swing_targets)
             phase_ids = dict(self._latest_phase_ids)
+            swing_diag = {leg: list(values) for leg, values in self._latest_swing_diag.items()}
             fan_rpm = list(self._latest_fan_rpm)
             fan_curr = list(self._latest_fan_currents)
 
@@ -637,6 +652,11 @@ class CrawlGaitTester(object):
                 "%.4f" % (float(cmd.attach_target.x) if cmd is not None else 0.0),
                 "%.4f" % (float(cmd.attach_target.y) if cmd is not None else 0.0),
                 "%.4f" % (float(cmd.attach_target.z) if cmd is not None else 0.0),
+            ])
+            diag_values = swing_diag.get(leg, [])
+            row.extend([
+                "%.6f" % float(diag_values[index] if index < len(diag_values) else default)
+                for _, index, default in ACTUAL_TRACKING_DIAG_FIELDS
             ])
 
             # swing cycle: count True->False->True transitions

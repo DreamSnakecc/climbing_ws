@@ -168,7 +168,7 @@ swing_leg_controller:
   swing_lift_normal_m: 0.02 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  stride_length_m: 0.04
+  stride_length_m: 0.02
   # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
   # where swing distance = 3*stride_length_m/4 and body advances
   # stride_length_m/4 per leg swing.  No body_planner velocity needed.
@@ -214,7 +214,7 @@ swing_leg_controller:
   workspace_clamp_max_iter: 10
   workspace_warn_throttle_s: 2.0
   workspace_fk_tolerance_m: 0.002
-  workspace_q23_sum_limit_deg: [-10.0, 10.0]
+  workspace_q23_sum_limit_deg: [-12.0, 12.0]
   actual_tracking_enabled: true
   actual_tracking_tangent_tolerance_m: 0.006
   actual_tracking_normal_tolerance_m: 0.004
@@ -350,11 +350,11 @@ legs:
 gait_controller:
   nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -315.8 #-195.5
+  nominal_universal_joint_center_z: -324.8 #-195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
   operating_universal_joint_center_x: 269.07 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -223.0 # -100.0 -150.0
+  operating_universal_joint_center_z: -232.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
@@ -366,7 +366,7 @@ gait_controller:
   link_coxa: 44.75
   link_femur: 83.0
   link_tibia: 154.0
-  link_a3: 161.8
+  link_a3: 170.8
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421
