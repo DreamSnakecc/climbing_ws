@@ -36,22 +36,6 @@ def bezier4(points, phase):
     return sum([coefficients[index] * points[index] for index in range(5)])
 
 
-def bezier4_derivative(points, phase):
-    phase = clamp(phase, 0.0, 1.0)
-    derivative_points = []
-    for index in range(4):
-        derivative_points.append(4.0 * (points[index + 1] - points[index]))
-
-    one_minus = 1.0 - phase
-    coefficients = [
-        one_minus ** 3,
-        3.0 * phase * (one_minus ** 2),
-        3.0 * (phase ** 2) * one_minus,
-        phase ** 3,
-    ]
-    return sum([coefficients[index] * derivative_points[index] for index in range(4)])
-
-
 def smoothstep5(phase):
     phase = clamp(phase, 0.0, 1.0)
     return phase * phase * phase * (10.0 + phase * (-15.0 + 6.0 * phase))
@@ -160,99 +144,100 @@ class SwingLegController(object):
     PHASE_LIFT = "LIFT"
     PHASE_TRANSFER = "TRANSFER"
 
+    def _cfg(self, name, default):
+        return rospy.get_param("~" + name, rospy.get_param("/swing_leg_controller/" + name, default))
+
+    def _float_cfg(self, name, default, lower_bound=None):
+        value = float(self._cfg(name, default))
+        if lower_bound is None:
+            return value
+        return max(value, lower_bound)
+
+    def _int_cfg(self, name, default, lower_bound=None):
+        value = int(self._cfg(name, default))
+        if lower_bound is None:
+            return value
+        return max(value, lower_bound)
+
+    def _float_list_cfg(self, name, default):
+        return [float(value) for value in self._cfg(name, default)]
+
+    def _clamped_float_cfg(self, name, default, lower_bound, upper_bound):
+        return clamp(float(self._cfg(name, default)), lower_bound, upper_bound)
+
     def __init__(self):
         rospy.init_node("swing_leg_controller", anonymous=False)
 
-        def get_cfg(name, default):
-            return rospy.get_param("~" + name, rospy.get_param("/swing_leg_controller/" + name, default))
-
-        self.leg_names = [str(name) for name in get_cfg("leg_names", ["lf", "rf", "rr", "lr"])]
-        self.rate_hz = float(get_cfg("publish_rate_hz", 50.0))
-        self.swing_duration_s = max(float(get_cfg("swing_duration_s", 0.65)), 0.1)
-        self.clearance_m = float(get_cfg("clearance_m", 0.035))
-        self.raibert_height_gain = float(get_cfg("raibert_height_gain", 1.0))
-        self.raibert_velocity_gain = float(get_cfg("raibert_velocity_gain", 1.0))
-        self.fixed_swing_distance_m = float(get_cfg("fixed_swing_distance_m", 0.0))
-        self.stride_length_m = float(get_cfg("stride_length_m", 0.0))
+        self.leg_names = [str(name) for name in self._cfg("leg_names", ["lf", "rf", "rr", "lr"])]
+        self.rate_hz = self._float_cfg("publish_rate_hz", 50.0)
+        self.swing_duration_s = self._float_cfg("swing_duration_s", 0.65, 0.1)
+        self.clearance_m = self._float_cfg("clearance_m", 0.035)
+        self.raibert_height_gain = self._float_cfg("raibert_height_gain", 1.0)
+        self.raibert_velocity_gain = self._float_cfg("raibert_velocity_gain", 1.0)
+        self.stride_length_m = self._float_cfg("stride_length_m", 0.0)
         if self.stride_length_m > 0.0:
             self._swing_distance_m = 0.75 * self.stride_length_m   # 3L/4
             self._body_advance_per_swing_m = 0.25 * self.stride_length_m  # L/4
         else:
             self._swing_distance_m = 0.0
             self._body_advance_per_swing_m = 0.0
-        self.foot_delta_x_limit = float(get_cfg("foot_delta_x_limit_m", 0.10))
-        self.foot_delta_y_limit = float(get_cfg("foot_delta_y_limit_m", 0.10))
-        self.max_position_offset = [float(value) for value in get_cfg("max_position_offset_m", [0.45, 0.35, 0.45])]
-        self.feedforward_twist_gain = [float(value) for value in get_cfg("feedforward_twist_gain", [0.16, 0.16, 0.0])]
-        self.body_position_gain = [float(value) for value in get_cfg("body_position_gain", [0.70, 0.70, 0.35])]
-        self.body_velocity_gain = [float(value) for value in get_cfg("body_velocity_gain", [0.12, 0.12, 0.08])]
-        self.body_angular_position_gain = [float(value) for value in get_cfg("body_angular_position_gain", [0.10, 0.10, 0.06])]
-        self.body_angular_velocity_gain = [float(value) for value in get_cfg("body_angular_velocity_gain", [0.02, 0.02, 0.01])]
-        self.tangential_align_duration_s = max(float(get_cfg("tangential_align_duration_s", 0.28)), 0.05)
-        self.lift_duration_s = max(float(get_cfg("lift_duration_s", 0.20)), 0.05)
-        self.transfer_duration_s = max(float(get_cfg("transfer_duration_s", self.tangential_align_duration_s)), 0.05)
-        self.preload_duration_s = max(float(get_cfg("preload_duration_s", 0.16)), 0.05)
-        self.compliant_settle_timeout_s = max(float(get_cfg("compliant_settle_timeout_s", 0.40)), 0.05)
-        self.preload_extra_normal_m = max(float(get_cfg("preload_extra_normal_m", 0.005)), 0.0)
-        self.fan_attach_sink_m = max(float(get_cfg("fan_attach_sink_m", 0.008)), 0.0)
-        self.fan_off_dwell_s = max(float(get_cfg("fan_off_dwell_s", 1.0)), 0.0)
-        self.fan_off_rpm_threshold = float(get_cfg("fan_off_rpm_threshold", 10000.0))
-        self.fan_recovery_rpm_threshold = float(get_cfg("fan_recovery_rpm_threshold", 30000.0))
-        self.normal_alignment_tolerance_m = max(float(get_cfg("normal_alignment_tolerance_m", 0.002)), 1e-4)
-        self.preload_normal_force_limit_n = max(float(get_cfg("preload_normal_force_limit_n", 15.0)), 0.0)
-        self.attach_normal_force_limit_n = max(float(get_cfg("attach_normal_force_limit_n", 25.0)), 0.0)
-        self.compliant_velocity_limit = [float(value) for value in get_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])]
-        self.compliant_normal_velocity_limit_mps = max(
-            float(get_cfg("compliant_normal_velocity_limit_mps", max(self.compliant_velocity_limit))),
+        self.foot_delta_x_limit = self._float_cfg("foot_delta_x_limit_m", 0.10)
+        self.foot_delta_y_limit = self._float_cfg("foot_delta_y_limit_m", 0.10)
+        self.max_position_offset = self._float_list_cfg("max_position_offset_m", [0.45, 0.35, 0.45])
+        self.feedforward_twist_gain = self._float_list_cfg("feedforward_twist_gain", [0.16, 0.16, 0.0])
+        self.body_position_gain = self._float_list_cfg("body_position_gain", [0.70, 0.70, 0.35])
+        self.body_velocity_gain = self._float_list_cfg("body_velocity_gain", [0.12, 0.12, 0.08])
+        self.body_angular_position_gain = self._float_list_cfg("body_angular_position_gain", [0.10, 0.10, 0.06])
+        self.body_angular_velocity_gain = self._float_list_cfg("body_angular_velocity_gain", [0.02, 0.02, 0.01])
+        self.tangential_align_duration_s = self._float_cfg("tangential_align_duration_s", 0.28, 0.05)
+        self.lift_duration_s = self._float_cfg("lift_duration_s", 0.20, 0.05)
+        self.transfer_duration_s = self._float_cfg("transfer_duration_s", self.tangential_align_duration_s, 0.05)
+        self.preload_duration_s = self._float_cfg("preload_duration_s", 0.16, 0.05)
+        self.compliant_settle_timeout_s = self._float_cfg("compliant_settle_timeout_s", 0.40, 0.05)
+        self.preload_extra_normal_m = self._float_cfg("preload_extra_normal_m", 0.005, 0.0)
+        self.fan_attach_sink_m = self._float_cfg("fan_attach_sink_m", 0.008, 0.0)
+        self.fan_off_dwell_s = self._float_cfg("fan_off_dwell_s", 1.0, 0.0)
+        self.fan_off_rpm_threshold = self._float_cfg("fan_off_rpm_threshold", 10000.0)
+        self.fan_recovery_rpm_threshold = self._float_cfg("fan_recovery_rpm_threshold", 30000.0)
+        self.normal_alignment_tolerance_m = self._float_cfg("normal_alignment_tolerance_m", 0.002, 1e-4)
+        self.preload_normal_force_limit_n = self._float_cfg("preload_normal_force_limit_n", 15.0, 0.0)
+        self.attach_normal_force_limit_n = self._float_cfg("attach_normal_force_limit_n", 25.0, 0.0)
+        self.compliant_velocity_limit = self._float_list_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])
+        self.compliant_normal_velocity_limit_mps = self._float_cfg(
+            "compliant_normal_velocity_limit_mps",
+            max(self.compliant_velocity_limit),
             0.0,
         )
-        self.compliant_normal_offset_limit_m = max(
-            float(get_cfg("compliant_normal_offset_limit_m", self.fan_attach_sink_m)),
+        self.compliant_normal_offset_limit_m = self._float_cfg(
+            "compliant_normal_offset_limit_m",
+            self.fan_attach_sink_m,
             0.0,
         )
-        self.compliant_admittance_mass = max(float(get_cfg("compliant_admittance_mass", 0.35)), 1e-3)
-        self.compliant_admittance_damping = max(float(get_cfg("compliant_admittance_damping", 18.0)), 0.0)
-        self.compliant_admittance_stiffness = max(float(get_cfg("compliant_admittance_stiffness", 120.0)), 0.0)
-        self.compliant_force_filter_alpha = clamp(float(get_cfg("compliant_force_filter_alpha", 0.35)), 0.0, 1.0)
-        self.compliant_force_deadband_n = max(float(get_cfg("compliant_force_deadband_n", 1.0)), 0.0)
-        self.compliant_force_limit_n = max(float(get_cfg("compliant_force_limit_n", 80.0)), self.compliant_force_deadband_n)
-        self.compliant_force_sign = float(get_cfg("compliant_force_sign", 1.0))
+        self.compliant_admittance_mass = self._float_cfg("compliant_admittance_mass", 0.35, 1e-3)
+        self.compliant_admittance_damping = self._float_cfg("compliant_admittance_damping", 18.0, 0.0)
+        self.compliant_admittance_stiffness = self._float_cfg("compliant_admittance_stiffness", 120.0, 0.0)
+        self.compliant_force_filter_alpha = self._clamped_float_cfg("compliant_force_filter_alpha", 0.35, 0.0, 1.0)
+        self.compliant_force_deadband_n = self._float_cfg("compliant_force_deadband_n", 1.0, 0.0)
+        self.compliant_force_limit_n = self._float_cfg("compliant_force_limit_n", 80.0, self.compliant_force_deadband_n)
+        self.compliant_force_sign = self._float_cfg("compliant_force_sign", 1.0)
         self.hold_position_states = set(
-            str(value) for value in get_cfg("hold_position_states", ["INIT"])
+            str(value) for value in self._cfg("hold_position_states", ["INIT"])
         )
-        self.use_contact_feedback = bool(get_cfg("use_contact_feedback", True))
-        self.swing_lift_normal_m = max(float(get_cfg("swing_lift_normal_m", self.clearance_m)), 0.0)
-        self.jacobian_delta_rad = max(float(get_cfg("jacobian_delta_rad", 1e-3)), 1e-5)
-        self.workspace_check_enabled = bool(get_cfg("workspace_check_enabled", True))
-        self.workspace_check_mode = str(get_cfg("workspace_check_mode", "per_cycle")).strip().lower()
-        self.workspace_clamp_max_iter = max(int(get_cfg("workspace_clamp_max_iter", 10)), 1)
-        self.workspace_warn_throttle_s = max(float(get_cfg("workspace_warn_throttle_s", 2.0)), 0.1)
-        self.workspace_fk_tolerance_m = max(float(get_cfg("workspace_fk_tolerance_m", 0.002)), 1e-5)
-        self.workspace_q23_sum_limit_deg = [
-            float(value) for value in get_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
-        ]
-        self.actual_tracking_enabled = bool(get_cfg("actual_tracking_enabled", True))
-        self.actual_tracking_tangent_tolerance_m = max(
-            float(get_cfg("actual_tracking_tangent_tolerance_m", 0.006)),
-            0.0,
-        )
-        self.actual_tracking_normal_tolerance_m = max(
-            float(get_cfg("actual_tracking_normal_tolerance_m", 0.004)),
-            0.0,
-        )
-        self.actual_tracking_lift_min_ratio = clamp(
-            float(get_cfg("actual_tracking_lift_min_ratio", 0.75)),
-            0.0,
-            1.0,
-        )
-        self.actual_tracking_phase_timeout_s = max(
-            float(get_cfg("actual_tracking_phase_timeout_s", 0.8)),
-            0.0,
-        )
-        self.actual_tracking_warn_throttle_s = max(
-            float(get_cfg("actual_tracking_warn_throttle_s", 1.0)),
-            0.1,
-        )
+        self.use_contact_feedback = bool(self._cfg("use_contact_feedback", True))
+        self.swing_lift_normal_m = self._float_cfg("swing_lift_normal_m", self.clearance_m, 0.0)
+        self.jacobian_delta_rad = self._float_cfg("jacobian_delta_rad", 1e-3, 1e-5)
+        self.workspace_check_enabled = bool(self._cfg("workspace_check_enabled", True))
+        self.workspace_check_mode = str(self._cfg("workspace_check_mode", "per_cycle")).strip().lower()
+        self.workspace_clamp_max_iter = self._int_cfg("workspace_clamp_max_iter", 10, 1)
+        self.workspace_warn_throttle_s = self._float_cfg("workspace_warn_throttle_s", 2.0, 0.1)
+        self.workspace_fk_tolerance_m = self._float_cfg("workspace_fk_tolerance_m", 0.002, 1e-5)
+        self.workspace_q23_sum_limit_deg = self._float_list_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
+        self.actual_tracking_enabled = bool(self._cfg("actual_tracking_enabled", True))
+        self.actual_tracking_tangent_tolerance_m = self._float_cfg("actual_tracking_tangent_tolerance_m", 0.006, 0.0)
+        self.actual_tracking_normal_tolerance_m = self._float_cfg("actual_tracking_normal_tolerance_m", 0.004, 0.0)
+        self.actual_tracking_lift_min_ratio = self._clamped_float_cfg("actual_tracking_lift_min_ratio", 0.75, 0.0, 1.0)
+        self.actual_tracking_phase_timeout_s = self._float_cfg("actual_tracking_phase_timeout_s", 0.8, 0.0)
+        self.actual_tracking_warn_throttle_s = self._float_cfg("actual_tracking_warn_throttle_s", 1.0, 0.1)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -301,7 +286,7 @@ class SwingLegController(object):
         )
         self.joint_name_to_index = {str(int(motor_id)): index for index, motor_id in enumerate(joint_order)}
         self.wall_normal_body = normalize_vector(
-            [float(value) for value in get_cfg("wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0]))],
+            self._float_list_cfg("wall_normal_body", rospy.get_param("/wall/normal_body", [0.0, 0.0, 1.0])),
             [0.0, 0.0, 1.0],
         )
 
@@ -322,39 +307,7 @@ class SwingLegController(object):
         for leg_name in self.leg_names:
             nominal = self._operating_center_command(leg_name)
             self.swing_phase_start[leg_name] = None
-            self.swing_states[leg_name] = {
-                "position": list(nominal),
-                "velocity": [0.0, 0.0, 0.0],
-                "support_target": list(nominal),
-                "start": list(nominal),
-                "target": list(nominal),
-                "support": True,
-                "phase": self.PHASE_SUPPORT,
-                "phase_started_at": None,
-                "lift_target": list(nominal),
-                "lift_swing_target": list(nominal),
-                "preload_target": list(nominal),
-                "attach_target": list(nominal),
-                "compliant_joint_torque_bias": [0.0, 0.0, 0.0],
-                "compliant_force_estimate": 0.0,
-                "compliant_normal_offset": 0.0,
-                "compliant_normal_velocity": 0.0,
-                "last_joint_vector": [0.0, 0.0, 0.0],
-                "attach_confirmed_time": None,
-                "support_world_x": None,
-                "support_world_y": None,
-                "transfer_fraction": 0.0,
-                "transfer_committed": False,
-                "workspace_clamped": 0.0,
-                "workspace_margin_m": 0.0,
-                "workspace_check_us": 0.0,
-                "workspace_last_joint_deg": [0.0, 0.0, 0.0],
-                "actual_tracking_error_m": 0.0,
-                "actual_tracking_normal_error_m": 0.0,
-                "actual_tracking_tangent_error_m": 0.0,
-                "actual_tracking_ready": 1.0,
-                "actual_tracking_wait_started_at": None,
-            }
+            self.swing_states[leg_name] = self._new_leg_state(nominal)
 
         self.pub = rospy.Publisher("/control/swing_leg_target", LegCenterCommand, queue_size=50)
         self.diagnostic_pubs = {
@@ -403,6 +356,48 @@ class SwingLegController(object):
             self._fan_rpm_callback, queue_size=10,
         )
 
+    def _new_leg_state(self, nominal):
+        state = {
+            "position": list(nominal),
+            "velocity": [0.0, 0.0, 0.0],
+            "support": True,
+            "phase": self.PHASE_SUPPORT,
+            "phase_started_at": None,
+            "last_joint_vector": [0.0, 0.0, 0.0],
+            "support_world_x": None,
+            "support_world_y": None,
+            "transfer_fraction": 0.0,
+            "transfer_committed": False,
+            "workspace_clamped": 0.0,
+            "workspace_margin_m": 0.0,
+            "workspace_check_us": 0.0,
+            "workspace_last_joint_deg": [0.0, 0.0, 0.0],
+        }
+        self._set_all_targets(state, nominal)
+        self._reset_compliance(state)
+        self._mark_actual_tracking_ready(state)
+        return state
+
+    def _set_all_targets(self, state, target):
+        for field in [
+            "support_target",
+            "start",
+            "target",
+            "lift_target",
+            "lift_swing_target",
+            "preload_target",
+            "attach_target",
+        ]:
+            state[field] = list(target)
+
+    @staticmethod
+    def _reset_compliance(state):
+        state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
+        state["compliant_force_estimate"] = 0.0
+        state["compliant_normal_offset"] = 0.0
+        state["compliant_normal_velocity"] = 0.0
+        state["attach_confirmed_time"] = None
+
     def _fan_rpm_callback(self, msg):
         values = [float(v) for v in msg.data[:4]]
         while len(values) < 4:
@@ -445,14 +440,6 @@ class SwingLegController(object):
             return [bool(value) for value in self.body_reference.support_mask]
         return [True] * len(self.leg_names)
 
-    def _estimated_support_mask(self):
-        if len(self.estimated_state.support_mask) == len(self.leg_names):
-            return [bool(value) for value in self.estimated_state.support_mask]
-        return self._desired_support_mask()
-
-    def _leg_slip_risk(self, leg_index):
-        return 0.0
-
     def _leg_normal_force_limit(self, leg_index):
         if leg_index < len(self.estimated_state.normal_force_limit):
             return float(self.estimated_state.normal_force_limit[leg_index])
@@ -462,16 +449,6 @@ class SwingLegController(object):
         if leg_index < len(values):
             return bool(values[leg_index])
         return bool(default)
-
-    def _leg_fan_current(self, leg_index):
-        if leg_index < len(self.estimated_state.fan_current):
-            return float(self.estimated_state.fan_current[leg_index])
-        return 0.0
-
-    def _leg_float_value(self, values, leg_index, default=0.0):
-        if leg_index < len(values):
-            return float(values[leg_index])
-        return float(default)
 
     def _actual_ujc_command_position(self, leg_name, leg_index):
         if not self.have_estimated_state:
@@ -586,20 +563,6 @@ class SwingLegController(object):
                     float(actual_position[2]),
                 )
         return False
-
-    def _step_toward_target(self, current_position, target_position, velocity_limits, dt, clamp_center=None):
-        next_position = []
-        next_velocity = []
-        for axis in [0, 1, 2]:
-            error = target_position[axis] - current_position[axis]
-            velocity = clamp(error / max(dt, 1e-3), -velocity_limits[axis], velocity_limits[axis])
-            position = current_position[axis] + velocity * dt
-            if (error > 0.0 and position > target_position[axis]) or (error < 0.0 and position < target_position[axis]):
-                position = target_position[axis]
-                velocity = 0.0
-            next_position.append(position)
-            next_velocity.append(velocity)
-        return self._clamp_position(next_position, clamp_center), next_velocity
 
     def _bezier_interp(self, start_pos, target_pos, duration_s, phase_elapsed):
         phase = min(phase_elapsed / max(duration_s, 1e-3), 1.0)
@@ -985,8 +948,7 @@ class SwingLegController(object):
 
         lift_target = self._compose_tangent_and_normal(start, start_normal + self.swing_lift_normal_m)
         swing_target = self._compose_tangent_and_normal(target, start_normal + self.swing_lift_normal_m)
-        preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)     
-        attach_target = list(preload_target)
+        preload_target = self._compose_tangent_and_normal(target, target_normal - self.preload_extra_normal_m)
 
         state["start"] = list(start)
         state["target"] = list(target)
@@ -994,14 +956,10 @@ class SwingLegController(object):
         state["lift_target"] = self._clamp_position(lift_target, state["support_target"])
         state["lift_swing_target"] = self._clamp_position(swing_target, state["support_target"])
         state["preload_target"] = self._clamp_position(preload_target, state["support_target"])
-        state["attach_target"] = self._clamp_position(attach_target, state["support_target"])
-        state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
-        state["compliant_force_estimate"] = 0.0
-        state["compliant_normal_offset"] = 0.0
-        state["compliant_normal_velocity"] = 0.0
+        state["attach_target"] = self._clamp_position(preload_target, state["support_target"])
+        self._reset_compliance(state)
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
-        state["attach_confirmed_time"] = None
         state["transfer_fraction"] = 0.0
         state["transfer_committed"] = False
         self._mark_actual_tracking_ready(state)
@@ -1124,19 +1082,9 @@ class SwingLegController(object):
                 support_target[0] -= self.body_reference.pose.position.x
                 support_target[1] -= self.body_reference.pose.position.y
 
-        state["support_target"] = list(support_target)
         state["position"] = list(support_target)
-        state["start"] = list(support_target)
-        state["target"] = list(support_target)
-        state["lift_target"] = list(support_target)
-        state["lift_swing_target"] = list(support_target)
-        state["preload_target"] = list(support_target)
-        state["attach_target"] = list(support_target)
-        state["compliant_joint_torque_bias"] = [0.0, 0.0, 0.0]
-        state["compliant_force_estimate"] = 0.0
-        state["compliant_normal_offset"] = 0.0
-        state["compliant_normal_velocity"] = 0.0
-        state["attach_confirmed_time"] = None
+        self._set_all_targets(state, support_target)
+        self._reset_compliance(state)
         self._mark_actual_tracking_ready(state)
         state["phase"] = self.PHASE_SUPPORT
         state["phase_started_at"] = None
@@ -1460,6 +1408,20 @@ class SwingLegController(object):
         self._publish_leg_diagnostic(leg_name, leg_index, guarded_position, rospy.Time.now().to_sec())
         return msg
 
+    def _publish_command_msg(self, leg_name, leg_index, command_msg):
+        return self._publish_guarded_command(
+            leg_name,
+            leg_index,
+            [command_msg.center.x, command_msg.center.y, command_msg.center.z],
+            [
+                command_msg.center_velocity.x,
+                command_msg.center_velocity.y,
+                command_msg.center_velocity.z,
+            ],
+            command_msg.support_leg,
+            command_msg.desired_normal_force_limit,
+        )
+
     def spin(self):
         rate = rospy.Rate(self.rate_hz)
         while not rospy.is_shutdown():
@@ -1479,14 +1441,7 @@ class SwingLegController(object):
 
                 if desired_support and self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
-                    self._publish_guarded_command(
-                        leg_name,
-                        leg_index,
-                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
-                        support_msg.support_leg,
-                        support_msg.desired_normal_force_limit,
-                    )
+                    self._publish_command_msg(leg_name, leg_index, support_msg)
                     continue
 
                 if self.swing_phase_start[leg_name] is None and not desired_support:
@@ -1548,14 +1503,7 @@ class SwingLegController(object):
 
                 if self.swing_phase_start[leg_name] is None:
                     support_msg = self._support_command(leg_name, leg_index)
-                    self._publish_guarded_command(
-                        leg_name,
-                        leg_index,
-                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
-                        support_msg.support_leg,
-                        support_msg.desired_normal_force_limit,
-                    )
+                    self._publish_command_msg(leg_name, leg_index, support_msg)
                     continue
 
                 cmd_position, cmd_velocity, support_leg, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
@@ -1567,14 +1515,7 @@ class SwingLegController(object):
                         state = self.swing_states[leg_name]
                         self._capture_support_anchor(leg_name, state["position"])
                     support_msg = self._support_command(leg_name, leg_index)
-                    self._publish_guarded_command(
-                        leg_name,
-                        leg_index,
-                        [support_msg.center.x, support_msg.center.y, support_msg.center.z],
-                        [support_msg.center_velocity.x, support_msg.center_velocity.y, support_msg.center_velocity.z],
-                        support_msg.support_leg,
-                        support_msg.desired_normal_force_limit,
-                    )
+                    self._publish_command_msg(leg_name, leg_index, support_msg)
                     continue
 
                 self._publish_guarded_command(

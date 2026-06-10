@@ -34,7 +34,7 @@ mission_supervisor:
   pause_on_high_slip: false
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
-  adhesion_required_count: 4
+  adhesion_required_count: 0
   attach_rpm: 15000.0
   climb_rpm: 15000.0
   # pause_rpm: 35000.0
