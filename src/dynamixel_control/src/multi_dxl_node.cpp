@@ -218,7 +218,7 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     // Non-zero values enable internal trajectory interpolation, making leg
     // motion smooth despite irregular command arrival or serial bus contention.
     packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 100, &dxl_error);
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 500, &dxl_error);
+    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 200, &dxl_error);
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
