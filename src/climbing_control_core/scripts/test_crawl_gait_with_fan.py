@@ -431,13 +431,14 @@ class CrawlGaitWithFanTester(object):
             )
         return "\n".join(lines)
 
-    def _wait_state(self, target, timeout_s):
+    def _wait_state(self, target, timeout_s, accepted_states=None):
+        accepted_states = set(accepted_states or [target])
         deadline = time.time() + timeout_s
         last_log = 0.0
         while not rospy.is_shutdown():
             with self._lock:
                 state = self._latest_mission_state
-            if state == target:
+            if state in accepted_states:
                 return True
             if state == STATE_FAULT:
                 rospy.logerr(
@@ -713,17 +714,20 @@ class CrawlGaitWithFanTester(object):
         self._publish_start()
         # Wait for STICK (or CLIMB when adhesion_required_count=0 and
         # the system skips STICK entirely).
-        if not self._wait_state(STATE_STICK, self.args.stick_timeout_s):
-            with self._lock:
-                current_state = self._latest_mission_state
-            if current_state == STATE_CLIMB:
-                rospy.loginfo(
-                    "test_crawl_gait_with_fan: adhesion disabled, STICK skipped; "
-                    "continuing with CLIMB"
-                )
-            else:
-                self._publish_pause()
-                return 4
+        if not self._wait_state(
+            STATE_STICK,
+            self.args.stick_timeout_s,
+            accepted_states=[STATE_STICK, STATE_CLIMB],
+        ):
+            self._publish_pause()
+            return 4
+        with self._lock:
+            current_state = self._latest_mission_state
+        if current_state == STATE_CLIMB:
+            rospy.loginfo(
+                "test_crawl_gait_with_fan: adhesion disabled, STICK skipped; "
+                "continuing with CLIMB"
+            )
         if not self._wait_state(STATE_CLIMB, self.args.climb_timeout_s):
             self._publish_pause()
             return 5

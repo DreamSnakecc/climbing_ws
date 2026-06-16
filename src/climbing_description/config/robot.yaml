@@ -185,9 +185,9 @@ swing_leg_controller:
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
   # Fixed-stride phases: normal lift first, then parallel transfer with L/4 body advance.
-  lift_duration_s: 0.20
-  transfer_duration_s: 0.28
-  preload_duration_s: 0.16
+  lift_duration_s: 0.35 #0.20
+  transfer_duration_s: 0.50 #0.28
+  preload_duration_s: 0.25 #0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
@@ -214,8 +214,8 @@ swing_leg_controller:
   workspace_clamp_max_iter: 10
   workspace_warn_throttle_s: 2.0
   workspace_fk_tolerance_m: 0.002
-  workspace_q23_sum_limit_deg: [-12.0, 12.0]
-  actual_tracking_enabled: true
+  workspace_q23_sum_limit_deg: [-15.0, 15.0]
+  actual_tracking_enabled: false
   actual_tracking_tangent_tolerance_m: 0.006
   actual_tracking_normal_tolerance_m: 0.004
   actual_tracking_lift_min_ratio: 0.75

@@ -20,5 +20,6 @@ catkin_install_python(PROGRAMS
   scripts/imu_serial_bridge.py
   scripts/leg_ik_executor.py
   scripts/local_safety_supervisor.py
+  scripts/test_dxl_position_step.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
