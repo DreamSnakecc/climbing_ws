@@ -13,14 +13,20 @@
 #include "dynamixel_control/GetBulkPositions.h"
 #include "dynamixel_control/GetBulkCurrents.h"
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 #include <mutex>
+#include <xmlrpcpp/XmlRpcValue.h>
 
 // Control table address for X series (except XL-320)
 #define ADDR_OPERATING_MODE 11
 #define ADDR_TORQUE_ENABLE 64
+#define ADDR_POSITION_D_GAIN 80
+#define ADDR_POSITION_I_GAIN 82
+#define ADDR_POSITION_P_GAIN 84
 #define ADDR_GOAL_CURRENT 102
 #define ADDR_PROFILE_ACCELERATION 108
 #define ADDR_PROFILE_VELOCITY 112
@@ -62,6 +68,15 @@ std::set<uint8_t> multi_turn_ids;
 std::map<uint8_t, uint8_t> default_operating_modes;
 std::map<uint8_t, uint8_t> current_operating_modes;
 
+struct PositionGains
+{
+    int p;
+    int i;
+    int d;
+};
+
+std::map<uint8_t, PositionGains> position_gains_by_id;
+
 bool containsId(const std::vector<uint8_t> &ids, uint8_t id)
 {
     return std::find(ids.begin(), ids.end(), id) != ids.end();
@@ -83,6 +98,100 @@ std::vector<uint8_t> intListToUint8(const std::vector<int> &values)
     return out;
 }
 
+int clampPositionGain(int value)
+{
+    return std::max(0, std::min(16383, value));
+}
+
+bool readXmlRpcInt(XmlRpc::XmlRpcValue &value, const std::string &key, int default_value, int *out)
+{
+    if (value.getType() != XmlRpc::XmlRpcValue::TypeStruct || !value.hasMember(key))
+    {
+        *out = default_value;
+        return true;
+    }
+
+    const XmlRpc::XmlRpcValue &entry = value[key];
+    if (entry.getType() != XmlRpc::XmlRpcValue::TypeInt)
+        return false;
+
+    *out = static_cast<int>(entry);
+    return true;
+}
+
+void loadPositionGains(const std::string &board_prefix)
+{
+    XmlRpc::XmlRpcValue gains_param;
+    bool found = false;
+    if (!board_prefix.empty())
+        found = ros::param::get(board_prefix + "position_gains", gains_param);
+    else
+        found = ros::param::get("position_gains", gains_param);
+
+    if (!found)
+        return;
+
+    if (gains_param.getType() != XmlRpc::XmlRpcValue::TypeStruct)
+    {
+        ROS_WARN("position_gains must be a map keyed by motor id");
+        return;
+    }
+
+    for (XmlRpc::XmlRpcValue::iterator it = gains_param.begin(); it != gains_param.end(); ++it)
+    {
+        const int id_int = std::atoi(it->first.c_str());
+        if (id_int < 0 || id_int > 252)
+        {
+            ROS_WARN("Ignore invalid position_gains motor id '%s'", it->first.c_str());
+            continue;
+        }
+
+        int p = 900;
+        int i = 0;
+        int d = 0;
+        if (!readXmlRpcInt(it->second, "p", p, &p) ||
+            !readXmlRpcInt(it->second, "i", i, &i) ||
+            !readXmlRpcInt(it->second, "d", d, &d))
+        {
+            ROS_WARN("Ignore position_gains for ID %d: expected integer p/i/d fields", id_int);
+            continue;
+        }
+
+        PositionGains gains;
+        gains.p = clampPositionGain(p);
+        gains.i = clampPositionGain(i);
+        gains.d = clampPositionGain(d);
+        position_gains_by_id[static_cast<uint8_t>(id_int)] = gains;
+    }
+
+    ROS_INFO("Loaded position gain overrides for %zu motors", position_gains_by_id.size());
+}
+
+void applyPositionGains(uint8_t id)
+{
+    std::map<uint8_t, PositionGains>::const_iterator it = position_gains_by_id.find(id);
+    if (it == position_gains_by_id.end())
+        return;
+
+    const PositionGains &gains = it->second;
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_D_GAIN,
+                                                    static_cast<uint16_t>(gains.d), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+        ROS_ERROR("[ID %d] Failed write Position D Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
+
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_I_GAIN,
+                                                    static_cast<uint16_t>(gains.i), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+        ROS_ERROR("[ID %d] Failed write Position I Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
+
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_P_GAIN,
+                                                    static_cast<uint16_t>(gains.p), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+        ROS_ERROR("[ID %d] Failed write Position P Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
+    else
+        ROS_INFO("[ID %d] Position gains P/I/D set to %d/%d/%d", id, gains.p, gains.i, gains.d);
+}
+
 bool setOperatingModeInternal(uint8_t id, uint8_t mode)
 {
     std::map<uint8_t, uint8_t>::const_iterator mode_it = current_operating_modes.find(id);
@@ -102,6 +211,8 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     }
     else
         ROS_INFO("[ID %d] Operating mode set to %d", id, static_cast<int>(mode));
+
+    applyPositionGains(id);
 
     // Set smooth motion profile: velocity=500 (~114rpm), acceleration=200
     // Non-zero values enable internal trajectory interpolation, making leg
@@ -538,6 +649,7 @@ int main(int argc, char **argv)
     controlled_ids = intListToUint8(motor_ids_param);
     std::vector<uint8_t> multi_turn_list = intListToUint8(multi_turn_ids_param);
     multi_turn_ids = std::set<uint8_t>(multi_turn_list.begin(), multi_turn_list.end());
+    loadPositionGains(board_prefix);
 
     if (controlled_ids.empty())
     {
