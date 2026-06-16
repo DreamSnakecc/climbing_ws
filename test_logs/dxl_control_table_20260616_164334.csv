@@ -1,0 +1,5 @@
+board,device,baudrate,motor_id,operating_mode,pwm_limit,current_limit,position_d_gain,position_i_gain,position_p_gain,profile_acceleration,profile_velocity,errors
+left_board,/dev/ttyUSB_l,1000000,2,3,885,648,0,0,900,100,500,
+left_board,/dev/ttyUSB_l,1000000,8,3,885,648,0,0,900,100,500,
+right_board,/dev/ttyUSB_r,1000000,4,3,885,648,0,0,900,100,500,
+right_board,/dev/ttyUSB_r,1000000,6,3,885,648,0,0,900,100,500,
