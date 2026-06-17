@@ -414,11 +414,7 @@ left_board:
   motor_ids: [11, 1, 2, 14, 7, 8]
   multi_turn_ids: []
   position_gains:
-<<<<<<< HEAD
-    "1": {p: 900, i: 0, d: 0}
-=======
     "1": {p: 1200, i: 0, d: 0}
->>>>>>> 2d977ce46dbcf9b43096124bbe1a83b5a2f79c6a
     "7": {p: 900, i: 0, d: 0}
     "2": {p: 1200, i: 0, d: 0}
     "8": {p: 1200, i: 0, d: 0}
