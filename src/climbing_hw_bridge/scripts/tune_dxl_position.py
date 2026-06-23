@@ -95,7 +95,7 @@ def tuning_from_response(response):
 
 
 def metric_score(metrics, step_ticks):
-    if not metrics or not metrics.get("safe"):
+    if not metrics or not metrics.get("hard_safe"):
         return None
     step = max(1.0, abs(float(step_ticks)))
     response = float(metrics.get("response_error_tick", step)) / step
@@ -138,8 +138,12 @@ def parse_step_csv(path, pass_error_ticks, feedback_age_limit_s):
     overshoot = max([max(0.0, direction * (sample["actual"] - target)) for sample in samples])
     max_current = max(sample["current_a"] for sample in samples)
     max_age = max(sample["feedback_age_s"] for sample in samples)
+    endpoint_pass = abs(samples[-1]["error"]) <= pass_error_ticks
+    feedback_safe = max_age <= feedback_age_limit_s
     return {
-        "safe": abs(samples[-1]["error"]) <= pass_error_ticks and max_age <= feedback_age_limit_s,
+        "safe": endpoint_pass and feedback_safe,
+        "endpoint_pass": endpoint_pass,
+        "feedback_safe": feedback_safe,
         "final_error_tick": abs(samples[-1]["error"]),
         "response_error_tick": abs(response_sample["error"]),
         "settling_time_s": settling_time,
@@ -170,12 +174,11 @@ def combine_step_metrics(direction_metrics, current_limit_a, step_ticks, pass_er
         "max_feedback_age_s": max_age,
         "current_ratio": max_current / max(current_limit_a, 1e-6),
     }
-    result["safe"] = (
-        all(metric["safe"] for metric in direction_metrics) and
-        max_final <= pass_error_ticks and
-        result["current_ratio"] < 0.80 and
-        max_age <= 0.15
-    )
+    result["feedback_safe"] = all(metric.get("feedback_safe", metric["safe"]) for metric in direction_metrics)
+    result["current_safe"] = result["current_ratio"] < 0.80
+    result["endpoint_pass"] = all(metric.get("endpoint_pass", metric["safe"]) for metric in direction_metrics)
+    result["hard_safe"] = result["feedback_safe"] and result["current_safe"]
+    result["safe"] = result["hard_safe"] and result["endpoint_pass"]
     result["score"] = metric_score(result, step_ticks)
     return result
 
@@ -380,8 +383,8 @@ class DxlAutoTuner(object):
     def _tune_motor(self, motor_id, baseline_tuning, session_dir):
         try:
             baseline = self._run_trial(motor_id, baseline_tuning, self.args.step_ticks, "baseline", session_dir)
-            if not baseline.get("safe"):
-                raise RuntimeError("motor %d baseline is outside the automatic safety limits" % motor_id)
+            if not baseline.get("hard_safe"):
+                raise RuntimeError("motor %d baseline exceeded the hard current or feedback safety limit" % motor_id)
             best = baseline
             trials = [baseline]
 
@@ -594,9 +597,14 @@ def main():
         tuner._wait_services()
         if not tuner._confirm("Robot is supported; auto position/mode/current control is disabled. Run direct 100 tick tuning now?"):
             return 0
-        baseline_tuning = {}
-        bench_results = {}
+        baseline_tuning = dict(session.get("baseline_tuning", {}))
+        bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
+            existing = bench_results.get(str(motor_id))
+            if existing is not None and existing.get("selected", {}).get("tuning"):
+                tuner._set_tuning(motor_id, existing["selected"]["tuning"])
+                rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
+                continue
             tuning = tuner._get_tuning(motor_id)
             if tuning["operating_mode"] != 3:
                 raise RuntimeError("motor %d must be in Position Control Mode (3), got %d" % (motor_id, tuning["operating_mode"]))
@@ -608,7 +616,11 @@ def main():
 
         if tuner._confirm("All 100 tick trials passed. Run the selected candidates and baselines at 300 tick?"):
             for motor_id in tuner.motor_ids:
-                tuner._validate_extended(motor_id, bench_results[str(motor_id)], session["session_dir"])
+                result = bench_results[str(motor_id)]
+                if result["selected"].get("safe"):
+                    tuner._validate_extended(motor_id, result, session["session_dir"])
+                else:
+                    result["extended_skipped"] = "no candidate met the endpoint criterion at 100 tick"
                 save_session(session_path, session)
 
         candidates = {"left_board": {}, "right_board": {}}

@@ -170,13 +170,17 @@ class DxlPositionStepTester(object):
         }
 
     def _hold_target(self, motor_id, phase, step_index, target_tick, hold_s):
-        self._publish_target(motor_id, target_tick)
         rate = rospy.Rate(max(1.0, float(self.args.sample_rate_hz)))
         deadline = time.time() + max(0.0, float(hold_s))
         last = None
         while not rospy.is_shutdown() and time.time() < deadline:
+            # A direct diagnostic command has no upstream publisher retrying it.
+            # Re-send the unchanged goal with each sample to avoid one dropped ROS
+            # message being mistaken for a slow or weak servo response.
+            self._publish_target(motor_id, target_tick)
             last = self._write_sample(motor_id, phase, step_index, target_tick) or last
             rate.sleep()
+        self._publish_target(motor_id, target_tick)
         last = self._write_sample(motor_id, phase, step_index, target_tick) or last
         if self.csv_file is not None:
             self.csv_file.flush()
