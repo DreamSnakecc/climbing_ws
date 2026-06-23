@@ -35,14 +35,14 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 15000.0
-  climb_rpm: 15000.0
+  attach_rpm: 45000.0
+  climb_rpm: 45000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
   swing_release_rpm: 9000.0
 
-  touchdown_rpm: 15000.0
+  touchdown_rpm: 35000.0
   touchdown_boost_duration_s: 0.25
   default_normal_force_limit: 150.0
   # Fan activation for swing leg: mission_supervisor detects normal_force_limit >= attach_normal_force_limit_n
@@ -168,7 +168,7 @@ swing_leg_controller:
   swing_lift_normal_m: 0.02 
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  stride_length_m: 0.06
+  stride_length_m: 0.1
   # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
   # where swing distance = 3*stride_length_m/4 and body advances
   # stride_length_m/4 per leg swing.  No body_planner velocity needed.
@@ -209,7 +209,7 @@ swing_leg_controller:
   compliant_force_limit_n: 200.0
   compliant_force_sign: 1.0
   jacobian_delta_rad: 0.001
-  workspace_check_enabled: true
+  workspace_check_enabled: false
   workspace_check_mode: per_cycle 
   workspace_clamp_max_iter: 10
   workspace_warn_throttle_s: 2.0
@@ -350,11 +350,11 @@ legs:
 gait_controller:
   nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -324.8 #-195.5
+  nominal_universal_joint_center_z: -198.5 #-195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 269.07 # 270.21 237.04
+  operating_universal_joint_center_x: 267.13 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -232.0 # -100.0 -150.0
+  operating_universal_joint_center_z: -110.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
@@ -366,7 +366,7 @@ gait_controller:
   link_coxa: 44.75
   link_femur: 83.0
   link_tibia: 154.0
-  link_a3: 170.8
+  link_a3: 44.5 #170.8
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421
