@@ -22,5 +22,6 @@ catkin_install_python(PROGRAMS
   scripts/local_safety_supervisor.py
   scripts/read_dxl_control_table.py
   scripts/test_dxl_position_step.py
+  scripts/tune_dxl_position.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

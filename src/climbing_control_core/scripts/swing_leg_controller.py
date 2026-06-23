@@ -238,6 +238,8 @@ class SwingLegController(object):
         self.actual_tracking_lift_min_ratio = self._clamped_float_cfg("actual_tracking_lift_min_ratio", 0.75, 0.0, 1.0)
         self.actual_tracking_phase_timeout_s = self._float_cfg("actual_tracking_phase_timeout_s", 0.8, 0.0)
         self.actual_tracking_warn_throttle_s = self._float_cfg("actual_tracking_warn_throttle_s", 1.0, 0.1)
+        self.endpoint_diagnostic_enabled = bool(self._cfg("endpoint_diagnostic_enabled", False))
+        self.endpoint_diagnostic_hold_s = self._float_cfg("endpoint_diagnostic_hold_s", 0.4, 0.0)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -316,6 +318,12 @@ class SwingLegController(object):
             )
             for leg_name in self.leg_names
         }
+        self.endpoint_diagnostic_pubs = {
+            leg_name: rospy.Publisher(
+                "/control/swing_leg_endpoint_diag/" + leg_name, Float32MultiArray, queue_size=20
+            )
+            for leg_name in self.leg_names
+        }
         self.phase_id_map = {
             self.PHASE_SUPPORT: 0,
             self.PHASE_LIFT_SWING: 1,
@@ -363,6 +371,7 @@ class SwingLegController(object):
             "support": True,
             "phase": self.PHASE_SUPPORT,
             "phase_started_at": None,
+            "endpoint_hold_started_at": None,
             "last_joint_vector": [0.0, 0.0, 0.0],
             "support_world_x": None,
             "support_world_y": None,
@@ -485,6 +494,20 @@ class SwingLegController(object):
         state["phase_started_at"] = now_sec
         state["phase_start_pos"] = list(state.get("position", [0.0, 0.0, 0.0]))
         state["actual_tracking_wait_started_at"] = None
+        state["endpoint_hold_started_at"] = None
+
+    def _endpoint_hold_elapsed_s(self, state, now_sec):
+        started_at = state.get("endpoint_hold_started_at")
+        if started_at is None:
+            return 0.0
+        return max(0.0, float(now_sec) - float(started_at))
+
+    def _endpoint_hold_complete(self, state, now_sec):
+        if not self.endpoint_diagnostic_enabled:
+            return True
+        if state.get("endpoint_hold_started_at") is None:
+            state["endpoint_hold_started_at"] = now_sec
+        return self._endpoint_hold_elapsed_s(state, now_sec) >= self.endpoint_diagnostic_hold_s
 
     def _actual_tracking_wait_s(self, state, now_sec):
         started_at = state.get("actual_tracking_wait_started_at")
@@ -501,7 +524,7 @@ class SwingLegController(object):
 
     def _actual_tracking_ready_for_phase(self, leg_name, leg_index, phase_name, start_position, target_position, now_sec):
         state = self.swing_states[leg_name]
-        if not self.actual_tracking_enabled:
+        if not self.actual_tracking_enabled and not self.endpoint_diagnostic_enabled:
             self._mark_actual_tracking_ready(state)
             return True
 
@@ -529,6 +552,8 @@ class SwingLegController(object):
         state["actual_tracking_normal_error_m"] = float(metrics["normal_error_m"])
         state["actual_tracking_tangent_error_m"] = float(metrics["tangent_error_m"])
         state["actual_tracking_ready"] = 1.0 if metrics["ready"] else 0.0
+        if not self.actual_tracking_enabled:
+            return True
         if metrics["ready"]:
             state["actual_tracking_wait_started_at"] = None
             return True
@@ -1129,14 +1154,16 @@ class SwingLegController(object):
                 state["lift_target"] = list(tracking_target)
                 cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
-                if self._actual_tracking_ready_for_phase(
+                endpoint_hold_complete = self._endpoint_hold_complete(state, now_sec)
+                tracking_ready = self._actual_tracking_ready_for_phase(
                     leg_name,
                     leg_index,
                     self.PHASE_LIFT,
                     start_pos,
                     tracking_target,
                     now_sec,
-                ):
+                )
+                if endpoint_hold_complete and tracking_ready:
                     state["transfer_fraction"] = 0.0
                     state["transfer_committed"] = False
                     self._set_phase(state, self.PHASE_TRANSFER, now_sec)
@@ -1158,14 +1185,16 @@ class SwingLegController(object):
                 state["lift_swing_target"] = list(tracking_target)
                 cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
-                if self._actual_tracking_ready_for_phase(
+                endpoint_hold_complete = self._endpoint_hold_complete(state, now_sec)
+                tracking_ready = self._actual_tracking_ready_for_phase(
                     leg_name,
                     leg_index,
                     self.PHASE_TRANSFER,
                     state.get("start", start_pos),
                     tracking_target,
                     now_sec,
-                ):
+                )
+                if endpoint_hold_complete and tracking_ready:
                     self._set_phase(state, self.PHASE_PRELOAD, now_sec)
             normal_force_limit = 0.001
             support_leg = False
@@ -1201,14 +1230,16 @@ class SwingLegController(object):
                 state["preload_target"] = list(tracking_target)
                 cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
-                if self._actual_tracking_ready_for_phase(
+                endpoint_hold_complete = self._endpoint_hold_complete(state, now_sec)
+                tracking_ready = self._actual_tracking_ready_for_phase(
                     leg_name,
                     leg_index,
                     self.PHASE_PRELOAD,
                     start_pos,
                     tracking_target,
                     now_sec,
-                ):
+                )
+                if endpoint_hold_complete and tracking_ready:
                     self._capture_compliant_torque_bias(leg_name, state)
                     self._set_phase(state, self.PHASE_ADMIT, now_sec)
             normal_force_limit = self.preload_normal_force_limit_n
@@ -1339,6 +1370,26 @@ class SwingLegController(object):
             float(state.get("actual_tracking_tangent_error_m", 0.0)),
             float(state.get("actual_tracking_ready", 1.0)),
             float(self._actual_tracking_wait_s(state, now_sec)),
+        ]
+        publisher.publish(msg)
+
+    def _publish_endpoint_diagnostic(self, leg_name, now_sec):
+        publisher = self.endpoint_diagnostic_pubs.get(leg_name)
+        if publisher is None:
+            return
+        state = self.swing_states[leg_name]
+        phase = state.get("phase", self.PHASE_SUPPORT)
+        hold_elapsed = self._endpoint_hold_elapsed_s(state, now_sec)
+        msg = Float32MultiArray()
+        msg.layout = MultiArrayLayout()
+        msg.layout.dim = [
+            MultiArrayDimension(label=label, size=1, stride=3)
+            for label in ["phase_id", "hold_active", "hold_elapsed_s"]
+        ]
+        msg.data = [
+            float(self.phase_id_map.get(phase, -1)),
+            1.0 if state.get("endpoint_hold_started_at") is not None else 0.0,
+            float(hold_elapsed),
         ]
         publisher.publish(msg)
 
@@ -1507,6 +1558,7 @@ class SwingLegController(object):
                     continue
 
                 cmd_position, cmd_velocity, support_leg, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
+                self._publish_endpoint_diagnostic(leg_name, now_sec)
 
                 # If support_leg=True (state 2), transition back to SUPPORT
                 if support_leg and desired_support:

@@ -1,0 +1,9 @@
+int32 id
+int32 position_p_gain
+int32 position_i_gain
+int32 position_d_gain
+int32 profile_velocity
+int32 profile_acceleration
+---
+bool success
+string message

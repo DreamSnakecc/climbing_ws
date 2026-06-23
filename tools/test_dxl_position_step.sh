@@ -30,10 +30,11 @@ Examples:
 
 Default Python args:
     --motor-ids 2,4,6,8
-    --step-ticks 500
-    --ramp-steps 5
-    --hold-s 1.0
-    --settle-s 0.5
+    --step-ticks 100
+    --directions +,-
+    --ramp-steps 1
+    --hold-s 0.6
+    --settle-s 0.2
     --pass-error-ticks 10
     --output-dir test_logs
 

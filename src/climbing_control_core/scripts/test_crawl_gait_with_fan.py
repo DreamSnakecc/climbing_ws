@@ -21,7 +21,8 @@ CSV fields:
                swing_leg, swing_cycle_idx
   Body: body_x, body_vx, est_vx
   Legx4: phase, command xyz/support, fan RPM/current, attachment state,
-         measured UJC and actual-tracking diagnostics.
+         measured UJC, actual-tracking diagnostics, and endpoint-hold state.
+  Motors: per-ID target tick, board-feedback tick/velocity, and tracking error tick.
 
 Prerequisites:
   - Jetson: roslaunch climbing_bringup jetson_bringup.launch
@@ -41,6 +42,7 @@ import threading
 import time
 
 import rospy
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray, String
 
 from climbing_msgs.msg import (
@@ -52,6 +54,7 @@ from climbing_msgs.msg import (
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
+DEFAULT_MOTOR_IDS = [11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]
 ACTUAL_TRACKING_DIAG_FIELDS = [
     ("actual_tracking_error_m", 16, 0.0),
     ("actual_tracking_normal_error_m", 17, 0.0),
@@ -59,6 +62,8 @@ ACTUAL_TRACKING_DIAG_FIELDS = [
     ("actual_tracking_ready", 19, 1.0),
     ("actual_tracking_wait_s", 20, 0.0),
 ]
+PHASE_ELAPSED_DIAG_INDEX = 2
+ENDPOINT_DIAG_FIELDS = ["endpoint_phase_id", "endpoint_hold_active", "endpoint_hold_elapsed_s"]
 PHASE_NAMES = {
     0: "SUPPORT",
     1: "LIFT_SWING",
@@ -91,6 +96,13 @@ class CrawlGaitWithFanTester(object):
         self._latest_swing_diag = {leg: [] for leg in LEG_NAMES}
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
+        self._motor_ids = self._load_motor_ids()
+        self._latest_command_ticks = {}
+        self._latest_actual_ticks = {}
+        self._latest_actual_velocity_ticks_s = {}
+        self._latest_actual_current_raw = {}
+        self._current_lsb_ma = float(rospy.get_param("/dynamixel_telemetry/current_lsb_ma", 2.69))
+        self._latest_endpoint_diag = {leg: [0.0, 0.0, 0.0] for leg in LEG_NAMES}
 
         # state timeline for summary
         self._state_history = []  # list of (rel_time, state)
@@ -139,6 +151,18 @@ class CrawlGaitWithFanTester(object):
             self._cb_estimated_state, queue_size=20,
         )
         rospy.Subscriber(
+            "/jetson/joint_position_ticks_cmd", JointState,
+            self._cb_joint_position_ticks_cmd, queue_size=20,
+        )
+        rospy.Subscriber(
+            "/jetson/left_board/joint_state", JointState,
+            self._cb_board_joint_state, queue_size=20,
+        )
+        rospy.Subscriber(
+            "/jetson/right_board/joint_state", JointState,
+            self._cb_board_joint_state, queue_size=20,
+        )
+        rospy.Subscriber(
             "/control/swing_leg_target", LegCenterCommand,
             self._cb_swing_target, queue_size=50,
         )
@@ -146,6 +170,10 @@ class CrawlGaitWithFanTester(object):
             rospy.Subscriber(
                 "/control/swing_leg_diag/" + leg, Float32MultiArray,
                 self._cb_swing_diag, callback_args=leg, queue_size=20,
+            )
+            rospy.Subscriber(
+                "/control/swing_leg_endpoint_diag/" + leg, Float32MultiArray,
+                self._cb_endpoint_diag, callback_args=leg, queue_size=20,
             )
         rospy.Subscriber(
             "/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray,
@@ -204,12 +232,66 @@ class CrawlGaitWithFanTester(object):
         with self._lock:
             self._latest_estimated_state = msg
 
+    def _load_motor_ids(self):
+        motor_ids = []
+        for leg_name in LEG_NAMES:
+            leg_cfg = rospy.get_param("/legs/" + leg_name, {})
+            for motor_id in leg_cfg.get("motor_ids", []):
+                motor_id = int(motor_id)
+                if motor_id not in motor_ids:
+                    motor_ids.append(motor_id)
+        return motor_ids or list(DEFAULT_MOTOR_IDS)
+
+    @staticmethod
+    def _ticks_by_id(msg):
+        ticks = {}
+        for motor_id, tick in zip(msg.name, msg.position):
+            try:
+                ticks[int(motor_id)] = float(tick)
+            except (TypeError, ValueError):
+                continue
+        return ticks
+
+    def _cb_joint_position_ticks_cmd(self, msg):
+        ticks = self._ticks_by_id(msg)
+        if not ticks:
+            return
+        with self._lock:
+            self._latest_command_ticks.update(ticks)
+
+    def _cb_board_joint_state(self, msg):
+        ticks = self._ticks_by_id(msg)
+        if not ticks:
+            return
+        velocities = self._values_by_id(msg.name, msg.velocity)
+        currents = self._values_by_id(msg.name, msg.effort)
+        with self._lock:
+            self._latest_actual_ticks.update(ticks)
+            self._latest_actual_velocity_ticks_s.update(velocities)
+            self._latest_actual_current_raw.update(currents)
+
+    @staticmethod
+    def _values_by_id(motor_ids, values):
+        result = {}
+        for motor_id, value in zip(motor_ids, values):
+            try:
+                result[int(motor_id)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return result
+
     def _cb_swing_diag(self, msg, leg_name):
         if len(msg.data) < 2:
             return
         with self._lock:
             self._latest_phase_ids[leg_name] = int(round(float(msg.data[1])))
             self._latest_swing_diag[leg_name] = [float(value) for value in msg.data]
+
+    def _cb_endpoint_diag(self, msg, leg_name):
+        if len(msg.data) < len(ENDPOINT_DIAG_FIELDS):
+            return
+        with self._lock:
+            self._latest_endpoint_diag[leg_name] = [float(value) for value in msg.data[:3]]
 
     def _cb_swing_target(self, msg):
         if msg.leg_name not in LEG_NAMES:
@@ -520,6 +602,9 @@ class CrawlGaitWithFanTester(object):
             cols.extend([
                 "%s_phase" % leg,
                 "%s_phase_id" % leg,
+                "%s_phase_elapsed_s" % leg,
+                "%s_endpoint_hold_active" % leg,
+                "%s_endpoint_hold_elapsed_s" % leg,
                 "%s_cmd_x" % leg,
                 "%s_cmd_y" % leg,
                 "%s_cmd_z" % leg,
@@ -534,6 +619,15 @@ class CrawlGaitWithFanTester(object):
             cols.extend([
                 "%s_%s" % (leg, field[0])
                 for field in ACTUAL_TRACKING_DIAG_FIELDS
+            ])
+        for motor_id in self._motor_ids:
+            cols.extend([
+                "motor_%d_target_tick" % motor_id,
+                "motor_%d_actual_tick" % motor_id,
+                "motor_%d_actual_velocity_tick_s" % motor_id,
+                "motor_%d_actual_current_raw" % motor_id,
+                "motor_%d_actual_current_a" % motor_id,
+                "motor_%d_error_tick" % motor_id,
             ])
         return cols
 
@@ -580,6 +674,11 @@ class CrawlGaitWithFanTester(object):
             swing_diag = {leg: list(values) for leg, values in self._latest_swing_diag.items()}
             fan_rpm = list(self._latest_fan_rpm)
             fan_curr = list(self._latest_fan_currents)
+            command_ticks = dict(self._latest_command_ticks)
+            actual_ticks = dict(self._latest_actual_ticks)
+            actual_velocity_ticks_s = dict(self._latest_actual_velocity_ticks_s)
+            actual_current_raw = dict(self._latest_actual_current_raw)
+            endpoint_diag = {leg: list(values) for leg, values in self._latest_endpoint_diag.items()}
 
         wall_time = time.time()
         elapsed = self._rel_now()
@@ -651,6 +750,12 @@ class CrawlGaitWithFanTester(object):
                 cmd_support = int(bool(cmd.support_leg))
             phase_id = int(phase_ids.get(leg, -1))
             phase_name = PHASE_NAMES.get(phase_id, "UNKNOWN")
+            phase_elapsed_s = 0.0
+            if len(swing_diag.get(leg, [])) > PHASE_ELAPSED_DIAG_INDEX:
+                phase_elapsed_s = float(swing_diag[leg][PHASE_ELAPSED_DIAG_INDEX])
+            endpoint_values = endpoint_diag.get(leg, [0.0, 0.0, 0.0])
+            endpoint_hold_active = int(bool(endpoint_values[1])) if len(endpoint_values) > 1 else 0
+            endpoint_hold_elapsed_s = float(endpoint_values[2]) if len(endpoint_values) > 2 else 0.0
 
             ujc_x = 0.0
             ujc_y = 0.0
@@ -668,6 +773,9 @@ class CrawlGaitWithFanTester(object):
             row.extend([
                 phase_name,
                 phase_id,
+                "%.4f" % phase_elapsed_s,
+                endpoint_hold_active,
+                "%.4f" % endpoint_hold_elapsed_s,
                 "%.4f" % cmd_x,
                 "%.4f" % cmd_y,
                 "%.4f" % cmd_z,
@@ -682,6 +790,23 @@ class CrawlGaitWithFanTester(object):
             row.extend([
                 "%.6f" % float(diag_values[index] if index < len(diag_values) else default)
                 for _, index, default in ACTUAL_TRACKING_DIAG_FIELDS
+            ])
+
+        for motor_id in self._motor_ids:
+            target_tick = command_ticks.get(motor_id)
+            actual_tick = actual_ticks.get(motor_id)
+            actual_velocity_tick_s = actual_velocity_ticks_s.get(motor_id)
+            actual_current = actual_current_raw.get(motor_id)
+            error_tick = None
+            if target_tick is not None and actual_tick is not None:
+                error_tick = actual_tick - target_tick
+            row.extend([
+                "" if target_tick is None else "%.0f" % target_tick,
+                "" if actual_tick is None else "%.0f" % actual_tick,
+                "" if actual_velocity_tick_s is None else "%.3f" % actual_velocity_tick_s,
+                "" if actual_current is None else "%.3f" % actual_current,
+                "" if actual_current is None else "%.6f" % (actual_current * self._current_lsb_ma / 1000.0),
+                "" if error_tick is None else "%.0f" % error_tick,
             ])
 
         return row

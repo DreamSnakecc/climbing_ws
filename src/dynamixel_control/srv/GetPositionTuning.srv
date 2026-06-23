@@ -1,0 +1,12 @@
+int32 id
+---
+bool success
+string message
+int32 operating_mode
+int32 pwm_limit
+int32 current_limit
+int32 position_p_gain
+int32 position_i_gain
+int32 position_d_gain
+int32 profile_velocity
+int32 profile_acceleration

@@ -23,6 +23,8 @@ add_service_files(
   GetCurrent.srv
   GetBulkPositions.srv
   GetBulkCurrents.srv
+  GetPositionTuning.srv
+  SetPositionTuning.srv
 )
 
 generate_messages(
@@ -44,4 +46,3 @@ add_dependencies(multi_dxl_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXP
 target_link_libraries(multi_dxl_node
   ${catkin_LIBRARIES}
 )
-

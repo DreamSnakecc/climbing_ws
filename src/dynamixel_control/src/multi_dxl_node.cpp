@@ -12,6 +12,8 @@
 #include "dynamixel_control/GetPosition.h"
 #include "dynamixel_control/GetBulkPositions.h"
 #include "dynamixel_control/GetBulkCurrents.h"
+#include "dynamixel_control/GetPositionTuning.h"
+#include "dynamixel_control/SetPositionTuning.h"
 #include <algorithm>
 #include <cstdlib>
 #include <map>
@@ -23,6 +25,8 @@
 
 // Control table address for X series (except XL-320)
 #define ADDR_OPERATING_MODE 11
+#define ADDR_PWM_LIMIT 36
+#define ADDR_CURRENT_LIMIT 38
 #define ADDR_TORQUE_ENABLE 64
 #define ADDR_POSITION_D_GAIN 80
 #define ADDR_POSITION_I_GAIN 82
@@ -75,7 +79,14 @@ struct PositionGains
     int d;
 };
 
+struct PositionProfile
+{
+    int velocity;
+    int acceleration;
+};
+
 std::map<uint8_t, PositionGains> position_gains_by_id;
+std::map<uint8_t, PositionProfile> position_profiles_by_id;
 
 bool containsId(const std::vector<uint8_t> &ids, uint8_t id)
 {
@@ -101,6 +112,11 @@ std::vector<uint8_t> intListToUint8(const std::vector<int> &values)
 int clampPositionGain(int value)
 {
     return std::max(0, std::min(16383, value));
+}
+
+int clampProfileValue(int value)
+{
+    return std::max(0, value);
 }
 
 bool readXmlRpcInt(XmlRpc::XmlRpcValue &value, const std::string &key, int default_value, int *out)
@@ -167,29 +183,155 @@ void loadPositionGains(const std::string &board_prefix)
     ROS_INFO("Loaded position gain overrides for %zu motors", position_gains_by_id.size());
 }
 
+void loadPositionProfiles(const std::string &board_prefix)
+{
+    XmlRpc::XmlRpcValue profiles_param;
+    bool found = false;
+    if (!board_prefix.empty())
+        found = ros::param::get(board_prefix + "position_profiles", profiles_param);
+    else
+        found = ros::param::get("position_profiles", profiles_param);
+
+    if (!found)
+        return;
+    if (profiles_param.getType() != XmlRpc::XmlRpcValue::TypeStruct)
+    {
+        ROS_WARN("position_profiles must be a map keyed by motor id");
+        return;
+    }
+
+    for (XmlRpc::XmlRpcValue::iterator it = profiles_param.begin(); it != profiles_param.end(); ++it)
+    {
+        const int id_int = std::atoi(it->first.c_str());
+        if (id_int < 0 || id_int > 252)
+        {
+            ROS_WARN("Ignore invalid position_profiles motor id '%s'", it->first.c_str());
+            continue;
+        }
+
+        int velocity = 200;
+        int acceleration = 100;
+        if (!readXmlRpcInt(it->second, "velocity", velocity, &velocity) ||
+            !readXmlRpcInt(it->second, "acceleration", acceleration, &acceleration))
+        {
+            ROS_WARN("Ignore position_profiles for ID %d: expected integer velocity/acceleration fields", id_int);
+            continue;
+        }
+
+        PositionProfile profile;
+        profile.velocity = clampProfileValue(velocity);
+        profile.acceleration = clampProfileValue(acceleration);
+        position_profiles_by_id[static_cast<uint8_t>(id_int)] = profile;
+    }
+
+    ROS_INFO("Loaded position profile overrides for %zu motors", position_profiles_by_id.size());
+}
+
+bool writePositionGains(uint8_t id, const PositionGains &gains, std::string *error)
+{
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_D_GAIN,
+                                                    static_cast<uint16_t>(gains.d), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_I_GAIN,
+                                                    static_cast<uint16_t>(gains.i), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+
+    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_P_GAIN,
+                                                    static_cast<uint16_t>(gains.p), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+    return true;
+}
+
+bool writePositionProfile(uint8_t id, const PositionProfile &profile, std::string *error)
+{
+    dxl_comm_result = packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION,
+                                                    static_cast<uint32_t>(profile.acceleration), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+
+    dxl_comm_result = packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY,
+                                                    static_cast<uint32_t>(profile.velocity), &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+    return true;
+}
+
 void applyPositionGains(uint8_t id)
 {
     std::map<uint8_t, PositionGains>::const_iterator it = position_gains_by_id.find(id);
     if (it == position_gains_by_id.end())
         return;
+    std::string error;
+    if (!writePositionGains(id, it->second, &error))
+        ROS_ERROR("[ID %d] Failed write Position P/I/D gains: %s", id, error.c_str());
+}
 
-    const PositionGains &gains = it->second;
-    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_D_GAIN,
-                                                    static_cast<uint16_t>(gains.d), &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-        ROS_ERROR("[ID %d] Failed write Position D Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
+void applyPositionProfile(uint8_t id)
+{
+    PositionProfile profile;
+    profile.velocity = 200;
+    profile.acceleration = 100;
+    std::map<uint8_t, PositionProfile>::const_iterator it = position_profiles_by_id.find(id);
+    if (it != position_profiles_by_id.end())
+        profile = it->second;
 
-    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_I_GAIN,
-                                                    static_cast<uint16_t>(gains.i), &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-        ROS_ERROR("[ID %d] Failed write Position I Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
-
-    dxl_comm_result = packetHandler->write2ByteTxRx(portHandler, id, ADDR_POSITION_P_GAIN,
-                                                    static_cast<uint16_t>(gains.p), &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-        ROS_ERROR("[ID %d] Failed write Position P Gain: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
-    else
-        ROS_INFO("[ID %d] Position gains P/I/D set to %d/%d/%d", id, gains.p, gains.i, gains.d);
+    std::string error;
+    if (!writePositionProfile(id, profile, &error))
+        ROS_ERROR("[ID %d] Failed write Position Profile: %s", id, error.c_str());
 }
 
 bool setOperatingModeInternal(uint8_t id, uint8_t mode)
@@ -213,12 +355,7 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
         ROS_INFO("[ID %d] Operating mode set to %d", id, static_cast<int>(mode));
 
     applyPositionGains(id);
-
-    // Set smooth motion profile: velocity=500 (~114rpm), acceleration=200
-    // Non-zero values enable internal trajectory interpolation, making leg
-    // motion smooth despite irregular command arrival or serial bus contention.
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_ACCELERATION, 100, &dxl_error);
-    packetHandler->write4ByteTxRx(portHandler, id, ADDR_PROFILE_VELOCITY, 200, &dxl_error);
+    applyPositionProfile(id);
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 1, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
@@ -358,6 +495,205 @@ bool getCurrentService(dynamixel_control::GetCurrent::Request &req,
 
     present_current = static_cast<int16_t>(present_current_raw);
     res.current = static_cast<int32_t>(present_current);
+    return true;
+}
+
+bool read1Byte(uint8_t id, uint16_t address, uint8_t *value, std::string *error)
+{
+    uint8_t raw = 0;
+    dxl_comm_result = packetHandler->read1ByteTxRx(portHandler, id, address, &raw, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+    *value = raw;
+    return true;
+}
+
+bool read2Byte(uint8_t id, uint16_t address, uint16_t *value, std::string *error)
+{
+    uint16_t raw = 0;
+    dxl_comm_result = packetHandler->read2ByteTxRx(portHandler, id, address, &raw, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+    *value = raw;
+    return true;
+}
+
+bool read4Byte(uint8_t id, uint16_t address, uint32_t *value, std::string *error)
+{
+    uint32_t raw = 0;
+    dxl_comm_result = packetHandler->read4ByteTxRx(portHandler, id, address, &raw, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getTxRxResult(dxl_comm_result);
+        return false;
+    }
+    if (dxl_error != 0)
+    {
+        if (error != nullptr)
+            *error = packetHandler->getRxPacketError(dxl_error);
+        return false;
+    }
+    *value = raw;
+    return true;
+}
+
+bool readPositionTuningLocked(
+    uint8_t id,
+    dynamixel_control::GetPositionTuning::Response *res,
+    std::string *error)
+{
+    uint8_t operating_mode = 0;
+    uint16_t pwm_limit = 0;
+    uint16_t current_limit = 0;
+    uint16_t p_gain = 0;
+    uint16_t i_gain = 0;
+    uint16_t d_gain = 0;
+    uint32_t profile_velocity = 0;
+    uint32_t profile_acceleration = 0;
+
+    if (!read1Byte(id, ADDR_OPERATING_MODE, &operating_mode, error) ||
+        !read2Byte(id, ADDR_PWM_LIMIT, &pwm_limit, error) ||
+        !read2Byte(id, ADDR_CURRENT_LIMIT, &current_limit, error) ||
+        !read2Byte(id, ADDR_POSITION_P_GAIN, &p_gain, error) ||
+        !read2Byte(id, ADDR_POSITION_I_GAIN, &i_gain, error) ||
+        !read2Byte(id, ADDR_POSITION_D_GAIN, &d_gain, error) ||
+        !read4Byte(id, ADDR_PROFILE_VELOCITY, &profile_velocity, error) ||
+        !read4Byte(id, ADDR_PROFILE_ACCELERATION, &profile_acceleration, error))
+        return false;
+
+    res->operating_mode = static_cast<int32_t>(operating_mode);
+    res->pwm_limit = static_cast<int32_t>(pwm_limit);
+    res->current_limit = static_cast<int32_t>(current_limit);
+    res->position_p_gain = static_cast<int32_t>(p_gain);
+    res->position_i_gain = static_cast<int32_t>(i_gain);
+    res->position_d_gain = static_cast<int32_t>(d_gain);
+    res->profile_velocity = static_cast<int32_t>(profile_velocity);
+    res->profile_acceleration = static_cast<int32_t>(profile_acceleration);
+    return true;
+}
+
+bool getPositionTuningService(dynamixel_control::GetPositionTuning::Request &req,
+                              dynamixel_control::GetPositionTuning::Response &res)
+{
+    const uint8_t id = static_cast<uint8_t>(req.id);
+    if (req.id < 0 || req.id > 252 || !containsId(controlled_ids, id))
+    {
+        res.success = false;
+        res.message = "motor id is not controlled by this board";
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(serial_mutex);
+    std::string error;
+    res.success = readPositionTuningLocked(id, &res, &error);
+    res.message = res.success ? "ok" : error;
+    return true;
+}
+
+bool setPositionTuningService(dynamixel_control::SetPositionTuning::Request &req,
+                              dynamixel_control::SetPositionTuning::Response &res)
+{
+    const uint8_t id = static_cast<uint8_t>(req.id);
+    if (req.id < 0 || req.id > 252 || !containsId(controlled_ids, id))
+    {
+        res.success = false;
+        res.message = "motor id is not controlled by this board";
+        return true;
+    }
+    if (req.position_p_gain < 0 || req.position_p_gain > 16383 ||
+        req.position_i_gain < 0 || req.position_i_gain > 16383 ||
+        req.position_d_gain < 0 || req.position_d_gain > 16383 ||
+        req.profile_velocity < 0 || req.profile_acceleration < 0)
+    {
+        res.success = false;
+        res.message = "requested tuning values are outside the allowed range";
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(serial_mutex);
+    dynamixel_control::GetPositionTuning::Response before;
+    std::string error;
+    if (!readPositionTuningLocked(id, &before, &error))
+    {
+        res.success = false;
+        res.message = "failed to read current tuning: " + error;
+        return true;
+    }
+
+    PositionGains requested_gains;
+    requested_gains.p = req.position_p_gain;
+    requested_gains.i = req.position_i_gain;
+    requested_gains.d = req.position_d_gain;
+    PositionProfile requested_profile;
+    requested_profile.velocity = req.profile_velocity;
+    requested_profile.acceleration = req.profile_acceleration;
+
+    if (!writePositionGains(id, requested_gains, &error) ||
+        !writePositionProfile(id, requested_profile, &error))
+    {
+        PositionGains previous_gains;
+        previous_gains.p = before.position_p_gain;
+        previous_gains.i = before.position_i_gain;
+        previous_gains.d = before.position_d_gain;
+        PositionProfile previous_profile;
+        previous_profile.velocity = before.profile_velocity;
+        previous_profile.acceleration = before.profile_acceleration;
+        std::string rollback_error;
+        const bool rollback_ok = writePositionGains(id, previous_gains, &rollback_error) &&
+                                 writePositionProfile(id, previous_profile, &rollback_error);
+        res.success = false;
+        res.message = "write failed: " + error + (rollback_ok ? "; restored previous values" : "; rollback failed: " + rollback_error);
+        return true;
+    }
+
+    dynamixel_control::GetPositionTuning::Response after;
+    if (!readPositionTuningLocked(id, &after, &error) ||
+        after.position_p_gain != req.position_p_gain ||
+        after.position_i_gain != req.position_i_gain ||
+        after.position_d_gain != req.position_d_gain ||
+        after.profile_velocity != req.profile_velocity ||
+        after.profile_acceleration != req.profile_acceleration)
+    {
+        PositionGains previous_gains;
+        previous_gains.p = before.position_p_gain;
+        previous_gains.i = before.position_i_gain;
+        previous_gains.d = before.position_d_gain;
+        PositionProfile previous_profile;
+        previous_profile.velocity = before.profile_velocity;
+        previous_profile.acceleration = before.profile_acceleration;
+        std::string rollback_error;
+        writePositionGains(id, previous_gains, &rollback_error);
+        writePositionProfile(id, previous_profile, &rollback_error);
+        res.success = false;
+        res.message = "readback did not match the requested tuning";
+        return true;
+    }
+
+    position_gains_by_id[id] = requested_gains;
+    position_profiles_by_id[id] = requested_profile;
+    res.success = true;
+    res.message = "ok";
     return true;
 }
 
@@ -650,6 +986,7 @@ int main(int argc, char **argv)
     std::vector<uint8_t> multi_turn_list = intListToUint8(multi_turn_ids_param);
     multi_turn_ids = std::set<uint8_t>(multi_turn_list.begin(), multi_turn_list.end());
     loadPositionGains(board_prefix);
+    loadPositionProfiles(board_prefix);
 
     if (controlled_ids.empty())
     {
@@ -708,6 +1045,8 @@ int main(int argc, char **argv)
     ros::ServiceServer current_srv = nh.advertiseService("get_current", getCurrentService);
     ros::ServiceServer bulk_srv = nh.advertiseService("get_bulk_positions", getBulkPositionsService);
     ros::ServiceServer bulk_current_srv = nh.advertiseService("get_bulk_currents", getBulkCurrentsService);
+    ros::ServiceServer get_tuning_srv = nh.advertiseService("get_position_tuning", getPositionTuningService);
+    ros::ServiceServer set_tuning_srv = nh.advertiseService("set_position_tuning", setPositionTuningService);
 
     // Direct telemetry publisher (in C++, bypassing ROS service round-trips)
     pnh.param("telemetry_rate_hz", telemetry_rate_hz, 50);

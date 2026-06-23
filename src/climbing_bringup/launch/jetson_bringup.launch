@@ -3,8 +3,12 @@
   <arg name="enable_auto_mode_switching" default="true" />
   <arg name="enable_auto_current_control" default="false" />
   <arg name="leg_ik_input_mode" default="absolute_center_m" />
+  <arg name="dxl_tuning_override_file" default="" />
 
   <rosparam command="load" file="$(find climbing_description)/config/robot.yaml" />
+  <group if="$(eval arg('dxl_tuning_override_file') != '')">
+    <rosparam command="load" file="$(arg dxl_tuning_override_file)" />
+  </group>
 
   <group ns="jetson">
     <node pkg="dynamixel_control" type="multi_dxl_node" name="multi_dxl_node_left" ns="left_board" output="screen">

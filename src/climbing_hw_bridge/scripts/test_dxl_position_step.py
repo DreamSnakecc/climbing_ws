@@ -129,6 +129,7 @@ class DxlPositionStepTester(object):
             "velocity_tick_s",
             "effort_raw",
             "current_a",
+            "feedback_age_s",
         ])
         rospy.loginfo("test_dxl_position_step: writing CSV -> %s", path)
         return path
@@ -140,6 +141,7 @@ class DxlPositionStepTester(object):
         actual = float(sample["position"])
         error = actual - float(target_tick)
         effort_raw = float(sample["effort_raw"])
+        feedback_age_s = max(0.0, time.time() - float(sample["wall_time"]))
         row = [
             "%.6f" % time.time(),
             "%.6f" % (time.time() - self.t_zero),
@@ -154,6 +156,7 @@ class DxlPositionStepTester(object):
             "%.3f" % float(sample["velocity"]),
             "%.3f" % effort_raw,
             "%.6f" % (effort_raw * self.current_lsb_ma / 1000.0),
+            "%.6f" % feedback_age_s,
         ]
         if self.csv_writer is not None:
             self.csv_writer.writerow(row)
@@ -163,6 +166,7 @@ class DxlPositionStepTester(object):
             "abs_error": abs(error),
             "effort_raw": effort_raw,
             "current_a": effort_raw * self.current_lsb_ma / 1000.0,
+            "feedback_age_s": feedback_age_s,
         }
 
     def _hold_target(self, motor_id, phase, step_index, target_tick, hold_s):
@@ -178,9 +182,60 @@ class DxlPositionStepTester(object):
             self.csv_file.flush()
         return last
 
-    def _target_for_step(self, home_tick, step_index):
+    def _target_for_step(self, home_tick, step_index, step_ticks):
         fraction = float(step_index) / max(1.0, float(self.args.ramp_steps))
-        return int(round(float(home_tick) + float(self.args.step_ticks) * fraction))
+        return int(round(float(home_tick) + float(step_ticks) * fraction))
+
+    def _test_direction(self, motor_id, home_tick, step_ticks, direction_name):
+        final_target = self._target_for_step(home_tick, int(self.args.ramp_steps), step_ticks)
+        max_abs_error = 0.0
+        max_abs_current = 0.0
+        max_feedback_age_s = 0.0
+        final_sample = None
+
+        for step_index in range(1, int(self.args.ramp_steps) + 1):
+            target = self._target_for_step(home_tick, step_index, step_ticks)
+            rospy.loginfo(
+                "test_dxl_position_step: ID %d %s ramp out step %d/%d target=%d",
+                motor_id, direction_name, step_index, int(self.args.ramp_steps), target,
+            )
+            sample = self._hold_target(motor_id, "ramp_out", step_index, target, self.args.hold_s)
+            if sample is not None:
+                max_abs_error = max(max_abs_error, sample["abs_error"])
+                max_abs_current = max(max_abs_current, abs(sample["current_a"]))
+                max_feedback_age_s = max(max_feedback_age_s, sample["feedback_age_s"])
+                final_sample = sample
+
+        final_sample = self._hold_target(
+            motor_id, "settle", int(self.args.ramp_steps), final_target, self.args.settle_s,
+        ) or final_sample
+        if final_sample is not None:
+            max_abs_error = max(max_abs_error, final_sample["abs_error"])
+            max_abs_current = max(max_abs_current, abs(final_sample["current_a"]))
+            max_feedback_age_s = max(max_feedback_age_s, final_sample["feedback_age_s"])
+
+        final_error = final_sample["error"] if final_sample is not None else float("inf")
+        final_actual = final_sample["actual"] if final_sample is not None else float("nan")
+        passed = abs(final_error) <= float(self.args.pass_error_ticks)
+
+        for step_index in range(int(self.args.ramp_steps) - 1, -1, -1):
+            target = self._target_for_step(home_tick, step_index, step_ticks)
+            sample = self._hold_target(motor_id, "ramp_back", step_index, target, self.args.hold_s)
+            if sample is not None:
+                max_abs_error = max(max_abs_error, sample["abs_error"])
+                max_abs_current = max(max_abs_current, abs(sample["current_a"]))
+                max_feedback_age_s = max(max_feedback_age_s, sample["feedback_age_s"])
+
+        return {
+            "direction": direction_name,
+            "final_target": final_target,
+            "final_actual": final_actual,
+            "final_error": final_error,
+            "max_abs_error": max_abs_error,
+            "max_abs_current": max_abs_current,
+            "max_feedback_age_s": max_feedback_age_s,
+            "passed": passed,
+        }
 
     def _test_motor(self, motor_id):
         home_sample = self._latest_sample(motor_id)
@@ -193,90 +248,40 @@ class DxlPositionStepTester(object):
             }
 
         home_tick = int(round(home_sample["position"]))
-        final_target = self._target_for_step(home_tick, int(self.args.ramp_steps))
-        rospy.loginfo(
-            "test_dxl_position_step: ID %d home=%d final_target=%d",
-            motor_id,
-            home_tick,
-            final_target,
-        )
-
-        max_abs_error = 0.0
-        max_abs_current = 0.0
-        final_sample = None
-
-        for step_index in range(1, int(self.args.ramp_steps) + 1):
-            target = self._target_for_step(home_tick, step_index)
+        direction_results = []
+        for direction in parse_directions(self.args.directions):
+            signed_step_ticks = int(self.args.step_ticks) * direction
+            direction_name = "positive" if signed_step_ticks >= 0 else "negative"
             rospy.loginfo(
-                "test_dxl_position_step: ID %d ramp out step %d/%d target=%d",
+                "test_dxl_position_step: ID %d home=%d %s final_target=%d",
                 motor_id,
-                step_index,
-                int(self.args.ramp_steps),
-                target,
+                home_tick,
+                direction_name,
+                self._target_for_step(home_tick, int(self.args.ramp_steps), signed_step_ticks),
             )
-            sample = self._hold_target(
-                motor_id,
-                "ramp_out",
-                step_index,
-                target,
-                self.args.hold_s,
-            )
-            if sample is not None:
-                max_abs_error = max(max_abs_error, sample["abs_error"])
-                max_abs_current = max(max_abs_current, abs(sample["current_a"]))
-                final_sample = sample
-
-        final_sample = self._hold_target(
-            motor_id,
-            "settle",
-            int(self.args.ramp_steps),
-            final_target,
-            self.args.settle_s,
-        ) or final_sample
-        if final_sample is not None:
-            max_abs_error = max(max_abs_error, final_sample["abs_error"])
-            max_abs_current = max(max_abs_current, abs(final_sample["current_a"]))
-
-        final_error = final_sample["error"] if final_sample is not None else float("inf")
-        final_actual = final_sample["actual"] if final_sample is not None else float("nan")
-        passed = abs(final_error) <= float(self.args.pass_error_ticks)
-
-        for step_index in range(int(self.args.ramp_steps) - 1, -1, -1):
-            target = self._target_for_step(home_tick, step_index)
-            rospy.loginfo(
-                "test_dxl_position_step: ID %d ramp back step %d target=%d",
-                motor_id,
-                step_index,
-                target,
-            )
-            sample = self._hold_target(
-                motor_id,
-                "ramp_back",
-                step_index,
-                target,
-                self.args.hold_s,
-            )
-            if sample is not None:
-                max_abs_error = max(max_abs_error, sample["abs_error"])
-                max_abs_current = max(max_abs_current, abs(sample["current_a"]))
-
+            direction_results.append(self._test_direction(
+                motor_id, home_tick, signed_step_ticks, direction_name,
+            ))
+        last_result = direction_results[-1]
         return {
             "motor_id": motor_id,
             "home_tick": home_tick,
-            "final_target": final_target,
-            "final_actual": final_actual,
-            "final_error": final_error,
-            "max_abs_error": max_abs_error,
-            "max_abs_current": max_abs_current,
-            "passed": passed,
-            "reason": "ok" if passed else "final_error",
+            "final_target": last_result["final_target"],
+            "final_actual": last_result["final_actual"],
+            "final_error": last_result["final_error"],
+            "max_abs_error": max(result["max_abs_error"] for result in direction_results),
+            "max_abs_current": max(result["max_abs_current"] for result in direction_results),
+            "max_feedback_age_s": max(result["max_feedback_age_s"] for result in direction_results),
+            "directions": direction_results,
+            "passed": all(result["passed"] for result in direction_results),
+            "reason": "ok" if all(result["passed"] for result in direction_results) else "final_error",
         }
 
     def _print_plan(self):
         print("Dynamixel position step test plan:")
         print("  motors: %s" % ",".join(str(mid) for mid in self.motor_ids))
         print("  command topic: /set_position")
-        print("  step_ticks: %s" % self.args.step_ticks)
+        print("  step_ticks: %s (directions=%s)" % (self.args.step_ticks, self.args.directions))
         print("  ramp_steps: %s" % self.args.ramp_steps)
         print("  hold_s: %.3f" % float(self.args.hold_s))
         print("  settle_s: %.3f" % float(self.args.settle_s))
@@ -288,8 +293,11 @@ class DxlPositionStepTester(object):
                 continue
             home = int(round(sample["position"]))
             print(
-                "  ID %d: board=%s home=%d final_target=%d"
-                % (motor_id, sample["board"], home, self._target_for_step(home, int(self.args.ramp_steps)))
+                "  ID %d: board=%s home=%d targets=%s"
+                % (motor_id, sample["board"], home, ",".join(
+                    str(self._target_for_step(home, int(self.args.ramp_steps), int(self.args.step_ticks) * direction))
+                    for direction in parse_directions(self.args.directions)
+                ))
             )
 
     def _confirm(self):
@@ -298,8 +306,8 @@ class DxlPositionStepTester(object):
         try:
             input(
                 "\n>>> Confirm robot is supported, auto position/mode/current control is disabled, "
-                "and motors %s can safely move +%d ticks. Press Enter to start. (Ctrl+C to cancel)\n>>> "
-                % (",".join(str(mid) for mid in self.motor_ids), int(self.args.step_ticks))
+                "and motors %s can safely move +/- %d ticks. Press Enter to start. (Ctrl+C to cancel)\n>>> "
+                % (",".join(str(mid) for mid in self.motor_ids), abs(int(self.args.step_ticks)))
             )
             return True
         except (EOFError, KeyboardInterrupt):
@@ -365,15 +373,31 @@ def parse_motor_ids(value):
     return result
 
 
+def parse_directions(value):
+    result = []
+    for part in str(value).split(","):
+        token = part.strip().lower()
+        if token in ("+", "positive", "plus", "1"):
+            result.append(1)
+        elif token in ("-", "negative", "minus", "-1"):
+            result.append(-1)
+        else:
+            raise argparse.ArgumentTypeError("directions must contain '+' and/or '-'")
+    if not result:
+        raise argparse.ArgumentTypeError("at least one direction is required")
+    return result
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run direct /set_position ramp-step tracking tests for selected Dynamixel motors."
     )
     parser.add_argument("--motor-ids", default="2,4,6,8", help="Comma-separated motor IDs")
-    parser.add_argument("--step-ticks", type=int, default=500, help="Final positive tick offset")
-    parser.add_argument("--ramp-steps", type=int, default=5, help="Number of ramp-out steps")
-    parser.add_argument("--hold-s", type=float, default=1.0, help="Hold time for each ramp step")
-    parser.add_argument("--settle-s", type=float, default=0.5, help="Extra hold at final target")
+    parser.add_argument("--step-ticks", type=int, default=100, help="Final tick offset magnitude")
+    parser.add_argument("--directions", default="+,-", help="Comma-separated test directions, default '+,-'")
+    parser.add_argument("--ramp-steps", type=int, default=1, help="Number of ramp-out steps")
+    parser.add_argument("--hold-s", type=float, default=0.6, help="Hold time for each ramp step")
+    parser.add_argument("--settle-s", type=float, default=0.2, help="Extra hold at final target")
     parser.add_argument("--pass-error-ticks", type=float, default=10.0, help="Final absolute error threshold")
     parser.add_argument("--output-dir", default="test_logs", help="CSV output directory")
     parser.add_argument("--sample-rate-hz", type=float, default=50.0, help="CSV sample rate while holding targets")
