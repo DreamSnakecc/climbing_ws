@@ -98,6 +98,40 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertEqual(config["left_board"]["position_profiles"]["2"]["velocity"], 250)
         self.assertEqual(config["right_board"]["position_gains"]["4"]["d"], 20)
 
+    def test_single_leg_endpoint_parser(self):
+        directory = tempfile.mkdtemp(prefix="dxl_tuning_leg_")
+        self.addCleanup(shutil.rmtree, directory)
+        path = os.path.join(directory, "single_leg.csv")
+        fields = [
+            "servo_gate_enabled", "servo_timed_out", "servo_last_pass_phase_id",
+            "servo_last_pass_sequence", "servo_wait_s", "servo_phase_id",
+            "servo_error_joint1_tick", "servo_error_joint2_tick", "servo_error_joint3_tick",
+            "servo_last_pass_error_joint1_tick", "servo_last_pass_error_joint2_tick", "servo_last_pass_error_joint3_tick",
+        ]
+        with open(path, "w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows([
+                {"servo_gate_enabled": "1", "servo_timed_out": "0", "servo_last_pass_phase_id": "5", "servo_last_pass_sequence": "1", "servo_wait_s": "0", "servo_phase_id": "6", "servo_error_joint1_tick": "0", "servo_error_joint2_tick": "0", "servo_error_joint3_tick": "0", "servo_last_pass_error_joint1_tick": "1", "servo_last_pass_error_joint2_tick": "-2", "servo_last_pass_error_joint3_tick": "3"},
+                {"servo_gate_enabled": "1", "servo_timed_out": "1", "servo_last_pass_phase_id": "5", "servo_last_pass_sequence": "1", "servo_wait_s": "3.1", "servo_phase_id": "6", "servo_error_joint1_tick": "2", "servo_error_joint2_tick": "-15", "servo_error_joint3_tick": "1", "servo_last_pass_error_joint1_tick": "1", "servo_last_pass_error_joint2_tick": "-2", "servo_last_pass_error_joint3_tick": "3"},
+            ])
+        metrics = tuner.parse_single_leg_csv(path, 10.0)
+        self.assertFalse(metrics["passed"])
+        self.assertEqual(metrics["endpoint_count"], 1)
+        self.assertEqual(metrics["terminal_errors_tick"], [2.0, -15.0, 1.0])
+        self.assertEqual(tuner.failed_leg_motor_id(metrics, [11, 1, 2], 10.0), 1)
+
+    def test_single_leg_candidate_selection(self):
+        baseline = {"passed": False, "timed_out": True, "endpoint_count": 0, "terminal_max_abs_error_tick": 15.0}
+        improved = {"passed": False, "timed_out": True, "endpoint_count": 1, "terminal_max_abs_error_tick": 9.0}
+        worse = {"passed": False, "timed_out": True, "endpoint_count": 0, "terminal_max_abs_error_tick": 16.0}
+        self.assertTrue(tuner.leg_endpoint_improves(improved, baseline))
+        self.assertFalse(tuner.leg_endpoint_improves(worse, baseline))
+        original = {"p": 800, "i": 0, "d": 0, "velocity": 200, "acceleration": 100}
+        candidates = tuner.leg_endpoint_candidates(original, original)
+        self.assertEqual(candidates[0][0], "profile_125")
+        self.assertEqual(candidates[-1][1]["p"], 1040)
+
 
 if __name__ == "__main__":
     unittest.main()

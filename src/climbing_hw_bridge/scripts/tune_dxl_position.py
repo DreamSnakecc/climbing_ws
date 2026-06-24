@@ -27,6 +27,7 @@ from dynamixel_control.srv import GetPositionTuning, SetPositionTuning
 
 DEFAULT_MOTOR_IDS = [11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]
 MOVING_PHASES = set(["LIFT", "TRANSFER", "PRELOAD", "ADMIT", "LIFT_SWING"])
+SERVO_ENDPOINT_PHASES = [(5, "LIFT"), (6, "TRANSFER"), (2, "PRELOAD")]
 
 
 def percentile(values, fraction):
@@ -155,6 +156,81 @@ def parse_step_csv(path, pass_error_ticks, feedback_age_limit_s):
     }
 
 
+def parse_single_leg_csv(path, pass_error_ticks):
+    """Summarize the independent servo endpoint gate from one leg swing CSV."""
+    with open(path, newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    required = [
+        "servo_gate_enabled", "servo_timed_out", "servo_last_pass_phase_id",
+        "servo_last_pass_sequence", "servo_wait_s",
+    ]
+    if not rows or any(field not in rows[0] for field in required):
+        return {"passed": False, "reason": "missing_servo_endpoint_diagnostics", "csv": path}
+
+    def value(row, field, default=0.0):
+        try:
+            return float(row.get(field, default) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    endpoint_errors = {}
+    last_sequence = 0
+    for row in rows:
+        if value(row, "servo_gate_enabled") < 0.5:
+            continue
+        sequence = int(round(value(row, "servo_last_pass_sequence")))
+        phase_id = int(round(value(row, "servo_last_pass_phase_id", -1.0)))
+        if sequence <= last_sequence or phase_id not in [item[0] for item in SERVO_ENDPOINT_PHASES]:
+            continue
+        errors = [
+            value(row, "servo_last_pass_error_joint1_tick"),
+            value(row, "servo_last_pass_error_joint2_tick"),
+            value(row, "servo_last_pass_error_joint3_tick"),
+        ]
+        if all(abs(error) <= pass_error_ticks for error in errors):
+            endpoint_errors[phase_id] = errors
+            last_sequence = sequence
+
+    passed_phase_ids = []
+    for phase_id, _ in SERVO_ENDPOINT_PHASES:
+        if phase_id not in endpoint_errors:
+            break
+        passed_phase_ids.append(phase_id)
+    waiting_rows = [row for row in rows if value(row, "servo_wait_s") > 0.0]
+    terminal_row = waiting_rows[-1] if waiting_rows else rows[-1]
+    terminal_errors = [
+        value(terminal_row, "servo_error_joint1_tick"),
+        value(terminal_row, "servo_error_joint2_tick"),
+        value(terminal_row, "servo_error_joint3_tick"),
+    ]
+    timed_out = any(value(row, "servo_timed_out") >= 0.5 for row in rows)
+    endpoint_count = len(passed_phase_ids)
+    return {
+        "csv": path,
+        "passed": endpoint_count == len(SERVO_ENDPOINT_PHASES) and not timed_out,
+        "endpoint_count": endpoint_count,
+        "passed_phases": [phase_name for phase_id, phase_name in SERVO_ENDPOINT_PHASES if phase_id in passed_phase_ids],
+        "endpoint_errors_tick": {
+            phase_name: endpoint_errors[phase_id]
+            for phase_id, phase_name in SERVO_ENDPOINT_PHASES if phase_id in endpoint_errors
+        },
+        "timed_out": timed_out,
+        "terminal_phase_id": int(round(value(terminal_row, "servo_phase_id", -1.0))),
+        "terminal_errors_tick": terminal_errors,
+        "terminal_max_abs_error_tick": max(abs(error) for error in terminal_errors),
+    }
+
+
+def leg_endpoint_improves(candidate, baseline):
+    if candidate.get("passed"):
+        return True
+    if candidate.get("timed_out") and not baseline.get("timed_out"):
+        return False
+    if candidate.get("endpoint_count", 0) != baseline.get("endpoint_count", 0):
+        return candidate.get("endpoint_count", 0) > baseline.get("endpoint_count", 0)
+    return candidate.get("terminal_max_abs_error_tick", float("inf")) < baseline.get("terminal_max_abs_error_tick", float("inf"))
+
+
 def combine_step_metrics(direction_metrics, current_limit_a, step_ticks, pass_error_ticks):
     if len(direction_metrics) != 2:
         return {"safe": False, "reason": "missing_direction"}
@@ -197,6 +273,39 @@ def leg_by_motor(config):
         for motor_id in leg_config.get("motor_ids", []):
             result[int(motor_id)] = str(leg_name)
     return result
+
+
+def motor_ids_for_leg(config, leg_name):
+    leg_config = config.get("legs", {}).get(str(leg_name), {})
+    return [int(value) for value in leg_config.get("motor_ids", [])]
+
+
+def failed_leg_motor_id(result, motor_ids, pass_error_ticks):
+    errors = list(result.get("terminal_errors_tick", []))
+    if len(motor_ids) != 3 or len(errors) != 3:
+        return None
+    failing = [
+        (abs(float(error)), int(motor_id))
+        for motor_id, error in zip(motor_ids, errors)
+        if abs(float(error)) > float(pass_error_ticks)
+    ]
+    return max(failing)[1] if failing else None
+
+
+def leg_endpoint_candidates(original, active):
+    """Bounded P/Profile candidates relative to the original motor settings."""
+    candidates = []
+    profile = dict(active)
+    profile["velocity"] = int(round(float(original["velocity"]) * 1.25))
+    profile["acceleration"] = int(round(float(original["acceleration"]) * 1.25))
+    if profile != active:
+        candidates.append(("profile_125", profile))
+    for percentage in (110, 120, 130):
+        candidate = dict(active)
+        candidate["p"] = int(round(float(original["p"]) * percentage / 100.0))
+        if candidate != active:
+            candidates.append(("p_%d" % percentage, candidate))
+    return candidates
 
 
 def transformed_ujc_error(row, leg_name, config):
@@ -478,6 +587,30 @@ def run_crawl(args, session, label):
     return max(paths, key=os.path.getmtime), int(returncode)
 
 
+def run_single_leg_test(args, session, label):
+    output_dir = os.path.join(session["session_dir"], "leg_endpoint", label)
+    ensure_dir(output_dir)
+    command = [
+        "rosrun", "climbing_control_core", "test_single_leg_swing.py",
+        "--leg", args.leg,
+        "--cycles", str(args.leg_cycles),
+        "--swing-wait", str(args.leg_swing_wait_s),
+        "--hold-before", str(args.leg_hold_before_s),
+        "--hold-after", str(args.leg_hold_after_s),
+        "--output-dir", output_dir,
+    ]
+    returncode = subprocess.call(command)
+    paths = glob.glob(os.path.join(output_dir, "single_swing_%s_*.csv" % args.leg))
+    if not paths:
+        raise RuntimeError("single-leg endpoint test produced no CSV")
+    metrics = parse_single_leg_csv(max(paths, key=os.path.getmtime), args.pass_error_ticks)
+    metrics["process_returncode"] = int(returncode)
+    metrics["passed"] = bool(metrics.get("passed")) and returncode == 0
+    if returncode not in (0, 4):
+        raise RuntimeError("single-leg endpoint test returned %d" % returncode)
+    return metrics
+
+
 def yaml_mapping_lines(name, values, profile=False):
     lines = ["  %s:\n" % name]
     for motor_id in sorted([int(value) for value in values]):
@@ -551,10 +684,146 @@ def candidate_override(candidates):
     return result
 
 
+def leg_endpoint_candidates_by_board(tuner, active_tuning):
+    candidates = {"left_board": {}, "right_board": {}}
+    for motor_id in sorted(tuner.board_by_motor):
+        motor_key = str(motor_id)
+        tuning = active_tuning.get(motor_key)
+        if tuning is None:
+            tuning = tuner._get_tuning(motor_id)
+        board_name = tuner.board_by_motor[motor_id]
+        candidates[board_name][motor_key] = dict(tuning)
+    return candidates
+
+
+def run_leg_endpoint_stage(args, session_path, session):
+    rospy.init_node("tune_dxl_leg_endpoint", anonymous=False)
+    tuner = DxlAutoTuner(args)
+    tuner._wait_services()
+    motor_ids = motor_ids_for_leg(tuner.config, args.leg)
+    if len(motor_ids) != 3:
+        raise RuntimeError("leg %s must define exactly three motor_ids" % args.leg)
+
+    endpoint = session.get("leg_endpoint")
+    if endpoint is None:
+        if not tuner._confirm(
+                "Robot is supported and normal bringup has servo_tracking_gate_enabled:=true. "
+                "Run the single-leg test/tune/test loop for %s now?" % args.leg):
+            return 0
+        original_tuning = {}
+        for motor_id in motor_ids:
+            tuning = tuner._get_tuning(motor_id)
+            if tuning["operating_mode"] != 3:
+                raise RuntimeError("motor %d must be in Position Control Mode (3), got %d" % (
+                    motor_id, tuning["operating_mode"]))
+            original_tuning[str(motor_id)] = tuning
+        endpoint = {
+            "leg": args.leg,
+            "motor_ids": motor_ids,
+            "original_tuning": original_tuning,
+            "active_tuning": dict(original_tuning),
+            "trials": [],
+            "status": "running",
+        }
+        session["motor_ids"] = list(motor_ids)
+        session["leg_endpoint"] = endpoint
+        session["stage"] = "leg_endpoint_running"
+        save_session(session_path, session)
+    elif endpoint.get("leg") != args.leg:
+        raise RuntimeError("session is for leg %s, not %s" % (endpoint.get("leg"), args.leg))
+
+    for motor_id, tuning in endpoint["active_tuning"].items():
+        tuner._set_tuning(int(motor_id), tuning)
+
+    current = endpoint.get("current_metrics")
+    if current is None:
+        current = run_single_leg_test(args, session, "baseline")
+        current["label"] = "baseline"
+        endpoint["trials"].append(current)
+        endpoint["current_metrics"] = current
+        save_session(session_path, session)
+
+    while not current.get("passed"):
+        candidate_trials = len(endpoint["trials"]) - 1
+        if candidate_trials >= args.leg_max_trials:
+            endpoint["status"] = "failed_max_trials"
+            break
+
+        failed_motor = failed_leg_motor_id(current, motor_ids, args.pass_error_ticks)
+        if failed_motor is None:
+            endpoint["status"] = "failed_without_identifiable_tick_error"
+            break
+
+        motor_key = str(failed_motor)
+        original = endpoint["original_tuning"][motor_key]
+        active = endpoint["active_tuning"][motor_key]
+        accepted = False
+        for label, candidate in leg_endpoint_candidates(original, active):
+            trial_label = "trial_%02d_id_%d_%s" % (candidate_trials + 1, failed_motor, label)
+            try:
+                tuner._set_tuning(failed_motor, candidate)
+                rospy.sleep(0.10)
+                trial = run_single_leg_test(args, session, trial_label)
+            except Exception:
+                for motor_id, tuning in endpoint["original_tuning"].items():
+                    try:
+                        tuner._set_tuning(int(motor_id), tuning)
+                    except (RuntimeError, rospy.ServiceException):
+                        rospy.logerr("tune_dxl_position: failed to restore motor %s", motor_id)
+                endpoint["active_tuning"] = dict(endpoint["original_tuning"])
+                endpoint["status"] = "interrupted_original_tuning_restored"
+                save_session(session_path, session)
+                raise
+            trial["label"] = trial_label
+            trial["motor_id"] = failed_motor
+            trial["tuning"] = dict(candidate)
+            endpoint["trials"].append(trial)
+            if leg_endpoint_improves(trial, current):
+                endpoint["active_tuning"][motor_key] = dict(candidate)
+                current = trial
+                endpoint["current_metrics"] = current
+                accepted = True
+                save_session(session_path, session)
+                break
+            tuner._set_tuning(failed_motor, active)
+            save_session(session_path, session)
+            candidate_trials += 1
+            if candidate_trials >= args.leg_max_trials:
+                break
+
+        if not accepted:
+            endpoint["status"] = "failed_no_improving_candidate"
+            break
+
+    if current.get("passed"):
+        candidates = leg_endpoint_candidates_by_board(tuner, endpoint["active_tuning"])
+        override_path = os.path.join(session["session_dir"], "leg_endpoint_candidate.yaml")
+        write_yaml(override_path, candidate_override(candidates))
+        endpoint["candidate_override_file"] = override_path
+        endpoint["status"] = "passed"
+        session["candidates"] = candidates
+        session["stage"] = "leg_endpoint_passed"
+        save_session(session_path, session)
+        print("Single-leg endpoint loop PASSED for %s" % args.leg)
+        print("Candidate override: %s" % override_path)
+        return 0
+
+    for motor_id, tuning in endpoint["original_tuning"].items():
+        try:
+            tuner._set_tuning(int(motor_id), tuning)
+        except (RuntimeError, rospy.ServiceException):
+            rospy.logerr("tune_dxl_position: failed to restore motor %s", motor_id)
+    endpoint["current_metrics"] = current
+    session["stage"] = "leg_endpoint_failed"
+    save_session(session_path, session)
+    print("Single-leg endpoint loop FAILED for %s; original tuning was restored." % args.leg)
+    return 1
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Operator-gated Dynamixel position tuning workflow")
-    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "crawl-candidate", "commit"])
-    parser.add_argument("--session", default="", help="Session JSON path; omitted only for crawl-baseline")
+    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "crawl-candidate", "commit", "leg-endpoint"])
+    parser.add_argument("--session", default="", help="Session JSON path; omitted for crawl-baseline or leg-endpoint")
     parser.add_argument("--output-dir", default="test_logs")
     parser.add_argument("--robot-config", default="src/climbing_description/config/robot.yaml")
     parser.add_argument("--motor-ids", default=",".join(str(value) for value in DEFAULT_MOTOR_IDS))
@@ -563,13 +832,19 @@ def parse_args():
     parser.add_argument("--extended-step-ticks", type=int, default=300)
     parser.add_argument("--pass-error-ticks", type=float, default=10.0)
     parser.add_argument("--stream-timeout-s", type=float, default=10.0)
+    parser.add_argument("--leg", default="lf", choices=["lf", "rf", "rr", "lr"])
+    parser.add_argument("--leg-cycles", type=int, default=1)
+    parser.add_argument("--leg-swing-wait-s", type=float, default=15.0)
+    parser.add_argument("--leg-hold-before-s", type=float, default=1.0)
+    parser.add_argument("--leg-hold-after-s", type=float, default=1.0)
+    parser.add_argument("--leg-max-trials", type=int, default=8)
     parser.add_argument("--no-confirm", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.stage == "crawl-baseline" and not args.session:
+    if args.stage in ("crawl-baseline", "leg-endpoint") and not args.session:
         session_path, session = new_session(args)
     elif args.session:
         session_path = os.path.abspath(args.session)
@@ -578,6 +853,9 @@ def main():
         args.motor_ids = ",".join(str(value) for value in session.get("motor_ids", args.motor_ids.split(",")))
     else:
         raise RuntimeError("--session is required after the baseline stage")
+
+    if args.stage == "leg-endpoint":
+        return run_leg_endpoint_stage(args, session_path, session)
 
     if args.stage == "crawl-baseline":
         if not confirm(args, "Robot is ready for a 40 s flat adhesion crawl baseline. Start now?"):

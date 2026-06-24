@@ -5589,6 +5589,83 @@
       }
     }
   },
+  "candidate_crawl": {
+    "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_170928/crawl_candidate/crawl_gait_with_fan_20260623_195830.csv",
+    "fault_seen": false,
+    "legs": {
+      "lf": {
+        "p95_normal_error_mm": 24.3,
+        "p95_tangent_error_mm": 26.04955978964009,
+        "p95_total_error_mm": 27.254055626401716
+      },
+      "lr": {
+        "p95_normal_error_mm": 23.2,
+        "p95_tangent_error_mm": 26.02685166662044,
+        "p95_total_error_mm": 26.235224559287907
+      },
+      "rf": {
+        "p95_normal_error_mm": 22.599999999999994,
+        "p95_tangent_error_mm": 26.20084680379592,
+        "p95_total_error_mm": 26.60129261264273
+      },
+      "rr": {
+        "p95_normal_error_mm": 24.29999999999999,
+        "p95_tangent_error_mm": 31.29856536582206,
+        "p95_total_error_mm": 31.41480851379865
+      }
+    },
+    "motors": {
+      "1": {
+        "p95_abs_error_tick": 132.0,
+        "p95_current_a": 1.14325
+      },
+      "11": {
+        "p95_abs_error_tick": 41.0,
+        "p95_current_a": 1.51985
+      },
+      "12": {
+        "p95_abs_error_tick": 50.0,
+        "p95_current_a": 1.33424
+      },
+      "13": {
+        "p95_abs_error_tick": 61.0,
+        "p95_current_a": 1.73505
+      },
+      "14": {
+        "p95_abs_error_tick": 35.0,
+        "p95_current_a": 1.13787
+      },
+      "2": {
+        "p95_abs_error_tick": 372.0,
+        "p95_current_a": 0.26631
+      },
+      "3": {
+        "p95_abs_error_tick": 127.0,
+        "p95_current_a": 1.35307
+      },
+      "4": {
+        "p95_abs_error_tick": 318.0,
+        "p95_current_a": 0.28245
+      },
+      "5": {
+        "p95_abs_error_tick": 99.0,
+        "p95_current_a": 2.17352
+      },
+      "6": {
+        "p95_abs_error_tick": 284.0,
+        "p95_current_a": 0.47344
+      },
+      "7": {
+        "p95_abs_error_tick": 111.0,
+        "p95_current_a": 1.73236
+      },
+      "8": {
+        "p95_abs_error_tick": 347.0,
+        "p95_current_a": 0.29859
+      }
+    },
+    "process_returncode": 0
+  },
   "candidate_override_file": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_170928/dxl_tuning_candidate.yaml",
   "candidates": {
     "left_board": {
@@ -5716,6 +5793,12 @@
       }
     }
   },
+  "crawl_comparison": {
+    "passed": false,
+    "reasons": [
+      "motor 5 p95 error worsened 88.0 -> 99.0 tick"
+    ]
+  },
   "created_at": "2026-06-23T17:09:28",
   "motor_ids": [
     11,
@@ -5733,6 +5816,6 @@
   ],
   "robot_config": "/home/cc/climbing_ws/src/climbing_description/config/robot.yaml",
   "session_dir": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_170928",
-  "stage": "bench_done",
-  "updated_at": "2026-06-23T19:44:58"
+  "stage": "crawl_candidate_done",
+  "updated_at": "2026-06-23T19:59:11"
 }

@@ -9,13 +9,14 @@ import numpy as np
 import rospy
 from climbing_msgs.msg import BodyReference, EstimatedState, LegCenterCommand
 from geometry_msgs.msg import Point, Vector3
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout, String
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension, MultiArrayLayout, String
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from workspace_guard import workspace_guard
+from workspace_guard import constrained_transfer_path, workspace_guard
 from actual_tracking import tracking_readiness
 
 
@@ -232,6 +233,8 @@ class SwingLegController(object):
         self.workspace_warn_throttle_s = self._float_cfg("workspace_warn_throttle_s", 2.0, 0.1)
         self.workspace_fk_tolerance_m = self._float_cfg("workspace_fk_tolerance_m", 0.002, 1e-5)
         self.workspace_q23_sum_limit_deg = self._float_list_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
+        self.transfer_q23_sum_limit_deg = self._float_list_cfg("transfer_q23_sum_limit_deg", [-5.0, 5.0])
+        self.transfer_q23_sample_count = self._int_cfg("transfer_q23_sample_count", 101, 3)
         self.actual_tracking_enabled = bool(self._cfg("actual_tracking_enabled", True))
         self.actual_tracking_tangent_tolerance_m = self._float_cfg("actual_tracking_tangent_tolerance_m", 0.006, 0.0)
         self.actual_tracking_normal_tolerance_m = self._float_cfg("actual_tracking_normal_tolerance_m", 0.004, 0.0)
@@ -240,6 +243,12 @@ class SwingLegController(object):
         self.actual_tracking_warn_throttle_s = self._float_cfg("actual_tracking_warn_throttle_s", 1.0, 0.1)
         self.endpoint_diagnostic_enabled = bool(self._cfg("endpoint_diagnostic_enabled", False))
         self.endpoint_diagnostic_hold_s = self._float_cfg("endpoint_diagnostic_hold_s", 0.4, 0.0)
+        self.servo_tracking_gate_enabled = bool(self._cfg("servo_tracking_gate_enabled", False))
+        self.servo_tracking_tolerance_ticks = self._float_cfg("servo_tracking_tolerance_ticks", 10.0, 0.0)
+        self.servo_tracking_hold_s = self._float_cfg("servo_tracking_hold_s", 0.10, 0.0)
+        self.servo_tracking_timeout_s = self._float_cfg("servo_tracking_timeout_s", 3.0, 0.1)
+        self.servo_tracking_feedback_timeout_s = self._float_cfg("servo_tracking_feedback_timeout_s", 0.25, 0.01)
+        self.servo_tracking_warn_throttle_s = self._float_cfg("servo_tracking_warn_throttle_s", 1.0, 0.1)
 
         legacy_nominal_z_mm = float(rospy.get_param("/gait_controller/nominal_z", -299.2))
         self.nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 118.75)) / 1000.0
@@ -304,6 +313,9 @@ class SwingLegController(object):
         self.swing_phase_start = {}
         self._fan_off_request_time = {}  # leg_name -> time when fan-off was requested
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]  # [lf, rf, rr, lr]
+        self._latest_command_ticks = {}
+        self._latest_actual_ticks = {}
+        self._latest_actual_ticks_received_at = {}
         self._fan_rpm_timeout_s = 3.0  # max wait for RPM check fallback
         self.swing_states = {}
         for leg_name in self.leg_names:
@@ -321,6 +333,18 @@ class SwingLegController(object):
         self.endpoint_diagnostic_pubs = {
             leg_name: rospy.Publisher(
                 "/control/swing_leg_endpoint_diag/" + leg_name, Float32MultiArray, queue_size=20
+            )
+            for leg_name in self.leg_names
+        }
+        self.servo_tracking_pubs = {
+            leg_name: rospy.Publisher(
+                "/control/swing_leg_servo_tracking/" + leg_name, Float32MultiArray, queue_size=20
+            )
+            for leg_name in self.leg_names
+        }
+        self.transfer_path_pubs = {
+            leg_name: rospy.Publisher(
+                "/control/swing_leg_transfer_path/" + leg_name, Float32MultiArray, queue_size=20
             )
             for leg_name in self.leg_names
         }
@@ -363,6 +387,22 @@ class SwingLegController(object):
             "/jetson/fan_serial_bridge/leg_rpm", Float32MultiArray,
             self._fan_rpm_callback, queue_size=10,
         )
+        rospy.Subscriber(
+            "/jetson/joint_position_ticks_cmd", JointState,
+            self._command_ticks_callback, queue_size=20,
+        )
+        rospy.Subscriber(
+            "/jetson/left_board/joint_state", JointState,
+            self._actual_ticks_callback, queue_size=20,
+        )
+        rospy.Subscriber(
+            "/jetson/right_board/joint_state", JointState,
+            self._actual_ticks_callback, queue_size=20,
+        )
+        rospy.Subscriber(
+            "/control/swing_leg_reset", Bool,
+            self._reset_callback, queue_size=2,
+        )
 
     def _new_leg_state(self, nominal):
         state = {
@@ -372,11 +412,24 @@ class SwingLegController(object):
             "phase": self.PHASE_SUPPORT,
             "phase_started_at": None,
             "endpoint_hold_started_at": None,
+            "servo_tracking_wait_started_at": None,
+            "servo_tracking_within_started_at": None,
+            "servo_tracking_errors_tick": [0.0, 0.0, 0.0],
+            "servo_tracking_ready": 1.0,
+            "servo_tracking_timed_out": 0.0,
+            "servo_tracking_last_pass_phase_id": -1.0,
+            "servo_tracking_last_pass_sequence": 0.0,
+            "servo_tracking_last_pass_errors_tick": [0.0, 0.0, 0.0],
             "last_joint_vector": [0.0, 0.0, 0.0],
             "support_world_x": None,
             "support_world_y": None,
             "transfer_fraction": 0.0,
             "transfer_committed": False,
+            "transfer_path": [],
+            "transfer_path_valid": True,
+            "transfer_path_error": "",
+            "transfer_path_index": 0,
+            "transfer_path_last_point": None,
             "workspace_clamped": 0.0,
             "workspace_margin_m": 0.0,
             "workspace_check_us": 0.0,
@@ -413,6 +466,26 @@ class SwingLegController(object):
             values.append(0.0)
         self._latest_fan_rpm = values
 
+    @staticmethod
+    def _ticks_from_joint_state(msg):
+        ticks = {}
+        for name, position in zip(msg.name, msg.position):
+            try:
+                ticks[int(name)] = float(position)
+            except (TypeError, ValueError):
+                continue
+        return ticks
+
+    def _command_ticks_callback(self, msg):
+        self._latest_command_ticks.update(self._ticks_from_joint_state(msg))
+
+    def _actual_ticks_callback(self, msg):
+        received_at = rospy.Time.now().to_sec()
+        ticks = self._ticks_from_joint_state(msg)
+        self._latest_actual_ticks.update(ticks)
+        for motor_id in ticks:
+            self._latest_actual_ticks_received_at[motor_id] = received_at
+
     def _mission_state_callback(self, msg):
         try:
             value = str(msg.data)
@@ -420,6 +493,33 @@ class SwingLegController(object):
             return
         if value:
             self.mission_state = value
+
+    def _reset_callback(self, msg):
+        if not msg.data:
+            return
+        self._fan_off_request_time.clear()
+        self._body_x_offset = 0.0
+        self._body_y_offset = 0.0
+        self._inflight_body_advance_m = 0.0
+        for leg_name in self.leg_names:
+            state = self.swing_states[leg_name]
+            state["support"] = True
+            state["velocity"] = [0.0, 0.0, 0.0]
+            state["transfer_fraction"] = 0.0
+            state["transfer_committed"] = False
+            state["transfer_path"] = []
+            state["transfer_path_valid"] = True
+            state["transfer_path_error"] = ""
+            state["transfer_path_index"] = 0
+            state["transfer_path_last_point"] = None
+            state["support_world_x"] = None
+            state["support_world_y"] = None
+            self._set_all_targets(state, list(state.get("position", self._operating_center_command(leg_name))))
+            self._reset_compliance(state)
+            self._mark_actual_tracking_ready(state)
+            self._set_phase(state, self.PHASE_SUPPORT, rospy.Time.now().to_sec())
+            self.swing_phase_start[leg_name] = None
+        rospy.loginfo("swing_leg_controller: reset requested for single-leg test")
 
     def _build_leg_yaw_map(self):
         leg_cfg = rospy.get_param("/legs", {})
@@ -495,6 +595,11 @@ class SwingLegController(object):
         state["phase_start_pos"] = list(state.get("position", [0.0, 0.0, 0.0]))
         state["actual_tracking_wait_started_at"] = None
         state["endpoint_hold_started_at"] = None
+        state["servo_tracking_wait_started_at"] = None
+        state["servo_tracking_within_started_at"] = None
+        state["servo_tracking_errors_tick"] = [0.0, 0.0, 0.0]
+        state["servo_tracking_ready"] = 0.0 if self.servo_tracking_gate_enabled else 1.0
+        state["servo_tracking_timed_out"] = 0.0
 
     def _endpoint_hold_elapsed_s(self, state, now_sec):
         started_at = state.get("endpoint_hold_started_at")
@@ -508,6 +613,83 @@ class SwingLegController(object):
         if state.get("endpoint_hold_started_at") is None:
             state["endpoint_hold_started_at"] = now_sec
         return self._endpoint_hold_elapsed_s(state, now_sec) >= self.endpoint_diagnostic_hold_s
+
+    def _servo_tracking_wait_s(self, state, now_sec):
+        started_at = state.get("servo_tracking_wait_started_at")
+        if started_at is None:
+            return 0.0
+        return max(0.0, float(now_sec) - float(started_at))
+
+    def _servo_tracking_within_s(self, state, now_sec):
+        started_at = state.get("servo_tracking_within_started_at")
+        if started_at is None:
+            return 0.0
+        return max(0.0, float(now_sec) - float(started_at))
+
+    def _servo_tracking_ready_for_phase(self, leg_name, phase_name, now_sec):
+        state = self.swing_states[leg_name]
+        if not self.servo_tracking_gate_enabled:
+            state["servo_tracking_ready"] = 1.0
+            state["servo_tracking_timed_out"] = 0.0
+            return True
+
+        motor_ids = self.leg_to_motors.get(leg_name, [])
+        errors = []
+        feedback_ready = len(motor_ids) == 3
+        for motor_id in motor_ids:
+            target_tick = self._latest_command_ticks.get(int(motor_id))
+            actual_tick = self._latest_actual_ticks.get(int(motor_id))
+            received_at = self._latest_actual_ticks_received_at.get(int(motor_id))
+            feedback_fresh = (
+                received_at is not None
+                and now_sec - float(received_at) <= self.servo_tracking_feedback_timeout_s
+            )
+            if target_tick is None or actual_tick is None or not feedback_fresh:
+                feedback_ready = False
+                errors.append(0.0)
+            else:
+                errors.append(float(actual_tick) - float(target_tick))
+        while len(errors) < 3:
+            errors.append(0.0)
+
+        state["servo_tracking_errors_tick"] = list(errors[:3])
+        if state.get("servo_tracking_wait_started_at") is None:
+            state["servo_tracking_wait_started_at"] = now_sec
+
+        within_tolerance = feedback_ready and all([
+            abs(error) <= self.servo_tracking_tolerance_ticks
+            for error in errors[:3]
+        ])
+        if within_tolerance:
+            if state.get("servo_tracking_within_started_at") is None:
+                state["servo_tracking_within_started_at"] = now_sec
+            if self._servo_tracking_within_s(state, now_sec) >= self.servo_tracking_hold_s:
+                state["servo_tracking_ready"] = 1.0
+                state["servo_tracking_timed_out"] = 0.0
+                state["servo_tracking_last_pass_phase_id"] = float(self.phase_id_map.get(phase_name, -1))
+                state["servo_tracking_last_pass_sequence"] += 1.0
+                state["servo_tracking_last_pass_errors_tick"] = list(errors[:3])
+                return True
+        else:
+            state["servo_tracking_within_started_at"] = None
+
+        state["servo_tracking_ready"] = 0.0
+        wait_s = self._servo_tracking_wait_s(state, now_sec)
+        if wait_s >= self.servo_tracking_timeout_s:
+            state["servo_tracking_timed_out"] = 1.0
+            rospy.logwarn_throttle(
+                self.servo_tracking_warn_throttle_s,
+                "servo_tracking holding %s %s: feedback_ready=%s error_ticks=[%.0f %.0f %.0f] tolerance=%.0f wait=%.2fs",
+                leg_name,
+                phase_name,
+                feedback_ready,
+                float(errors[0]),
+                float(errors[1]),
+                float(errors[2]),
+                self.servo_tracking_tolerance_ticks,
+                wait_s,
+            )
+        return False
 
     def _actual_tracking_wait_s(self, state, now_sec):
         started_at = state.get("actual_tracking_wait_started_at")
@@ -945,6 +1127,81 @@ class SwingLegController(object):
             clamp(raw_target[2], -self.max_position_offset[2], self.max_position_offset[2]),
         ]
 
+    def _workspace_model(self, leg_name):
+        return {
+            "nominal_x_m": self.nominal_x_m,
+            "nominal_y_m": self.nominal_y_m,
+            "nominal_z_m": self.nominal_z_m,
+            "operating_x_m": self.operating_x_m,
+            "operating_y_m": self.operating_y_m,
+            "operating_z_m": self.operating_z_m,
+            "operating_center_body_m": self._operating_center_command(leg_name),
+            "l_coxa": self.l_coxa_m,
+            "l_femur": self.l_femur_m,
+            "l_tibia": self.l_tibia_m,
+            "l_a3": self.l_a3_m,
+            "leg_yaw_rad": self.leg_yaw_rad,
+        }
+
+    def _prepare_constrained_transfer_path(self, leg_name, state):
+        """Project transfer endpoints and preflight every fixed-z path sample."""
+        state["transfer_path"] = []
+        state["transfer_path_valid"] = False
+        state["transfer_path_error"] = ""
+        state["transfer_path_index"] = 0
+        state["transfer_path_last_point"] = None
+        if self.stride_length_m <= 0.0:
+            return
+
+        lift_target = list(state["lift_target"])
+        swing_target = list(state["lift_swing_target"])
+        reference_joint_deg = [math.degrees(value) for value in state.get("last_joint_vector", [0.0, 0.0, 0.0])]
+        sample_count = max(2, int(round(self.rate_hz * self.transfer_duration_s)) + 1)
+        path = constrained_transfer_path(
+            leg_name=leg_name,
+            start_x_m=lift_target[0],
+            end_x_m=lift_target[0] + self._swing_distance_m,
+            start_y_m=lift_target[1],
+            end_y_m=swing_target[1],
+            fixed_z_m=lift_target[2],
+            model=self._workspace_model(leg_name),
+            joint_limits_deg=self.joint_limit_deg,
+            reference_joint_deg=reference_joint_deg,
+            q23_sum_limit_deg=self.transfer_q23_sum_limit_deg,
+            sample_count=sample_count,
+            q23_sample_count=self.transfer_q23_sample_count,
+            fk_tol_m=self.workspace_fk_tolerance_m,
+        )
+        if not path:
+            state["transfer_path_error"] = "no fixed-z negative-q3 path satisfies q2+q3 limits"
+            rospy.logwarn(
+                "constrained transfer unavailable for %s: %s",
+                leg_name,
+                state["transfer_path_error"],
+            )
+            return
+
+        first = path[0]
+        last = path[-1]
+        state["transfer_path"] = path
+        state["transfer_path_valid"] = True
+        state["transfer_path_last_point"] = first
+        state["lift_target"] = list(first["position"])
+        state["lift_swing_target"] = list(last["position"])
+        for field in ["target", "preload_target", "attach_target"]:
+            state[field][0] = float(last["position"][0])
+            state[field][1] = float(last["position"][1])
+        state["workspace_last_joint_deg"] = list(first["joint_deg"])
+
+    @staticmethod
+    def _transfer_path_point(state, progress):
+        path = state.get("transfer_path", [])
+        if not path:
+            return None, 0
+        index = int(round(clamp(progress, 0.0, 1.0) * float(len(path) - 1)))
+        index = max(0, min(index, len(path) - 1))
+        return path[index], index
+
     def _start_swing(self, leg_name, leg_index, stamp_sec):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
@@ -988,6 +1245,7 @@ class SwingLegController(object):
         state["transfer_fraction"] = 0.0
         state["transfer_committed"] = False
         self._mark_actual_tracking_ready(state)
+        self._prepare_constrained_transfer_path(leg_name, state)
         if self.stride_length_m > 0.0:
             self._set_phase(state, self.PHASE_LIFT, stamp_sec)
         else:
@@ -1064,6 +1322,9 @@ class SwingLegController(object):
             state = self.swing_states[leg_name]
             if state.get("phase") != self.PHASE_TRANSFER or self.swing_phase_start[leg_name] is None:
                 continue
+            if not state.get("transfer_path_valid", False):
+                self._inflight_body_advance_m = 0.0
+                return
             fraction = clamp(float(state.get("transfer_fraction", 0.0)), 0.0, 1.0)
             self._inflight_body_advance_m = smoothstep5(fraction) * self._body_advance_per_swing_m
             if not self._support_fans_ready(leg_name):
@@ -1163,7 +1424,19 @@ class SwingLegController(object):
                     tracking_target,
                     now_sec,
                 )
-                if endpoint_hold_complete and tracking_ready:
+                servo_tracking_ready = self._servo_tracking_ready_for_phase(
+                    leg_name,
+                    self.PHASE_LIFT,
+                    now_sec,
+                )
+                if not state.get("transfer_path_valid", False):
+                    rospy.logwarn_throttle(
+                        1.0,
+                        "holding %s at LIFT: constrained transfer path unavailable (%s)",
+                        leg_name,
+                        state.get("transfer_path_error", "unknown error"),
+                    )
+                elif endpoint_hold_complete and tracking_ready and servo_tracking_ready:
                     state["transfer_fraction"] = 0.0
                     state["transfer_committed"] = False
                     self._set_phase(state, self.PHASE_TRANSFER, now_sec)
@@ -1173,15 +1446,19 @@ class SwingLegController(object):
         elif phase == self.PHASE_TRANSFER:
             fraction = clamp(float(state.get("transfer_fraction", 0.0)), 0.0, 1.0)
             progress = smoothstep5(fraction)
-            start_pos = list(state["phase_start_pos"])
-            target_pos = list(state["lift_swing_target"])
-            cmd_position = [
-                start_pos[axis] + progress * (target_pos[axis] - start_pos[axis])
-                for axis in [0, 1, 2]
-            ]
+            transfer_point, transfer_index = self._transfer_path_point(state, progress)
+            if transfer_point is None:
+                state["transfer_path_valid"] = False
+                state["transfer_path_error"] = "missing precomputed path"
+                cmd_position = list(state["position"])
+            else:
+                cmd_position = list(transfer_point["position"])
+                state["transfer_path_index"] = transfer_index
+                state["transfer_path_last_point"] = transfer_point
+                state["workspace_last_joint_deg"] = list(transfer_point["joint_deg"])
             cmd_velocity = [0.0, 0.0, 0.0]
-            if fraction >= 1.0:
-                tracking_target = self._workspace_guarded_position(leg_name, target_pos, clamp_center)
+            if fraction >= 1.0 and state.get("transfer_path_valid", False):
+                tracking_target = self._workspace_guarded_position(leg_name, cmd_position, clamp_center)
                 state["lift_swing_target"] = list(tracking_target)
                 cmd_position = list(tracking_target)
                 state["position"] = list(cmd_position)
@@ -1190,11 +1467,16 @@ class SwingLegController(object):
                     leg_name,
                     leg_index,
                     self.PHASE_TRANSFER,
-                    state.get("start", start_pos),
+                    state.get("start", state.get("phase_start_pos", tracking_target)),
                     tracking_target,
                     now_sec,
                 )
-                if endpoint_hold_complete and tracking_ready:
+                servo_tracking_ready = self._servo_tracking_ready_for_phase(
+                    leg_name,
+                    self.PHASE_TRANSFER,
+                    now_sec,
+                )
+                if endpoint_hold_complete and tracking_ready and servo_tracking_ready:
                     self._set_phase(state, self.PHASE_PRELOAD, now_sec)
             normal_force_limit = 0.001
             support_leg = False
@@ -1239,7 +1521,12 @@ class SwingLegController(object):
                     tracking_target,
                     now_sec,
                 )
-                if endpoint_hold_complete and tracking_ready:
+                servo_tracking_ready = self._servo_tracking_ready_for_phase(
+                    leg_name,
+                    self.PHASE_PRELOAD,
+                    now_sec,
+                )
+                if endpoint_hold_complete and tracking_ready and servo_tracking_ready:
                     self._capture_compliant_torque_bias(leg_name, state)
                     self._set_phase(state, self.PHASE_ADMIT, now_sec)
             normal_force_limit = self.preload_normal_force_limit_n
@@ -1393,6 +1680,80 @@ class SwingLegController(object):
         ]
         publisher.publish(msg)
 
+    def _publish_servo_tracking_diagnostic(self, leg_name, now_sec):
+        publisher = self.servo_tracking_pubs.get(leg_name)
+        if publisher is None:
+            return
+        state = self.swing_states[leg_name]
+        errors = list(state.get("servo_tracking_errors_tick", [0.0, 0.0, 0.0]))
+        last_errors = list(state.get("servo_tracking_last_pass_errors_tick", [0.0, 0.0, 0.0]))
+        while len(errors) < 3:
+            errors.append(0.0)
+        while len(last_errors) < 3:
+            last_errors.append(0.0)
+        labels = [
+            "phase_id", "gate_enabled", "ready", "max_abs_error_tick",
+            "within_tolerance_s", "wait_s", "timed_out",
+            "last_pass_phase_id", "last_pass_sequence",
+            "error_joint1_tick", "error_joint2_tick", "error_joint3_tick",
+            "last_pass_error_joint1_tick", "last_pass_error_joint2_tick", "last_pass_error_joint3_tick",
+        ]
+        msg = Float32MultiArray()
+        msg.layout = MultiArrayLayout()
+        msg.layout.dim = [
+            MultiArrayDimension(label=label, size=1, stride=len(labels))
+            for label in labels
+        ]
+        msg.data = [
+            float(self.phase_id_map.get(state.get("phase", self.PHASE_SUPPORT), -1)),
+            1.0 if self.servo_tracking_gate_enabled else 0.0,
+            float(state.get("servo_tracking_ready", 1.0)),
+            max([abs(float(error)) for error in errors[:3]]),
+            float(self._servo_tracking_within_s(state, now_sec)),
+            float(self._servo_tracking_wait_s(state, now_sec)),
+            float(state.get("servo_tracking_timed_out", 0.0)),
+            float(state.get("servo_tracking_last_pass_phase_id", -1.0)),
+            float(state.get("servo_tracking_last_pass_sequence", 0.0)),
+            float(errors[0]), float(errors[1]), float(errors[2]),
+            float(last_errors[0]), float(last_errors[1]), float(last_errors[2]),
+        ]
+        publisher.publish(msg)
+
+    def _publish_transfer_path_diagnostic(self, leg_name):
+        publisher = self.transfer_path_pubs.get(leg_name)
+        if publisher is None:
+            return
+        state = self.swing_states[leg_name]
+        point = state.get("transfer_path_last_point") or {}
+        position = list(point.get("position", state.get("position", [0.0, 0.0, 0.0])))
+        joint_deg = list(point.get("joint_deg", [0.0, 0.0, 0.0]))
+        while len(position) < 3:
+            position.append(0.0)
+        while len(joint_deg) < 3:
+            joint_deg.append(0.0)
+        labels = [
+            "phase_id", "path_valid", "path_index", "path_size",
+            "cmd_x_m", "cmd_y_m", "cmd_z_m",
+            "q1_deg", "q2_deg", "q3_deg", "q23_sum_deg", "lateral_offset_m",
+        ]
+        msg = Float32MultiArray()
+        msg.layout = MultiArrayLayout()
+        msg.layout.dim = [
+            MultiArrayDimension(label=label, size=1, stride=len(labels))
+            for label in labels
+        ]
+        msg.data = [
+            float(self.phase_id_map.get(state.get("phase", self.PHASE_SUPPORT), -1)),
+            1.0 if state.get("transfer_path_valid", False) else 0.0,
+            float(state.get("transfer_path_index", 0)),
+            float(len(state.get("transfer_path", []))),
+            float(position[0]), float(position[1]), float(position[2]),
+            float(joint_deg[0]), float(joint_deg[1]), float(joint_deg[2]),
+            float(point.get("q23_sum_deg", joint_deg[1] + joint_deg[2])),
+            float(point.get("lateral_offset_m", 0.0)),
+        ]
+        publisher.publish(msg)
+
     def _workspace_guarded_position(self, leg_name, candidate_position, reference_position):
         state = self.swing_states[leg_name]
         if not self.workspace_check_enabled or self.workspace_check_mode != "per_cycle":
@@ -1401,29 +1762,21 @@ class SwingLegController(object):
             state["workspace_check_us"] = 0.0
             return list(candidate_position)
 
+        q23_sum_limit_deg = (
+            self.transfer_q23_sum_limit_deg
+            if state.get("phase") == self.PHASE_TRANSFER
+            else self.workspace_q23_sum_limit_deg
+        )
         checked_position, is_clamped, margin_m, joint_solution_deg, elapsed_us = workspace_guard(
             leg_name=leg_name,
             candidate_center_body_m=list(candidate_position),
             reference_center_body_m=list(reference_position),
             last_joint_deg=state.get("workspace_last_joint_deg", [0.0, 0.0, 0.0]),
-            model={
-                "nominal_x_m": self.nominal_x_m,
-                "nominal_y_m": self.nominal_y_m,
-                "nominal_z_m": self.nominal_z_m,
-                "operating_x_m": self.operating_x_m,
-                "operating_y_m": self.operating_y_m,
-                "operating_z_m": self.operating_z_m,
-                "operating_center_body_m": self._operating_center_command(leg_name),
-                "l_coxa": self.l_coxa_m,
-                "l_femur": self.l_femur_m,
-                "l_tibia": self.l_tibia_m,
-                "l_a3": self.l_a3_m,
-                "leg_yaw_rad": self.leg_yaw_rad,
-            },
+            model=self._workspace_model(leg_name),
             joint_limits_deg=self.joint_limit_deg,
             clamp_max_iter=self.workspace_clamp_max_iter,
             fk_tol_m=self.workspace_fk_tolerance_m,
-            q23_sum_limit_deg=self.workspace_q23_sum_limit_deg,
+            q23_sum_limit_deg=q23_sum_limit_deg,
         )
         state["workspace_last_joint_deg"] = list(joint_solution_deg)
         state["workspace_clamped"] = 1.0 if is_clamped else 0.0
@@ -1559,6 +1912,8 @@ class SwingLegController(object):
 
                 cmd_position, cmd_velocity, support_leg, normal_force_limit = self._guided_swing_command(leg_name, leg_index, now_sec, dt)
                 self._publish_endpoint_diagnostic(leg_name, now_sec)
+                self._publish_servo_tracking_diagnostic(leg_name, now_sec)
+                self._publish_transfer_path_diagnostic(leg_name)
 
                 # If support_leg=True (state 2), transition back to SUPPORT
                 if support_leg and desired_support:

@@ -1,0 +1,328 @@
+{
+  "created_at": "2026-06-23T20:52:43",
+  "leg_endpoint": {
+    "active_tuning": {
+      "1": {
+        "acceleration": 125,
+        "current_limit": 2047,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 1560,
+        "pwm_limit": 885,
+        "velocity": 250
+      },
+      "11": {
+        "acceleration": 100,
+        "current_limit": 2047,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 800,
+        "pwm_limit": 885,
+        "velocity": 200
+      },
+      "2": {
+        "acceleration": 100,
+        "current_limit": 648,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 1200,
+        "pwm_limit": 885,
+        "velocity": 200
+      }
+    },
+    "current_metrics": {
+      "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_05_id_1_p_130/single_swing_lf_20260623_205440.csv",
+      "endpoint_count": 0,
+      "endpoint_errors_tick": {},
+      "label": "trial_05_id_1_p_130",
+      "motor_id": 1,
+      "passed": false,
+      "passed_phases": [],
+      "process_returncode": 4,
+      "terminal_errors_tick": [
+        -1.0,
+        -11.0,
+        -1.0
+      ],
+      "terminal_max_abs_error_tick": 11.0,
+      "terminal_phase_id": 5,
+      "timed_out": true,
+      "tuning": {
+        "acceleration": 125,
+        "current_limit": 2047,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 1560,
+        "pwm_limit": 885,
+        "velocity": 250
+      }
+    },
+    "leg": "lf",
+    "motor_ids": [
+      11,
+      1,
+      2
+    ],
+    "original_tuning": {
+      "1": {
+        "acceleration": 100,
+        "current_limit": 2047,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 1200,
+        "pwm_limit": 885,
+        "velocity": 200
+      },
+      "11": {
+        "acceleration": 100,
+        "current_limit": 2047,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 800,
+        "pwm_limit": 885,
+        "velocity": 200
+      },
+      "2": {
+        "acceleration": 100,
+        "current_limit": 648,
+        "d": 0,
+        "i": 0,
+        "operating_mode": 3,
+        "p": 1200,
+        "pwm_limit": 885,
+        "velocity": 200
+      }
+    },
+    "status": "failed_no_improving_candidate",
+    "trials": [
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/baseline/single_swing_lf_20260623_205251.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "baseline",
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -2.0,
+          -15.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 15.0,
+        "terminal_phase_id": 5,
+        "timed_out": true
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_01_id_1_profile_125/single_swing_lf_20260623_205313.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_01_id_1_profile_125",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -2.0,
+          -15.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 15.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1200,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_02_id_1_p_110/single_swing_lf_20260623_205335.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_02_id_1_p_110",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -1.0,
+          -14.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 14.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 100,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1320,
+          "pwm_limit": 885,
+          "velocity": 200
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_03_id_1_profile_125/single_swing_lf_20260623_205356.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_03_id_1_profile_125",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -2.0,
+          -13.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 13.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1320,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_04_id_1_p_120/single_swing_lf_20260623_205418.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_04_id_1_p_120",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -1.0,
+          -13.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 13.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1440,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_05_id_1_p_130/single_swing_lf_20260623_205440.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_05_id_1_p_130",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -1.0,
+          -11.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 11.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1560,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_06_id_1_p_110/single_swing_lf_20260623_205502.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_06_id_1_p_110",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -1.0,
+          -13.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 13.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1320,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      },
+      {
+        "csv": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243/leg_endpoint/trial_07_id_1_p_120/single_swing_lf_20260623_205524.csv",
+        "endpoint_count": 0,
+        "endpoint_errors_tick": {},
+        "label": "trial_07_id_1_p_120",
+        "motor_id": 1,
+        "passed": false,
+        "passed_phases": [],
+        "process_returncode": 4,
+        "terminal_errors_tick": [
+          -1.0,
+          -12.0,
+          -1.0
+        ],
+        "terminal_max_abs_error_tick": 12.0,
+        "terminal_phase_id": 5,
+        "timed_out": true,
+        "tuning": {
+          "acceleration": 125,
+          "current_limit": 2047,
+          "d": 0,
+          "i": 0,
+          "operating_mode": 3,
+          "p": 1440,
+          "pwm_limit": 885,
+          "velocity": 250
+        }
+      }
+    ]
+  },
+  "motor_ids": [
+    11,
+    1,
+    2
+  ],
+  "robot_config": "/home/cc/climbing_ws/src/climbing_description/config/robot.yaml",
+  "session_dir": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260623_205243",
+  "stage": "leg_endpoint_failed",
+  "updated_at": "2026-06-23T20:55:45"
+}
