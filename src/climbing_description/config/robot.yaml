@@ -26,6 +26,7 @@ body_planner:
 
 mission_supervisor:
   publish_rate_hz: 20.0
+
   auto_start: true
   auto_resume: false
   init_duration_s: 1.0
@@ -35,12 +36,12 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 25000.0
-  climb_rpm: 25000.0
+  attach_rpm: 35000.0
+  climb_rpm: 35000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
-  swing_release_rpm: 9000.0
+  swing_release_rpm: 10000.0
 
   touchdown_rpm: 35000.0
   touchdown_boost_duration_s: 0.25
@@ -164,7 +165,7 @@ swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
   clearance_m: 0.01
-  # Lift along wall_normal during swing; default=clearance_m. 0=no lift
+  # Lift/press along wall_normal during swing: positive lifts, negative presses, 0=hold height.
   swing_lift_normal_m: 0.005
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
@@ -185,15 +186,15 @@ swing_leg_controller:
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
   # Fixed-stride phases: normal lift first, then parallel transfer with L/4 body advance.
-  lift_duration_s: 0.50 #0.20
+  lift_duration_s: 0.25 #0.20
   transfer_duration_s: 0.8 #0.28
-  preload_duration_s: 0.50 #0.16
+  preload_duration_s: 0.25 #0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 1.0
-  fan_off_rpm_threshold: 10000.0
-  fan_recovery_rpm_threshold: 20000.0
+  fan_off_rpm_threshold: 21000.0
+  fan_recovery_rpm_threshold: 25000.0
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
@@ -219,7 +220,7 @@ swing_leg_controller:
   # wall normal (opposite direction is equivalent) while transferring.
   transfer_q23_sum_limit_deg: [-5.0, 5.0]
   transfer_q23_sample_count: 101
-  pre_lift_q23_align_enabled: true
+  pre_lift_q23_align_enabled: false
   pre_lift_q23_target_deg: 0.0
   pre_lift_q23_tolerance_deg: 5.0
   pre_lift_q23_duration_s: 0.25
@@ -374,9 +375,9 @@ gait_controller:
   nominal_y: 0.0
   nominal_universal_joint_center_z: -198.5 #-195.5
   # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
-  operating_universal_joint_center_x: 267.13 # 270.21 237.04
+  operating_universal_joint_center_x: 267.13 #280.97 #279.71 #267.13 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -110.0 # -100.0 -150.0
+  operating_universal_joint_center_z: -110 #-60 #-20 #-110.0 # -100.0 -150.0
   # Automatic control uses the operating UJC as the support/work point while
   # nominal_* remains the IK/home reference.
   startup_target_enabled: true
