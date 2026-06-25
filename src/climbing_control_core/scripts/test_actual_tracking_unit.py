@@ -28,6 +28,9 @@ def run_tests():
     assert _ready("LIFT", start, lift, [0.10, 0.00, -0.204])["ready"]
     assert not _ready("LIFT", start, lift, [0.10, 0.00, -0.222])["ready"]
 
+    assert _ready("PRE_LIFT_ALIGN", start, [0.10, 0.01, -0.223], [0.10, 0.011, -0.223])["ready"]
+    assert not _ready("PRE_LIFT_ALIGN", start, [0.10, 0.01, -0.223], [0.10, 0.000, -0.223])["ready"]
+
     assert _ready("TRANSFER", start, transfer, [0.128, 0.001, -0.204])["ready"]
     assert not _ready("TRANSFER", start, transfer, [0.115, 0.000, -0.204])["ready"]
     assert not _ready("TRANSFER", start, transfer, [0.130, 0.000, -0.218])["ready"]

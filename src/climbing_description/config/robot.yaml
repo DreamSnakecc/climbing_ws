@@ -7,7 +7,7 @@ body_planner:
   publish_rate_hz: 50.0
   gait: sequential    # sequential, crawl, or trot
   # Sequential gait parameters
-  gait_sequence: [lf, rf, rr, lr]
+  gait_sequence: [lf, rr, rf, lr]
   swing_timeout_s: 3.0
   all_hold_dwell_s: 0.2
   # Timed gait parameters (crawl/trot)
@@ -35,8 +35,8 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 35000.0
-  climb_rpm: 35000.0
+  attach_rpm: 25000.0
+  climb_rpm: 25000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
@@ -165,10 +165,10 @@ swing_leg_controller:
   swing_duration_s: 0.65
   clearance_m: 0.01
   # Lift along wall_normal during swing; default=clearance_m. 0=no lift
-  swing_lift_normal_m: 0.01 
+  swing_lift_normal_m: 0.005
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  stride_length_m: 0.04
+  stride_length_m: 0.06
   # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
   # where swing distance = 3*stride_length_m/4 and body advances
   # stride_length_m/4 per leg swing.  No body_planner velocity needed.
@@ -185,15 +185,15 @@ swing_leg_controller:
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
   # Fixed-stride phases: normal lift first, then parallel transfer with L/4 body advance.
-  lift_duration_s: 0.25 #0.20
+  lift_duration_s: 0.50 #0.20
   transfer_duration_s: 0.8 #0.28
-  preload_duration_s: 0.25 #0.16
+  preload_duration_s: 0.50 #0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 1.0
   fan_off_rpm_threshold: 10000.0
-  fan_recovery_rpm_threshold: 5000.0
+  fan_recovery_rpm_threshold: 20000.0
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
@@ -214,11 +214,16 @@ swing_leg_controller:
   workspace_clamp_max_iter: 10
   workspace_warn_throttle_s: 2.0
   workspace_fk_tolerance_m: 0.002
-  workspace_q23_sum_limit_deg: [-80.0, 80.0]
+  workspace_q23_sum_limit_deg: [-60.0, 60.0]
   # l_a3 absolute angle is q2 + q3 - 90 deg; keep it parallel to the
   # wall normal (opposite direction is equivalent) while transferring.
   transfer_q23_sum_limit_deg: [-5.0, 5.0]
   transfer_q23_sample_count: 101
+  pre_lift_q23_align_enabled: true
+  pre_lift_q23_target_deg: 0.0
+  pre_lift_q23_tolerance_deg: 5.0
+  pre_lift_q23_duration_s: 0.25
+  pre_lift_q23_sample_count: 101
   actual_tracking_enabled: false
   # Diagnostic-only endpoint hold: keep the LIFT/TRANSFER/PRELOAD target
   # fixed before transitioning, while logging actual UJC and joint tracking.
@@ -227,7 +232,7 @@ swing_leg_controller:
   # Test-only joint-tick endpoint gate.  When enabled, LIFT, TRANSFER and
   # PRELOAD each hold their final command until all three leg joints stay
   # within tolerance, otherwise the phase remains at that endpoint.
-  servo_tracking_gate_enabled: true
+  servo_tracking_gate_enabled: false
   servo_tracking_tolerance_ticks: 20.0
   servo_tracking_hold_s: 0.1
   servo_tracking_timeout_s: 3.0

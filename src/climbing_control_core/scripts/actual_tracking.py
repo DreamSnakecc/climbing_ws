@@ -59,7 +59,7 @@ def tracking_readiness(
 
     if phase == "LIFT":
         ready = normal_ready and tangent_ready
-    elif phase in ["TRANSFER", "PRELOAD"]:
+    elif phase in ["PRE_LIFT_ALIGN", "TRANSFER", "PRELOAD"]:
         ready = normal_ready and tangent_ready
     else:
         ready = True

@@ -2,7 +2,12 @@
 
 import math
 
-from workspace_guard import _constrained_transfer_candidates, constrained_transfer_path, workspace_guard
+from workspace_guard import (
+    _constrained_transfer_candidates,
+    constrained_transfer_path,
+    pre_lift_q23_align_point,
+    workspace_guard,
+)
 
 
 def _build_model():
@@ -23,6 +28,44 @@ def _build_model():
 
 def _joint_limits():
     return {"j1": [-90.0, 90.0], "j2": [-10.0, 190.0], "j3": [-100.0, 100.0]}
+
+
+def _current_robot_model():
+    return {
+        "nominal_x_m": 0.12775,
+        "nominal_y_m": 0.0,
+        "nominal_z_m": -0.1985,
+        "operating_x_m": 0.26713,
+        "operating_y_m": 0.0,
+        "operating_z_m": -0.1100,
+        "l_coxa": 0.04475,
+        "l_femur": 0.0830,
+        "l_tibia": 0.1540,
+        "l_a3": 0.0445,
+        "leg_yaw_rad": {
+            "lf": math.radians(45.0),
+            "rf": math.radians(-45.0),
+            "lr": math.radians(135.0),
+            "rr": math.radians(-135.0),
+        },
+    }
+
+
+def _current_joint_limits():
+    return {"j1": [-90.0, 90.0], "j2": [-10.0, 150.0], "j3": [-100.0, 100.0]}
+
+
+def _operating_center_body(model, leg_name):
+    dx_leg = model["operating_x_m"] - model["nominal_x_m"]
+    dy_leg = model["operating_y_m"] - model["nominal_y_m"]
+    yaw = model["leg_yaw_rad"][leg_name]
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return [
+        cos_yaw * dx_leg - sin_yaw * dy_leg,
+        sin_yaw * dx_leg + cos_yaw * dy_leg,
+        model["operating_z_m"],
+    ]
 
 
 def _reachable_center_body_from_joint(model, leg_name, joint_deg):
@@ -192,6 +235,41 @@ def run_tests():
         fk_tol_m=0.003,
     )
     assert impossible is None, "unreachable constrained path must fail closed"
+
+    current_model = _current_robot_model()
+    current_limits = _current_joint_limits()
+    for leg_name in ["lf", "rf", "lr", "rr"]:
+        start = _operating_center_body(current_model, leg_name)
+        point = pre_lift_q23_align_point(
+            leg_name=leg_name,
+            current_position_m=start,
+            model=current_model,
+            joint_limits_deg=current_limits,
+            reference_joint_deg=[0.0, 90.0, -60.0],
+            q23_target_deg=0.0,
+            q23_tolerance_deg=5.0,
+            q23_sample_count=101,
+            fk_tol_m=0.002,
+        )
+        assert point is not None, "pre-lift q23 align should solve for %s" % leg_name
+        assert point["joint_deg"][2] < 0.0
+        assert abs(point["q23_sum_deg"]) <= 5.0 + 1e-6
+        assert point["fk_error_m"] <= 0.002
+        assert abs(point["position"][0] - start[0]) < 1e-9
+        assert abs(point["position"][2] - start[2]) < 1e-9
+
+    impossible_align = pre_lift_q23_align_point(
+        leg_name="lf",
+        current_position_m=[2.0, 0.0, -0.110],
+        model=current_model,
+        joint_limits_deg=current_limits,
+        reference_joint_deg=[0.0, 90.0, -60.0],
+        q23_target_deg=0.0,
+        q23_tolerance_deg=5.0,
+        q23_sample_count=101,
+        fk_tol_m=0.002,
+    )
+    assert impossible_align is None, "unreachable pre-lift align must fail closed"
 
     print("workspace_guard unit tests passed")
 

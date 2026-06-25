@@ -16,7 +16,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from workspace_guard import constrained_transfer_path, workspace_guard
+from workspace_guard import constrained_transfer_path, pre_lift_q23_align_point, workspace_guard
 from actual_tracking import tracking_readiness
 
 
@@ -144,6 +144,7 @@ class SwingLegController(object):
     PHASE_RELEASE_WAIT = "RELEASE_WAIT"
     PHASE_LIFT = "LIFT"
     PHASE_TRANSFER = "TRANSFER"
+    PHASE_PRE_LIFT_ALIGN = "PRE_LIFT_ALIGN"
 
     def _cfg(self, name, default):
         return rospy.get_param("~" + name, rospy.get_param("/swing_leg_controller/" + name, default))
@@ -235,6 +236,11 @@ class SwingLegController(object):
         self.workspace_q23_sum_limit_deg = self._float_list_cfg("workspace_q23_sum_limit_deg", [-10.0, 10.0])
         self.transfer_q23_sum_limit_deg = self._float_list_cfg("transfer_q23_sum_limit_deg", [-5.0, 5.0])
         self.transfer_q23_sample_count = self._int_cfg("transfer_q23_sample_count", 101, 3)
+        self.pre_lift_q23_align_enabled = bool(self._cfg("pre_lift_q23_align_enabled", True))
+        self.pre_lift_q23_target_deg = self._float_cfg("pre_lift_q23_target_deg", 0.0)
+        self.pre_lift_q23_tolerance_deg = self._float_cfg("pre_lift_q23_tolerance_deg", 5.0, 0.0)
+        self.pre_lift_q23_duration_s = self._float_cfg("pre_lift_q23_duration_s", 0.25, 0.01)
+        self.pre_lift_q23_sample_count = self._int_cfg("pre_lift_q23_sample_count", 101, 3)
         self.actual_tracking_enabled = bool(self._cfg("actual_tracking_enabled", True))
         self.actual_tracking_tangent_tolerance_m = self._float_cfg("actual_tracking_tangent_tolerance_m", 0.006, 0.0)
         self.actual_tracking_normal_tolerance_m = self._float_cfg("actual_tracking_normal_tolerance_m", 0.004, 0.0)
@@ -356,6 +362,7 @@ class SwingLegController(object):
             self.PHASE_RELEASE_WAIT: 4,
             self.PHASE_LIFT: 5,
             self.PHASE_TRANSFER: 6,
+            self.PHASE_PRE_LIFT_ALIGN: 7,
         }
         self.diagnostic_field_labels = [
             "leg_index",
@@ -430,6 +437,10 @@ class SwingLegController(object):
             "transfer_path_error": "",
             "transfer_path_index": 0,
             "transfer_path_last_point": None,
+            "pre_lift_align_target": list(nominal),
+            "pre_lift_align_point": None,
+            "pre_lift_align_valid": True,
+            "pre_lift_align_error": "",
             "workspace_clamped": 0.0,
             "workspace_margin_m": 0.0,
             "workspace_check_us": 0.0,
@@ -512,6 +523,10 @@ class SwingLegController(object):
             state["transfer_path_error"] = ""
             state["transfer_path_index"] = 0
             state["transfer_path_last_point"] = None
+            state["pre_lift_align_target"] = list(state.get("position", self._operating_center_command(leg_name)))
+            state["pre_lift_align_point"] = None
+            state["pre_lift_align_valid"] = True
+            state["pre_lift_align_error"] = ""
             state["support_world_x"] = None
             state["support_world_y"] = None
             self._set_all_targets(state, list(state.get("position", self._operating_center_command(leg_name))))
@@ -1193,37 +1208,55 @@ class SwingLegController(object):
             state[field][1] = float(last["position"][1])
         state["workspace_last_joint_deg"] = list(first["joint_deg"])
 
-    @staticmethod
-    def _transfer_path_point(state, progress):
-        path = state.get("transfer_path", [])
-        if not path:
-            return None, 0
-        index = int(round(clamp(progress, 0.0, 1.0) * float(len(path) - 1)))
-        index = max(0, min(index, len(path) - 1))
-        return path[index], index
+    def _prepare_pre_lift_align(self, leg_name, state, start_position):
+        state["pre_lift_align_target"] = list(start_position)
+        state["pre_lift_align_point"] = None
+        state["pre_lift_align_valid"] = True
+        state["pre_lift_align_error"] = ""
+        if (
+            not self.pre_lift_q23_align_enabled
+            or self.stride_length_m <= 0.0
+        ):
+            return True
 
-    def _start_swing(self, leg_name, leg_index, stamp_sec):
+        reference_joint_deg = [
+            math.degrees(value)
+            for value in state.get("last_joint_vector", [0.0, 0.0, 0.0])
+        ]
+        point = pre_lift_q23_align_point(
+            leg_name=leg_name,
+            current_position_m=list(start_position),
+            model=self._workspace_model(leg_name),
+            joint_limits_deg=self.joint_limit_deg,
+            reference_joint_deg=reference_joint_deg,
+            q23_target_deg=self.pre_lift_q23_target_deg,
+            q23_tolerance_deg=self.pre_lift_q23_tolerance_deg,
+            q23_sample_count=self.pre_lift_q23_sample_count,
+            fk_tol_m=self.workspace_fk_tolerance_m,
+        )
+        if point is None:
+            state["pre_lift_align_valid"] = False
+            state["pre_lift_align_error"] = "no fixed-x/z negative-q3 point satisfies pre-lift q2+q3 limits"
+            rospy.logwarn(
+                "pre-lift q23 align unavailable for %s: %s",
+                leg_name,
+                state["pre_lift_align_error"],
+            )
+            return False
+
+        state["pre_lift_align_point"] = point
+        state["pre_lift_align_target"] = list(point["position"])
+        return True
+
+    def _configure_stride_targets(self, leg_name, leg_index, support_target):
         state = self.swing_states[leg_name]
         target_delta = self._target_delta(leg_name, leg_index)
-
-        if self.stride_length_m > 0.0:
-            # Estimated UJC positions include the hip-origin transform, whereas
-            # LegCenterCommand.center is expressed in the controller command
-            # frame. Keep the stride reference in the command frame.
-            support_target = list(state["position"])
-        else:
-            support_target = self._operating_center_command(leg_name)
-            if self.have_body_reference:
-                support_target[0] -= self.body_reference.pose.position.x
-                support_target[1] -= self.body_reference.pose.position.y
         target = [
             support_target[0] + target_delta[0],
             support_target[1] + target_delta[1],
             support_target[2],
         ]
 
-        # start = support_target (actual ujc in stride mode, or body-frame
-        # position otherwise)
         start = list(support_target)
         start_normal = vector_dot(start, self.wall_normal_body)
         target_normal = vector_dot(target, self.wall_normal_body)
@@ -1239,17 +1272,57 @@ class SwingLegController(object):
         state["lift_swing_target"] = self._clamp_position(swing_target, state["support_target"])
         state["preload_target"] = self._clamp_position(preload_target, state["support_target"])
         state["attach_target"] = self._clamp_position(preload_target, state["support_target"])
+
+    @staticmethod
+    def _transfer_path_point(state, progress):
+        path = state.get("transfer_path", [])
+        if not path:
+            return None, 0
+        index = int(round(clamp(progress, 0.0, 1.0) * float(len(path) - 1)))
+        index = max(0, min(index, len(path) - 1))
+        return path[index], index
+
+    def _start_swing(self, leg_name, leg_index, stamp_sec):
+        state = self.swing_states[leg_name]
+
+        if self.stride_length_m > 0.0:
+            # Estimated UJC positions include the hip-origin transform, whereas
+            # LegCenterCommand.center is expressed in the controller command
+            # frame. Keep the stride reference in the command frame.
+            support_target = list(state["position"])
+        else:
+            support_target = self._operating_center_command(leg_name)
+            if self.have_body_reference:
+                support_target[0] -= self.body_reference.pose.position.x
+                support_target[1] -= self.body_reference.pose.position.y
+
+        # start = support_target (actual ujc in stride mode, or body-frame
+        # position otherwise)
+        start = list(support_target)
+        self._set_all_targets(state, start)
         self._reset_compliance(state)
         state["last_joint_vector"] = self._joint_vector_from_position(leg_name, start, state.get("last_joint_vector"))
         state["support"] = False
         state["transfer_fraction"] = 0.0
         state["transfer_committed"] = False
+        state["transfer_path"] = []
+        state["transfer_path_valid"] = False
+        state["transfer_path_error"] = ""
+        state["transfer_path_index"] = 0
+        state["transfer_path_last_point"] = None
         self._mark_actual_tracking_ready(state)
-        self._prepare_constrained_transfer_path(leg_name, state)
-        if self.stride_length_m > 0.0:
+        align_ready = self._prepare_pre_lift_align(leg_name, state, start)
+        if self.stride_length_m > 0.0 and self.pre_lift_q23_align_enabled:
+            self._set_phase(state, self.PHASE_PRE_LIFT_ALIGN, stamp_sec)
+        elif self.stride_length_m > 0.0:
+            self._configure_stride_targets(leg_name, leg_index, start)
+            self._prepare_constrained_transfer_path(leg_name, state)
             self._set_phase(state, self.PHASE_LIFT, stamp_sec)
         else:
+            self._configure_stride_targets(leg_name, leg_index, start)
             self._set_phase(state, self.PHASE_LIFT_SWING, stamp_sec)
+        if not align_ready:
+            state["transfer_path_error"] = state.get("pre_lift_align_error", "")
         self.swing_phase_start[leg_name] = stamp_sec
 
     def _dwell_position(self, leg_name):
@@ -1403,6 +1476,48 @@ class SwingLegController(object):
                 )
             cmd_position = list(state["position"])
             cmd_velocity = [0.0, 0.0, 0.0]
+            normal_force_limit = 0.001
+            support_leg = False
+
+        elif phase == self.PHASE_PRE_LIFT_ALIGN:
+            start_pos = list(state["phase_start_pos"])
+            target_pos = list(state.get("pre_lift_align_target", start_pos))
+            cmd_position = self._smooth_interp(start_pos, target_pos, self.pre_lift_q23_duration_s, phase_elapsed)
+            cmd_velocity = [0.0, 0.0, 0.0]
+            if not state.get("pre_lift_align_valid", True):
+                rospy.logwarn_throttle(
+                    1.0,
+                    "holding %s at PRE_LIFT_ALIGN: %s",
+                    leg_name,
+                    state.get("pre_lift_align_error", "unknown error"),
+                )
+                cmd_position = list(state.get("position", start_pos))
+            elif phase_elapsed >= self.pre_lift_q23_duration_s:
+                tracking_target = list(target_pos)
+                cmd_position = list(tracking_target)
+                state["position"] = list(cmd_position)
+                point = state.get("pre_lift_align_point")
+                if point:
+                    state["workspace_last_joint_deg"] = list(point["joint_deg"])
+                    state["last_joint_vector"] = [math.radians(value) for value in point["joint_deg"]]
+                endpoint_hold_complete = self._endpoint_hold_complete(state, now_sec)
+                tracking_ready = self._actual_tracking_ready_for_phase(
+                    leg_name,
+                    leg_index,
+                    self.PHASE_PRE_LIFT_ALIGN,
+                    start_pos,
+                    tracking_target,
+                    now_sec,
+                )
+                servo_tracking_ready = self._servo_tracking_ready_for_phase(
+                    leg_name,
+                    self.PHASE_PRE_LIFT_ALIGN,
+                    now_sec,
+                )
+                if endpoint_hold_complete and tracking_ready and servo_tracking_ready:
+                    self._configure_stride_targets(leg_name, leg_index, tracking_target)
+                    self._prepare_constrained_transfer_path(leg_name, state)
+                    self._set_phase(state, self.PHASE_LIFT, now_sec)
             normal_force_limit = 0.001
             support_leg = False
 
@@ -1762,11 +1877,15 @@ class SwingLegController(object):
             state["workspace_check_us"] = 0.0
             return list(candidate_position)
 
-        q23_sum_limit_deg = (
-            self.transfer_q23_sum_limit_deg
-            if state.get("phase") == self.PHASE_TRANSFER
-            else self.workspace_q23_sum_limit_deg
-        )
+        if state.get("phase") == self.PHASE_TRANSFER:
+            q23_sum_limit_deg = self.transfer_q23_sum_limit_deg
+        elif state.get("phase") == self.PHASE_PRE_LIFT_ALIGN:
+            q23_sum_limit_deg = [
+                self.pre_lift_q23_target_deg - self.pre_lift_q23_tolerance_deg,
+                self.pre_lift_q23_target_deg + self.pre_lift_q23_tolerance_deg,
+            ]
+        else:
+            q23_sum_limit_deg = self.workspace_q23_sum_limit_deg
         checked_position, is_clamped, margin_m, joint_solution_deg, elapsed_us = workspace_guard(
             leg_name=leg_name,
             candidate_center_body_m=list(candidate_position),

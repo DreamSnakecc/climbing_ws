@@ -292,6 +292,46 @@ def constrained_transfer_path(
     return path
 
 
+def pre_lift_q23_align_point(
+    leg_name,
+    current_position_m,
+    model,
+    joint_limits_deg,
+    reference_joint_deg,
+    q23_target_deg=0.0,
+    q23_tolerance_deg=5.0,
+    q23_sample_count=101,
+    fk_tol_m=0.002,
+):
+    """Return the nearest fixed-x/z point with negative q3 and q2+q3 near target."""
+    if len(current_position_m) < 3:
+        return None
+    target = float(q23_target_deg)
+    tolerance = abs(float(q23_tolerance_deg))
+    limit = [target - tolerance, target + tolerance]
+    candidates = _constrained_transfer_candidates(
+        leg_name,
+        float(current_position_m[0]),
+        float(current_position_m[1]),
+        float(current_position_m[2]),
+        model,
+        joint_limits_deg,
+        limit,
+        fk_tol_m,
+        q23_sample_count,
+    )
+    if not candidates:
+        return None
+    reference = list(reference_joint_deg) if len(reference_joint_deg) == 3 else [0.0, 90.0, -60.0]
+    candidates.sort(key=lambda item: (
+        abs(float(item["q23_sum_deg"]) - target),
+        abs(float(item["lateral_offset_m"])),
+        _joint_cost(item["joint_deg"], reference),
+        float(item["fk_error_m"]),
+    ))
+    return candidates[0]
+
+
 def workspace_guard(
     leg_name,
     candidate_center_body_m,
