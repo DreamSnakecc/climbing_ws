@@ -226,7 +226,7 @@ class SwingLegController(object):
             str(value) for value in self._cfg("hold_position_states", ["INIT"])
         )
         self.use_contact_feedback = bool(self._cfg("use_contact_feedback", True))
-        self.swing_lift_normal_m = self._float_cfg("swing_lift_normal_m", self.clearance_m, 0.0)
+        self.swing_lift_normal_m = self._float_cfg("swing_lift_normal_m", self.clearance_m)
         self.jacobian_delta_rad = self._float_cfg("jacobian_delta_rad", 1e-3, 1e-5)
         self.workspace_check_enabled = bool(self._cfg("workspace_check_enabled", True))
         self.workspace_check_mode = str(self._cfg("workspace_check_mode", "per_cycle")).strip().lower()
