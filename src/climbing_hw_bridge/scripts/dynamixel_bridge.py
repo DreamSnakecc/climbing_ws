@@ -37,7 +37,9 @@ class DynamixelBridge(object):
         self.support_current_margin_a = float(get_cfg("support_current_margin_a", 0.08))
         self.max_goal_current_a = float(get_cfg("max_goal_current_a", 4.8))
         self.min_goal_current_a = float(get_cfg("min_goal_current_a", 0.0))
-        self.joint_current_scale = [float(value) for value in get_cfg("joint_current_scale", [0.35, 1.0, 1.0])]
+        self.joint_current_scale = [float(value) for value in get_cfg("joint_current_scale", [0.35, 1.0, 1.0, 1.0])]
+        while len(self.joint_current_scale) < 4:
+            self.joint_current_scale.append(1.0)
         self.torque_constant_nm_per_a = get_cfg("torque_constant_nm_per_a", {"default": 1.0})
         self.torque_bias_nm = get_cfg("torque_bias_nm", {"default": 0.0})
         self.torque_models = get_cfg("torque_models", {})
@@ -59,7 +61,8 @@ class DynamixelBridge(object):
         self.l_femur = float(get_gait_cfg("link_femur", 74.0)) / 1000.0
         self.l_tibia = float(get_gait_cfg("link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(get_gait_cfg("link_a3", 41.5)) / 1000.0
-        self.joint_zero_deg = get_gait_cfg("joint_zero_deg", {"j1": 0.0, "j2": 90.0, "j3": 0.0})
+        self.l_a4 = float(get_gait_cfg("link_a4", 151.8)) / 1000.0
+        self.joint_zero_deg = get_gait_cfg("joint_zero_deg", {"j1": 0.0, "j2": 90.0, "j3": 0.0, "j4": 0.0})
         self.nominal_universal_joint_center_z = float(
             get_gait_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z)
         )
@@ -217,7 +220,7 @@ class DynamixelBridge(object):
 
     @staticmethod
     def _solution_cost(candidate_deg, reference_deg):
-        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in [0, 1, 2])
+        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in range(4))
 
     def _ik_candidates_deg(self, x_mm, y_mm, z_mm):
         x_prime = float(x_mm) - self.l_coxa * 1000.0
@@ -227,7 +230,8 @@ class DynamixelBridge(object):
 
         l1 = self.l_tibia * 1000.0
         l2 = self.l_a3 * 1000.0
-        d_sq = r_prime ** 2 + float(z_mm) ** 2
+        joint4_z = float(z_mm) + self.l_a4 * 1000.0
+        d_sq = r_prime ** 2 + joint4_z ** 2
         cos_theta3 = (d_sq - l1 ** 2 - l2 ** 2) / (2.0 * l1 * l2)
         cos_theta3 = self._clamp(cos_theta3, -1.0, 1.0)
         sin_theta3_mag = math.sqrt(max(0.0, 1.0 - cos_theta3 ** 2))
@@ -235,13 +239,15 @@ class DynamixelBridge(object):
         candidates = []
         for branch_sign in [-1.0, 1.0]:
             theta3 = math.atan2(branch_sign * sin_theta3_mag, cos_theta3)
-            q2 = math.atan2(float(z_mm), r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
-            candidates.append([math.degrees(q1), math.degrees(q2), math.degrees(theta3)])
+            q2 = math.atan2(joint4_z, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
+            q2_deg = math.degrees(q2)
+            q3_deg = math.degrees(theta3)
+            candidates.append([math.degrees(q1), q2_deg, q3_deg, -(q2_deg + q3_deg)])
         return candidates
 
     def _ik_transform_matrix_solve_deg(self, x_mm, y_mm, z_mm):
         candidates = self._ik_candidates_deg(x_mm, y_mm, z_mm)
-        return min(candidates, key=lambda candidate: self._solution_cost(candidate, [0.0, 90.0, -60.0]))
+        return min(candidates, key=lambda candidate: self._solution_cost(candidate, [0.0, 90.0, -60.0, -30.0]))
 
     def _compute_nominal_output_deg_by_motor(self):
         nominal_joint_deg = self._ik_transform_matrix_solve_deg(
@@ -249,7 +255,7 @@ class DynamixelBridge(object):
             self.nominal_y,
             self.nominal_universal_joint_center_z,
         )
-        nominal_output_deg = [nominal_joint_deg[index] + self._joint_zero_deg_for_index(index) for index in [0, 1, 2]]
+        nominal_output_deg = [nominal_joint_deg[index] + self._joint_zero_deg_for_index(index) for index in range(4)]
         mapping = {}
         for leg_name, motor_ids in self.leg_to_motors.items():
             for joint_index, motor_id in enumerate(motor_ids):
@@ -390,6 +396,12 @@ class DynamixelBridge(object):
             return 0.0
         return (float(torque_nm) - bias) / gain
 
+    def _motor_max_goal_current_a(self, motor_id):
+        model_name = self.torque_model_by_motor.get(str(int(motor_id)), "")
+        model_cfg = self.torque_models.get(model_name, {}) if model_name else {}
+        model_limit = float(model_cfg.get("max_current_a", self.max_goal_current_a))
+        return min(self.max_goal_current_a, max(0.0, model_limit))
+
     def _base_force_to_leg_force(self, leg_name, force_vector):
         hip_yaw = self.leg_hip_yaw.get(leg_name, 0.0)
         cos_yaw = math.cos(hip_yaw)
@@ -400,15 +412,16 @@ class DynamixelBridge(object):
         q1 = float(joint_vector[0])
         q2 = float(joint_vector[1])
         q3 = float(joint_vector[2])
+        q4 = float(joint_vector[3])
         alpha = q2 - math.radians(90.0)
-        radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3)
-        p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3)
+        radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3) + self.l_a4 * math.cos(alpha + q3 + q4)
+        p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3) + self.l_a4 * math.sin(alpha + q3 + q4)
         radial_total = self.l_femur + radial_prime
         return [self.l_coxa + radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
 
     def _leg_joint_vector(self, leg_name):
         motor_ids = self.leg_to_motors.get(leg_name, [])
-        if len(motor_ids) != 3:
+        if len(motor_ids) != 4:
             return None
         return [float(self.last_position_rad.get(int(motor_id), 0.0)) for motor_id in motor_ids]
 
@@ -417,12 +430,12 @@ class DynamixelBridge(object):
         if joint_vector is None:
             return None
         base_position = self._forward_kinematics_leg(joint_vector)
-        jacobian = [[0.0, 0.0, 0.0] for _ in range(3)]
-        for column in [0, 1, 2]:
+        jacobian = [[0.0 for _ in range(4)] for _ in range(3)]
+        for column in range(4):
             perturbed = list(joint_vector)
             perturbed[column] += self.jacobian_delta_rad
             next_position = self._forward_kinematics_leg(perturbed)
-            for row in [0, 1, 2]:
+            for row in range(3):
                 jacobian[row][column] = (next_position[row] - base_position[row]) / max(self.jacobian_delta_rad, 1e-9)
         return jacobian
 
@@ -680,7 +693,7 @@ class DynamixelBridge(object):
             for joint_index, motor_id in enumerate(motor_ids):
                 torque_nm = self.joint_current_scale[joint_index] * joint_torques[joint_index]
                 current_amp = abs(self._estimate_current_from_torque_nm(motor_id, torque_nm)) + self.support_current_margin_a
-                current_amp = min(self.max_goal_current_a, max(self.min_goal_current_a, current_amp))
+                current_amp = min(self._motor_max_goal_current_a(motor_id), max(self.min_goal_current_a, current_amp))
                 packet = SetCurrent()
                 packet.id = int(motor_id)
                 packet.current = int(self._amp_to_current_raw(current_amp))

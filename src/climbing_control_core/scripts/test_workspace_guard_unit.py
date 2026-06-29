@@ -3,77 +3,43 @@
 import math
 
 from workspace_guard import (
-    _constrained_transfer_candidates,
-    constrained_transfer_path,
-    pre_lift_q23_align_point,
+    _fk_from_joint_deg,
+    _ik_candidates_deg,
+    _within_limits,
+    straight_transfer_path,
     workspace_guard,
 )
 
 
 def _build_model():
     return {
-        "nominal_x_m": 0.11875,
+        "nominal_x_m": 0.12775,
         "nominal_y_m": 0.0,
-        "nominal_z_m": -0.1955,
-        "operating_x_m": 0.23704,
+        "nominal_z_m": -0.3758,
+        "operating_x_m": 0.26713,
         "operating_y_m": 0.0,
-        "operating_z_m": -0.1500,
-        "l_coxa": 0.0625,
+        "operating_z_m": -0.2873,
+        "l_coxa": 0.04475,
         "l_femur": 0.0830,
         "l_tibia": 0.1540,
-        "l_a3": 0.0415,
+        "l_a3": 0.0700,
+        "l_a4": 0.1518,
+        "q234_sum_limit_deg": [-5.0, 5.0],
         "leg_yaw_rad": {"lf": math.radians(45.0)},
     }
 
 
 def _joint_limits():
-    return {"j1": [-90.0, 90.0], "j2": [-10.0, 190.0], "j3": [-100.0, 100.0]}
-
-
-def _current_robot_model():
-    return {
-        "nominal_x_m": 0.12775,
-        "nominal_y_m": 0.0,
-        "nominal_z_m": -0.1985,
-        "operating_x_m": 0.26713,
-        "operating_y_m": 0.0,
-        "operating_z_m": -0.1100,
-        "l_coxa": 0.04475,
-        "l_femur": 0.0830,
-        "l_tibia": 0.1540,
-        "l_a3": 0.0445,
-        "leg_yaw_rad": {
-            "lf": math.radians(45.0),
-            "rf": math.radians(-45.0),
-            "lr": math.radians(135.0),
-            "rr": math.radians(-135.0),
-        },
-    }
-
-
-def _current_joint_limits():
-    return {"j1": [-90.0, 90.0], "j2": [-10.0, 150.0], "j3": [-100.0, 100.0]}
-
-
-def _operating_center_body(model, leg_name):
-    dx_leg = model["operating_x_m"] - model["nominal_x_m"]
-    dy_leg = model["operating_y_m"] - model["nominal_y_m"]
-    yaw = model["leg_yaw_rad"][leg_name]
-    cos_yaw = math.cos(yaw)
-    sin_yaw = math.sin(yaw)
-    return [
-        cos_yaw * dx_leg - sin_yaw * dy_leg,
-        sin_yaw * dx_leg + cos_yaw * dy_leg,
-        model["operating_z_m"],
-    ]
+    return {"j1": [-90.0, 90.0], "j2": [-10.0, 150.0], "j3": [-100.0, 100.0], "j4": [-100.0, 100.0]}
 
 
 def _reachable_center_body_from_joint(model, leg_name, joint_deg):
     q1 = math.radians(float(joint_deg[0]))
     q2r = math.radians(float(joint_deg[1]) - 90.0)
     q3 = math.radians(float(joint_deg[2]))
-    r_prime = model["l_tibia"] * math.cos(q2r) + model["l_a3"] * math.cos(q2r + q3)
-    pz = model["l_tibia"] * math.sin(q2r) + model["l_a3"] * math.sin(q2r + q3)
+    q4 = math.radians(float(joint_deg[3]))
+    r_prime = model["l_tibia"] * math.cos(q2r) + model["l_a3"] * math.cos(q2r + q3) + model["l_a4"] * math.cos(q2r + q3 + q4)
+    pz = model["l_tibia"] * math.sin(q2r) + model["l_a3"] * math.sin(q2r + q3) + model["l_a4"] * math.sin(q2r + q3 + q4)
     r_total = model["l_femur"] + r_prime
     x_prime = r_total * math.cos(q1)
     y_leg = r_total * math.sin(q1)
@@ -94,57 +60,35 @@ def _reachable_center_body_from_joint(model, leg_name, joint_deg):
 def run_tests():
     model = _build_model()
     limits = _joint_limits()
-    anchor = [0.0, 0.0, -0.1500]
+    anchor = _reachable_center_body_from_joint(model, "lf", [0.0, 65.0, -65.0, 0.0])
+
+    nominal_fk = _fk_from_joint_deg([0.0, 0.0, 0.0, 0.0], model)
+    assert max(abs(nominal_fk[index] - [0.12775, 0.0, -0.3758][index]) for index in range(3)) < 1e-9
+    operating = [0.26713, 0.0, -0.2873]
+    operating_candidates = _ik_candidates_deg(operating[0], operating[1], operating[2], model)
+    operating_joint = min(operating_candidates, key=lambda candidate: abs(candidate[2] + 64.824))
+    operating_fk = _fk_from_joint_deg(operating_joint, model)
+    assert max(abs(operating_fk[index] - operating[index]) for index in range(3)) < 0.002
+    assert abs(sum(operating_joint[1:4])) < 1e-9
+    assert not _within_limits([0.0, 40.0, -30.0, 0.0], limits, [-5.0, 5.0])
 
     # reachable target: should not clamp
-    reachable = _reachable_center_body_from_joint(model, "lf", [0.0, 95.0, -35.0])
+    reachable = _reachable_center_body_from_joint(model, "lf", [0.0, 75.0, -75.0, 0.0])
     checked, clamped, margin, joint, _ = workspace_guard(
         leg_name="lf",
         candidate_center_body_m=reachable,
         reference_center_body_m=anchor,
-        last_joint_deg=[0.0, 0.0, 0.0],
+        last_joint_deg=[0.0, 0.0, 0.0, 0.0],
         model=model,
         joint_limits_deg=limits,
         clamp_max_iter=10,
         fk_tol_m=0.003,
     )
     assert not clamped, "reachable point should not clamp"
-    assert len(joint) == 3
+    assert len(joint) == 4
+    assert abs(sum(joint[1:4])) <= 5.0
     assert margin > -0.05
     assert max(abs(checked[i] - reachable[i]) for i in [0, 1, 2]) < 1e-6
-
-    # q2 + q3 constraint: individual joints are valid, but the sum must be limited.
-    q23_sum_violation = _reachable_center_body_from_joint(model, "lf", [0.0, 40.0, 0.0])
-    _, clamped, _, joint, _ = workspace_guard(
-        leg_name="lf",
-        candidate_center_body_m=q23_sum_violation,
-        reference_center_body_m=anchor,
-        last_joint_deg=[0.0, 0.0, 0.0],
-        model=model,
-        joint_limits_deg=limits,
-        clamp_max_iter=10,
-        fk_tol_m=0.003,
-        q23_sum_limit_deg=[-10.0, 10.0],
-    )
-    assert clamped, "q2+q3 violation should clamp"
-    assert -10.0 <= joint[1] + joint[2] <= 10.0
-
-    # Transfer uses a tighter q2+q3 range so the l_a3 link stays near the
-    # wall normal. This target is valid for +/-15 deg, but not +/-5 deg.
-    transfer_sum_violation = _reachable_center_body_from_joint(model, "lf", [0.0, 10.0, 0.0])
-    _, clamped, _, joint, _ = workspace_guard(
-        leg_name="lf",
-        candidate_center_body_m=transfer_sum_violation,
-        reference_center_body_m=anchor,
-        last_joint_deg=[0.0, 0.0, 0.0],
-        model=model,
-        joint_limits_deg=limits,
-        clamp_max_iter=10,
-        fk_tol_m=0.003,
-        q23_sum_limit_deg=[-5.0, 5.0],
-    )
-    assert clamped, "transfer q2+q3 violation should clamp"
-    assert -5.0 <= joint[1] + joint[2] <= 5.0
 
     # unreachable far target: should clamp
     unreachable = [0.60, 0.50, -0.45]
@@ -159,7 +103,7 @@ def run_tests():
         fk_tol_m=0.003,
     )
     assert clamped, "unreachable point should clamp"
-    assert len(joint) == 3
+    assert len(joint) == 4
     assert all(abs(checked[i]) <= abs(unreachable[i]) + 1e-6 for i in [0, 1, 2])
 
     # branch continuity sanity: near-boundary perturbation should stay valid
@@ -174,16 +118,15 @@ def run_tests():
         clamp_max_iter=12,
         fk_tol_m=0.003,
     )
-    assert len(joint2) == 3
+    assert len(joint2) == 4
     assert not any(math.isnan(value) for value in joint2)
     assert clamped2 in [True, False]
     assert len(checked2) == 3
 
-    # Constrained transfer holds z, moves the fixed 3L/4 x distance, and
-    # remains on the negative-q3 l_a3-normal branch throughout.
-    transfer_start = _reachable_center_body_from_joint(model, "lf", [25.0, 75.0, -78.0])
+    # Straight transfer holds z/y and validates every point with 4DOF IK.
+    transfer_start = _reachable_center_body_from_joint(model, "lf", [25.0, 75.0, -78.0, 3.0])
     transfer_end_x = transfer_start[0] + 0.03
-    path = constrained_transfer_path(
+    path = straight_transfer_path(
         leg_name="lf",
         start_x_m=transfer_start[0],
         end_x_m=transfer_end_x,
@@ -192,34 +135,22 @@ def run_tests():
         fixed_z_m=transfer_start[2],
         model=model,
         joint_limits_deg=limits,
-        reference_joint_deg=[25.0, 75.0, -78.0],
-        q23_sum_limit_deg=[-5.0, 5.0],
+        reference_joint_deg=[25.0, 75.0, -78.0, 3.0],
         sample_count=31,
-        q23_sample_count=101,
         fk_tol_m=0.003,
     )
     assert path is not None, "constrained transfer should have a reachable path"
     assert abs(path[0]["position"][0] - transfer_start[0]) < 1e-9
     assert abs(path[-1]["position"][0] - transfer_end_x) < 1e-9
     assert all(abs(point["position"][2] - transfer_start[2]) < 1e-9 for point in path)
+    assert all(abs(point["position"][1] - transfer_start[1]) < 1e-9 for point in path)
     assert all(point["joint_deg"][2] < 0.0 for point in path)
-    assert all(-5.0 - 1e-6 <= point["q23_sum_deg"] <= 5.0 + 1e-6 for point in path)
+    assert any(abs(point["joint_deg"][1] + point["joint_deg"][2]) > 5.0 for point in path)
+    assert all(abs(point["q234_sum_deg"]) <= 5.0 + 1e-6 for point in path)
     assert all(point["fk_error_m"] <= 0.003 for point in path)
-    start_candidates = _constrained_transfer_candidates(
-        "lf", transfer_start[0], transfer_start[1], transfer_start[2],
-        model, limits, [-5.0, 5.0], 0.003, 101,
-    )
-    assert abs(path[0]["lateral_offset_m"]) <= min(
-        abs(point["lateral_offset_m"]) for point in start_candidates
-    ) + 1e-9
-    assert max(
-        abs(path[index + 1]["position"][1] - point["position"][1])
-        for index, point in enumerate(path[:-1])
-    ) < 0.01
 
-    # No constrained fallback is permitted when the requested x range has no
-    # fixed-z solution on the q2+q3 band.
-    impossible = constrained_transfer_path(
+    # No fallback is permitted when the requested straight path is unreachable.
+    impossible = straight_transfer_path(
         leg_name="lf",
         start_x_m=transfer_start[0],
         end_x_m=transfer_start[0] + 1.0,
@@ -228,48 +159,11 @@ def run_tests():
         fixed_z_m=transfer_start[2],
         model=model,
         joint_limits_deg=limits,
-        reference_joint_deg=[25.0, 75.0, -78.0],
-        q23_sum_limit_deg=[-5.0, 5.0],
+        reference_joint_deg=[25.0, 75.0, -78.0, 3.0],
         sample_count=31,
-        q23_sample_count=101,
         fk_tol_m=0.003,
     )
-    assert impossible is None, "unreachable constrained path must fail closed"
-
-    current_model = _current_robot_model()
-    current_limits = _current_joint_limits()
-    for leg_name in ["lf", "rf", "lr", "rr"]:
-        start = _operating_center_body(current_model, leg_name)
-        point = pre_lift_q23_align_point(
-            leg_name=leg_name,
-            current_position_m=start,
-            model=current_model,
-            joint_limits_deg=current_limits,
-            reference_joint_deg=[0.0, 90.0, -60.0],
-            q23_target_deg=0.0,
-            q23_tolerance_deg=5.0,
-            q23_sample_count=101,
-            fk_tol_m=0.002,
-        )
-        assert point is not None, "pre-lift q23 align should solve for %s" % leg_name
-        assert point["joint_deg"][2] < 0.0
-        assert abs(point["q23_sum_deg"]) <= 5.0 + 1e-6
-        assert point["fk_error_m"] <= 0.002
-        assert abs(point["position"][0] - start[0]) < 1e-9
-        assert abs(point["position"][2] - start[2]) < 1e-9
-
-    impossible_align = pre_lift_q23_align_point(
-        leg_name="lf",
-        current_position_m=[2.0, 0.0, -0.110],
-        model=current_model,
-        joint_limits_deg=current_limits,
-        reference_joint_deg=[0.0, 90.0, -60.0],
-        q23_target_deg=0.0,
-        q23_tolerance_deg=5.0,
-        q23_sample_count=101,
-        fk_tol_m=0.002,
-    )
-    assert impossible_align is None, "unreachable pre-lift align must fail closed"
+    assert impossible is None, "unreachable straight path must fail closed"
 
     print("workspace_guard unit tests passed")
 

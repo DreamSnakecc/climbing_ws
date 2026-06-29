@@ -41,6 +41,11 @@ class LegIkExecutor(object):
         self.l_femur = float(get_cfg("link_femur", 74.0))
         self.l_tibia = float(get_cfg("link_tibia", 150.0))
         self.l_a3 = float(get_cfg("link_a3", 41.5))
+        self.l_a4 = float(get_cfg("link_a4", 151.8))
+        self.q234_sum_limit_deg = rospy.get_param(
+            "~workspace_q234_sum_limit_deg",
+            rospy.get_param("/swing_leg_controller/workspace_q234_sum_limit_deg", [-5.0, 5.0]),
+        )
         self.nominal_universal_joint_center_z = float(
             get_cfg("nominal_universal_joint_center_z", self.legacy_nominal_z)
         )
@@ -78,11 +83,11 @@ class LegIkExecutor(object):
         self.gear_ratio_joint3 = float(get_cfg("gear_ratio_joint3", 4.421))
         self.joint_limit_deg = get_cfg(
             "joint_limit_deg",
-            {"j1": [-90.0, 90.0], "j2": [-10.0, 190.0], "j3": [-100.0, 100.0]},
+            {"j1": [-90.0, 90.0], "j2": [-10.0, 190.0], "j3": [-100.0, 100.0], "j4": [-100.0, 100.0]},
         )
         self.joint_zero_deg = get_cfg(
             "joint_zero_deg",
-            {"j1": 0.0, "j2": 90.0, "j3": 0.0},
+            {"j1": 0.0, "j2": 90.0, "j3": 0.0, "j4": 0.0},
         )
         self.motor_home = get_cfg("motor_home_ticks", {})
         self.motor_dir = get_cfg("motor_dir", {})
@@ -90,10 +95,10 @@ class LegIkExecutor(object):
         self.direct_drive_ids = set([int(v) for v in get_cfg("single_turn_ids", [])])
 
         default_leg_cfg = {
-            "lf": {"motor_ids": [11, 1, 2], "hip_yaw_deg": 45.0},
-            "rf": {"motor_ids": [12, 3, 4], "hip_yaw_deg": -45.0},
-            "lr": {"motor_ids": [14, 7, 8], "hip_yaw_deg": 135.0},
-            "rr": {"motor_ids": [13, 5, 6], "hip_yaw_deg": -135.0},
+            "lf": {"motor_ids": [11, 1, 2, 15], "hip_yaw_deg": 45.0},
+            "rf": {"motor_ids": [12, 3, 4, 16], "hip_yaw_deg": -45.0},
+            "lr": {"motor_ids": [14, 7, 8, 18], "hip_yaw_deg": 135.0},
+            "rr": {"motor_ids": [13, 5, 6, 17], "hip_yaw_deg": -135.0},
         }
         leg_cfg = get_cfg("legs", default_leg_cfg)
         self.leg_order = ["lf", "rf", "rr", "lr"]
@@ -109,9 +114,8 @@ class LegIkExecutor(object):
         self._init_position_service_clients()
         self.nominal_joint_deg = self._nominal_joint_deg_vector()
         self.nominal_output_deg = [
-            self.nominal_joint_deg[0] + float(self.joint_zero_deg["j1"]),
-            self.nominal_joint_deg[1] + float(self.joint_zero_deg["j2"]),
-            self.nominal_joint_deg[2] + float(self.joint_zero_deg["j3"]),
+            self.nominal_joint_deg[index] + float(self.joint_zero_deg["j%d" % (index + 1)])
+            for index in range(4)
         ]
         self.last_joint_deg_by_leg = {name: list(self.nominal_joint_deg) for name in self.leg_order}
         self._initialize_startup_pose_mode()
@@ -177,13 +181,12 @@ class LegIkExecutor(object):
             return None
 
     def _nominal_joint_deg_vector(self):
-        q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(
+        return list(self._ik_transform_matrix_solve(
             self.nominal_x,
             self.nominal_y,
             self.nominal_universal_joint_center_z,
-            reference_deg=[0.0, 90.0, -60.0],  # prefer knee-backward (q3<0) branch
-        )
-        return [q1_deg, q2_deg, q3_deg]
+            reference_deg=[0.0, 90.0, -60.0, -30.0],  # prefer knee-backward (q3<0) branch
+        ))
 
     def _capture_motor_home_from_current_pose(self):
         captured_home = {}
@@ -261,7 +264,7 @@ class LegIkExecutor(object):
         return dx_base, dy_base
 
     def _operating_center_command(self, leg_name):
-        """LegCenterCommand.center that maps to the operating UJC in leg frame 0."""
+        """LegCenterCommand.center that maps to the operating foot endpoint."""
         leg = self.legs[leg_name]
         dx_leg_mm = self.operating_universal_joint_center_x - self.nominal_x
         dy_leg_mm = self.operating_universal_joint_center_y - self.nominal_y
@@ -277,14 +280,22 @@ class LegIkExecutor(object):
             self._clamp(float(joint_solution_deg[0]), self.joint_limit_deg["j1"][0], self.joint_limit_deg["j1"][1]),
             self._clamp(float(joint_solution_deg[1]), self.joint_limit_deg["j2"][0], self.joint_limit_deg["j2"][1]),
             self._clamp(float(joint_solution_deg[2]), self.joint_limit_deg["j3"][0], self.joint_limit_deg["j3"][1]),
+            self._clamp(float(joint_solution_deg[3]), self.joint_limit_deg["j4"][0], self.joint_limit_deg["j4"][1]),
         ]
 
+    def _candidate_within_limits(self, candidate_deg):
+        for index, key in enumerate(["j1", "j2", "j3", "j4"]):
+            if not self.joint_limit_deg[key][0] <= float(candidate_deg[index]) <= self.joint_limit_deg[key][1]:
+                return False
+        q234 = sum(float(candidate_deg[index]) for index in [1, 2, 3])
+        return float(self.q234_sum_limit_deg[0]) <= q234 <= float(self.q234_sum_limit_deg[1])
+
     def _ik_solution_cost(self, candidate_deg, reference_deg):
-        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in [0, 1, 2])
+        return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in range(4))
 
     def _ik_candidates_deg(self, x_mm, y_mm, z_mm):
         x_prime = float(x_mm) - self.l_coxa
-        p_z = float(z_mm)
+        p_z = float(z_mm) + self.l_a4
 
         q1 = math.atan2(float(y_mm), x_prime)
         r_total = math.hypot(x_prime, float(y_mm))
@@ -301,13 +312,21 @@ class LegIkExecutor(object):
         for branch_sign in [-1.0, 1.0]:
             theta3 = math.atan2(branch_sign * sin_theta3_mag, cos_theta3)
             q2 = math.atan2(p_z, r_prime) - math.atan2(l2 * math.sin(theta3), l1 + l2 * math.cos(theta3)) + math.radians(90.0)
-            candidates.append([math.degrees(q1), math.degrees(q2), math.degrees(theta3)])
+            q2_deg = math.degrees(q2)
+            q3_deg = math.degrees(theta3)
+            candidates.append([math.degrees(q1), q2_deg, q3_deg, -(q2_deg + q3_deg)])
         return candidates
 
     def _ik_transform_matrix_solve(self, x_mm, y_mm, z_mm, reference_deg=None):
-        candidates = [self._clamp_joint_solution_deg(candidate) for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm)]
+        candidates = [candidate for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm) if self._candidate_within_limits(candidate)]
         if reference_deg is None:
-            reference_deg = [0.0, 0.0, 0.0]
+            reference_deg = [0.0, 0.0, 0.0, 0.0]
+        if not candidates:
+            rospy.logerr_throttle(1.0, "IK target violates 4DOF joint or q2+q3+q4 limits; holding previous joint target")
+            return tuple(reference_deg)
+
+        if len(candidates) == 1:
+            return tuple(candidates[0])
 
         q3_0 = candidates[0][2]
         q3_1 = candidates[1][2]
@@ -332,13 +351,13 @@ class LegIkExecutor(object):
             rospy.logwarn_throttle(
                 2.0,
                 "IK branch switching risk (cost_diff=%.1f): "
-                "cand1=[%.1f, %.1f, %.1f](cost=%.1f) "
-                "cand2=[%.1f, %.1f, %.1f](cost=%.1f) "
-                "reference=[%.1f, %.1f, %.1f] q3_backward=%d chosen=%d",
+                "cand1=[%.1f, %.1f, %.1f, %.1f](cost=%.1f) "
+                "cand2=[%.1f, %.1f, %.1f, %.1f](cost=%.1f) "
+                "reference=[%.1f, %.1f, %.1f, %.1f] q3_backward=%d chosen=%d",
                 cost_diff,
-                candidates[0][0], candidates[0][1], candidates[0][2], costs[0],
-                candidates[1][0], candidates[1][1], candidates[1][2], costs[1],
-                reference_deg[0], reference_deg[1], reference_deg[2],
+                candidates[0][0], candidates[0][1], candidates[0][2], candidates[0][3], costs[0],
+                candidates[1][0], candidates[1][1], candidates[1][2], candidates[1][3], costs[1],
+                reference_deg[0], reference_deg[1], reference_deg[2], reference_deg[3],
                 0 if q3_0 < q3_1 else 1,
                 chosen_idx,
             )
@@ -379,13 +398,12 @@ class LegIkExecutor(object):
     def _compute_leg_ticks_from_leg_frame_mm(self, leg_name, tx_mm, ty_mm, tz_mm):
         leg = self.legs[leg_name]
         reference_deg = self.last_joint_deg_by_leg.get(leg_name, self.nominal_joint_deg)
-        q1_deg, q2_deg, q3_deg = self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg)
-        self.last_joint_deg_by_leg[leg_name] = [q1_deg, q2_deg, q3_deg]
+        joint_deg = list(self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg))
+        self.last_joint_deg_by_leg[leg_name] = joint_deg
 
         cmd_deg = [
-            q1_deg + float(self.joint_zero_deg["j1"]),
-            q2_deg + float(self.joint_zero_deg["j2"]),
-            q3_deg + float(self.joint_zero_deg["j3"]),
+            joint_deg[index] + float(self.joint_zero_deg["j%d" % (index + 1)])
+            for index in range(4)
         ]
         ticks = []
         for joint_index, motor_id in enumerate(leg.motor_ids):
@@ -433,14 +451,14 @@ class LegIkExecutor(object):
             return None
         if self.startup_target_enabled and progress > 0.0 and not self.startup_move_started:
             rospy.loginfo(
-                "leg_ik_executor startup move: nominal UJC -> target (%.2f, %.2f, %.2f) mm in leg frame 0",
+                "leg_ik_executor startup move: nominal foot endpoint -> target (%.2f, %.2f, %.2f) mm in leg frame 0",
                 self.startup_target_x,
                 self.startup_target_y,
                 self.startup_target_universal_joint_center_z,
             )
             self.startup_move_started = True
         if not self.startup_target_enabled and not self.startup_move_completed:
-            rospy.loginfo("leg_ik_executor startup: staying at nominal UJC (startup_target_enabled=false)")
+            rospy.loginfo("leg_ik_executor startup: staying at nominal foot endpoint (startup_target_enabled=false)")
             self.startup_move_completed = True
         if self.startup_target_enabled and progress >= 1.0 and not self.startup_move_completed:
             rospy.loginfo("leg_ik_executor startup move completed")

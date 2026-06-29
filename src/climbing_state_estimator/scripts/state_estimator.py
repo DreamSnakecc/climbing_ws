@@ -159,7 +159,7 @@ class StateEstimator(object):
         self.ekf_body_position_process_std_m = max(float(get_cfg("ekf_body_position_process_std_m", 0.02)), 1e-6)
         self.ekf_body_velocity_process_std_mps = max(float(get_cfg("ekf_body_velocity_process_std_mps", 0.15)), 1e-6)
         self.ekf_body_acceleration_process_std_mps2 = max(float(get_cfg("ekf_body_acceleration_process_std_mps2", 1.5)), 1e-6)
-        # Keep legacy config keys for compatibility. They refer to the universal-joint-center support point.
+        # Keep legacy estimator parameter names for compatibility; FK now tracks the foot endpoint.
         self.ekf_contact_foot_process_std_m = max(float(get_cfg("ekf_contact_foot_process_std_m", 0.003)), 1e-6)
         self.ekf_swing_foot_process_std_m = max(float(get_cfg("ekf_swing_foot_process_std_m", 0.08)), 1e-6)
         self.ekf_contact_position_measurement_std_m = max(float(get_cfg("ekf_contact_position_measurement_std_m", 0.01)), 1e-6)
@@ -176,6 +176,7 @@ class StateEstimator(object):
         self.l_femur = float(rospy.get_param("/gait_controller/link_femur", 74.0)) / 1000.0
         self.l_tibia = float(rospy.get_param("/gait_controller/link_tibia", 150.0)) / 1000.0
         self.l_a3 = float(rospy.get_param("/gait_controller/link_a3", 41.5)) / 1000.0
+        self.l_a4 = float(rospy.get_param("/gait_controller/link_a4", 151.8)) / 1000.0
         self.nominal_universal_joint_center_z_m = float(
             rospy.get_param(
                 "/gait_controller/nominal_universal_joint_center_z",
@@ -488,9 +489,10 @@ class StateEstimator(object):
         q1 = float(joint_vector[0])
         q2 = float(joint_vector[1])
         q3 = float(joint_vector[2])
+        q4 = float(joint_vector[3])
         alpha = q2 - math.radians(90.0)
-        radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3)
-        p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3)
+        radial_prime = self.l_tibia * math.cos(alpha) + self.l_a3 * math.cos(alpha + q3) + self.l_a4 * math.cos(alpha + q3 + q4)
+        p_z = self.l_tibia * math.sin(alpha) + self.l_a3 * math.sin(alpha + q3) + self.l_a4 * math.sin(alpha + q3 + q4)
         radial_total = self.l_femur + radial_prime
         return [self.l_coxa + radial_total * math.cos(q1), radial_total * math.sin(q1), p_z]
 
@@ -501,7 +503,7 @@ class StateEstimator(object):
             if joint_index is None or joint_index >= len(self.last_joint_state.position):
                 return None
             joint_vector.append(float(self.last_joint_state.position[joint_index]))
-        return joint_vector if len(joint_vector) == 3 else None
+        return joint_vector if len(joint_vector) == 4 else None
 
     def _estimate_universal_joint_center_positions(self):
         positions = []

@@ -36,8 +36,8 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 35000.0
-  climb_rpm: 35000.0
+  attach_rpm: 50000.0
+  climb_rpm: 50000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
@@ -215,23 +215,14 @@ swing_leg_controller:
   workspace_clamp_max_iter: 10
   workspace_warn_throttle_s: 2.0
   workspace_fk_tolerance_m: 0.002
-  workspace_q23_sum_limit_deg: [-60.0, 60.0]
-  # l_a3 absolute angle is q2 + q3 - 90 deg; keep it parallel to the
-  # wall normal (opposite direction is equivalent) while transferring.
-  transfer_q23_sum_limit_deg: [-5.0, 5.0]
-  transfer_q23_sample_count: 101
-  pre_lift_q23_align_enabled: false
-  pre_lift_q23_target_deg: 0.0
-  pre_lift_q23_tolerance_deg: 5.0
-  pre_lift_q23_duration_s: 0.25
-  pre_lift_q23_sample_count: 101
+  workspace_q234_sum_limit_deg: [-5.0, 5.0]
   actual_tracking_enabled: false
   # Diagnostic-only endpoint hold: keep the LIFT/TRANSFER/PRELOAD target
   # fixed before transitioning, while logging actual UJC and joint tracking.
   endpoint_diagnostic_enabled: false
   endpoint_diagnostic_hold_s: 0.4
   # Test-only joint-tick endpoint gate.  When enabled, LIFT, TRANSFER and
-  # PRELOAD each hold their final command until all three leg joints stay
+  # PRELOAD each hold their final command until all four leg joints stay
   # within tolerance, otherwise the phase remains at that endpoint.
   servo_tracking_gate_enabled: false
   servo_tracking_tolerance_ticks: 20.0
@@ -263,10 +254,11 @@ dynamixel_telemetry:
   support_current_margin_a: 0.08
   max_goal_current_a: 4.8
   min_goal_current_a: 0.0
-  joint_current_scale: [0.35, 1.0, 1.0]
+  joint_current_scale: [1.0, 1.0, 1.0, 1.0]
   # Approximate piecewise fits digitized from the provided motor current-torque plots.
   # The bridge uses absolute current for interpolation and restores the sign afterward.
-  # xw540 is used on IDs 11-14 and on IDs 1/3/5/7. xw430 remains on IDs 2/4/6/8.
+  # xw540 is used on IDs 11-14 and on IDs 1/3/5/7. The two xw430 entries
+  # retain separate calibrations because IDs 15-18 use the newly provided curve.
   torque_models:
     xw540:
       current_to_torque_points:
@@ -304,6 +296,30 @@ dynamixel_telemetry:
           torque_nm: 2.40
       torque_constant_nm_per_a: 2.14
       torque_bias_nm: 0.0
+    xw430_15_18:
+      # Digitized from the supplied plot; do not command beyond its measured range.
+      max_current_a: 1.22
+      current_to_torque_points:
+        - current_a: 0.00
+          torque_nm: 0.00
+        - current_a: 0.14
+          torque_nm: 0.10
+        - current_a: 0.18
+          torque_nm: 0.20
+        - current_a: 0.28
+          torque_nm: 0.40
+        - current_a: 0.40
+          torque_nm: 0.60
+        - current_a: 0.54
+          torque_nm: 0.80
+        - current_a: 0.70
+          torque_nm: 1.00
+        - current_a: 0.88
+          torque_nm: 1.20
+        - current_a: 1.10
+          torque_nm: 1.40
+        - current_a: 1.22
+          torque_nm: 1.50
   torque_model_by_motor:
     "1": xw540
     "2": xw430
@@ -317,6 +333,10 @@ dynamixel_telemetry:
     "12": xw540
     "13": xw540
     "14": xw540
+    "15": xw430_15_18
+    "16": xw430_15_18
+    "17": xw430_15_18
+    "18": xw430_15_18
   torque_constant_nm_per_a:
     default: 1.0
   torque_bias_nm:
@@ -359,37 +379,37 @@ imu:
 legs:
   lf:
     hip_yaw_deg: 45.0
-    motor_ids: [11, 1, 2]
+    motor_ids: [11, 1, 2, 15]
   rf:
     hip_yaw_deg: -45.0
-    motor_ids: [12, 3, 4]
+    motor_ids: [12, 3, 4, 16]
   lr:
     hip_yaw_deg: 135.0
-    motor_ids: [14, 7, 8]
+    motor_ids: [14, 7, 8, 18]
   rr:
     hip_yaw_deg: -135.0
-    motor_ids: [13, 5, 6]
+    motor_ids: [13, 5, 6, 17]
 
 gait_controller:
   nominal_x: 127.75
   nominal_y: 0.0
-  nominal_universal_joint_center_z: -198.5 #-195.5
-  # nominal_x is the universal-joint-center x coordinate in leg frame 0 at the illustrated zero pose.
+  nominal_universal_joint_center_z: -375.8
+  # Legacy-named nominal_* parameters now describe the foot endpoint in leg frame 0.
   operating_universal_joint_center_x: 267.13 #280.97 #279.71 #267.13 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -110 #-60 #-20 #-110.0 # -100.0 -150.0
-  # Automatic control uses the operating UJC as the support/work point while
-  # nominal_* remains the IK/home reference.
+  operating_universal_joint_center_z: -287.3
+  # Automatic control uses the operating foot endpoint as the support/work point.
   startup_target_enabled: true
   startup_target_hold_s: 0.5
   startup_target_move_duration_s: 5.0
-  # Startup target defaults to the operating UJC in each leg's local frame-0 coordinates.
+  # Startup target defaults to the operating foot endpoint in each leg's local frame-0 coordinates.
   # Legacy compatibility key. Prefer nominal_universal_joint_center_z for any new changes.
-  nominal_z: -321.7   # This is the nominal foot bottom center height, used only for legacy support point calculations. The universal-joint-center nominal height is more relevant for control and state estimation.
+  nominal_z: -321.7   # Legacy support-point height; automatic control uses nominal_universal_joint_center_z as the foot endpoint.
   link_coxa: 44.75
   link_femur: 83.0
   link_tibia: 154.0
-  link_a3: 44.5 #170.8
+  link_a3: 70.0
+  link_a4: 151.8
   base_radius: 203.06
   gear_ratio_joint2: 1
   gear_ratio_joint3: 1    #4.421
@@ -397,10 +417,12 @@ gait_controller:
     j1: [-90.0, 90.0]
     j2: [-10.0, 150.0]
     j3: [-100.0, 100.0]
+    j4: [-100.0, 100.0]
   joint_zero_deg:
     j1: 0.0
     j2: 90.0
     j3: 0.0
+    j4: 0.0
   startup_pose_mode: use_motor_home_ticks  # Options: capture_current_as_home, use_motor_home_ticks
   single_turn_ids: [11, 12, 13, 14]
   position_mode_ids: [11, 12, 13, 14, 1, 3, 5, 7]
@@ -417,6 +439,10 @@ gait_controller:
     "12": 1912
     "13": 2050
     "14": 1039
+    "15": 2048
+    "16": 2048
+    "17": 2048
+    "18": 2048
   motor_dir:
     "1": 1
     "2": 1
@@ -430,11 +456,15 @@ gait_controller:
     "12": -1
     "13": -1
     "14": -1
+    "15": 1
+    "16": -1
+    "17": 1
+    "18": -1
 
 left_board:
   device_name: /dev/ttyUSB_l
   baudrate: 1000000
-  motor_ids: [11, 1, 2, 14, 7, 8]
+  motor_ids: [11, 1, 2, 15, 14, 7, 8, 18]
   multi_turn_ids: []
   position_gains:
     "1": {p: 1200, i: 0, d: 0}
@@ -452,7 +482,7 @@ left_board:
 right_board:
   device_name: /dev/ttyUSB_r
   baudrate: 1000000
-  motor_ids: [12, 3, 4, 13, 5, 6]
+  motor_ids: [12, 3, 4, 16, 13, 5, 6, 17]
   multi_turn_ids: []
   position_gains:
     "3": {p: 900, i: 0, d: 0}
