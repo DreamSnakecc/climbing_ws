@@ -21,7 +21,6 @@ catkin_install_python(PROGRAMS
   scripts/actual_tracking.py
   scripts/state_logger.py
   scripts/test_swing_admittance.py
-  scripts/test_crawl_gait.py
   scripts/test_crawl_gait_with_fan.py
   scripts/test_single_leg_swing.py
   scripts/test_actual_tracking_unit.py

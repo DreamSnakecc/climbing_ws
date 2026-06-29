@@ -24,7 +24,7 @@
     </node>
 
     <node pkg="climbing_hw_bridge" type="dynamixel_bridge.py" name="dynamixel_bridge" output="screen">
-      <rosparam param="ordered_motor_ids">[11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]</rosparam>
+      <rosparam param="ordered_motor_ids">[11, 1, 2, 15, 12, 3, 4, 16, 13, 5, 6, 17, 14, 7, 8, 18]</rosparam>
       <param name="enable_auto_mode_switching" value="$(arg enable_auto_mode_switching)" />
       <param name="enable_auto_current_control" value="$(arg enable_auto_current_control)" />
     </node>

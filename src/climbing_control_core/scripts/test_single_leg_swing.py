@@ -211,15 +211,15 @@ class SingleLegSwingTest(object):
             "servo_last_pass_error_joint1_tick", "servo_last_pass_error_joint2_tick", "servo_last_pass_error_joint3_tick",
             "transfer_phase_id", "transfer_path_valid", "transfer_path_index", "transfer_path_size",
             "transfer_cmd_x_m", "transfer_cmd_y_m", "transfer_cmd_z_m",
-            "transfer_q1_deg", "transfer_q2_deg", "transfer_q3_deg", "transfer_q23_sum_deg", "transfer_lateral_offset_m",
-            "ticks_cmd_11", "ticks_cmd_1", "ticks_cmd_2",
-            "ticks_cmd_12", "ticks_cmd_3", "ticks_cmd_4",
-            "ticks_cmd_13", "ticks_cmd_5", "ticks_cmd_6",
-            "ticks_cmd_14", "ticks_cmd_7", "ticks_cmd_8",
-            "ticks_act_11", "ticks_act_1", "ticks_act_2",
-            "ticks_act_12", "ticks_act_3", "ticks_act_4",
-            "ticks_act_13", "ticks_act_5", "ticks_act_6",
-            "ticks_act_14", "ticks_act_7", "ticks_act_8",
+            "transfer_q1_deg", "transfer_q2_deg", "transfer_q3_deg", "transfer_q4_deg", "transfer_q234_sum_deg",
+            "ticks_cmd_11", "ticks_cmd_1", "ticks_cmd_2", "ticks_cmd_15",
+            "ticks_cmd_12", "ticks_cmd_3", "ticks_cmd_4", "ticks_cmd_16",
+            "ticks_cmd_13", "ticks_cmd_5", "ticks_cmd_6", "ticks_cmd_17",
+            "ticks_cmd_14", "ticks_cmd_7", "ticks_cmd_8", "ticks_cmd_18",
+            "ticks_act_11", "ticks_act_1", "ticks_act_2", "ticks_act_15",
+            "ticks_act_12", "ticks_act_3", "ticks_act_4", "ticks_act_16",
+            "ticks_act_13", "ticks_act_5", "ticks_act_6", "ticks_act_17",
+            "ticks_act_14", "ticks_act_7", "ticks_act_8", "ticks_act_18",
         ])
         t0 = time.time()
         rate = rospy.Rate(50)
@@ -309,7 +309,7 @@ class SingleLegSwingTest(object):
                     "%.2f" % transfer_values[7], "%.2f" % transfer_values[8], "%.2f" % transfer_values[9],
                     "%.2f" % transfer_values[10], "%.4f" % transfer_values[11],
                     # cmd ticks (leg_ik_executor output): order lf->rf->rr->lr
-                    # lf: 11,1,2 | rf: 12,3,4 | rr: 13,5,6 | lr: 14,7,8
+                    # lf: 11,1,2,15 | rf: 12,3,4,16 | rr: 13,5,6,17 | lr: 14,7,8,18
                     "%.0f" % (self.latest_ticks_cmd.position[0] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[1] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[2] if self.latest_ticks_cmd else 0),
@@ -322,6 +322,10 @@ class SingleLegSwingTest(object):
                     "%.0f" % (self.latest_ticks_cmd.position[9] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[10] if self.latest_ticks_cmd else 0),
                     "%.0f" % (self.latest_ticks_cmd.position[11] if self.latest_ticks_cmd else 0),
+                    "%.0f" % (self.latest_ticks_cmd.position[12] if self.latest_ticks_cmd else 0),
+                    "%.0f" % (self.latest_ticks_cmd.position[13] if self.latest_ticks_cmd else 0),
+                    "%.0f" % (self.latest_ticks_cmd.position[14] if self.latest_ticks_cmd else 0),
+                    "%.0f" % (self.latest_ticks_cmd.position[15] if self.latest_ticks_cmd else 0),
                     # actual ticks (dynamixel_bridge joint_ticks raw values)
                     "%.0f" % (self.latest_ticks_actual.data[0] if self.latest_ticks_actual else 0),
                     "%.0f" % (self.latest_ticks_actual.data[1] if self.latest_ticks_actual else 0),
@@ -335,6 +339,10 @@ class SingleLegSwingTest(object):
                     "%.0f" % (self.latest_ticks_actual.data[9] if self.latest_ticks_actual else 0),
                     "%.0f" % (self.latest_ticks_actual.data[10] if self.latest_ticks_actual else 0),
                     "%.0f" % (self.latest_ticks_actual.data[11] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[12] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[13] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[14] if self.latest_ticks_actual else 0),
+                    "%.0f" % (self.latest_ticks_actual.data[15] if self.latest_ticks_actual else 0),
                 ])
 
                 # Detect swing started (cmd_support transitions False)

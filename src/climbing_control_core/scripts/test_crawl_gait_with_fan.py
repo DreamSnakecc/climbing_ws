@@ -54,7 +54,7 @@ from climbing_msgs.msg import (
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
-DEFAULT_MOTOR_IDS = [11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]
+DEFAULT_MOTOR_IDS = [11, 1, 2, 15, 12, 3, 4, 16, 13, 5, 6, 17, 14, 7, 8, 18]
 ACTUAL_TRACKING_DIAG_FIELDS = [
     ("actual_tracking_error_m", 16, 0.0),
     ("actual_tracking_normal_error_m", 17, 0.0),
@@ -349,7 +349,7 @@ class CrawlGaitWithFanTester(object):
         return False
 
     # ------------------------------------------------------------------ #
-    # INIT hold check  (same logic as test_crawl_gait.py)
+    # INIT hold check
     # ------------------------------------------------------------------ #
     def _snapshot_init_state(self):
         """One-shot snapshot of state, targets, UJC for diagnostic printout"""
