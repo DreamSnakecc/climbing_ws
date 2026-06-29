@@ -204,6 +204,7 @@ class SwingLegController(object):
         self.preload_normal_force_limit_n = self._float_cfg("preload_normal_force_limit_n", 15.0, 0.0)
         self.attach_normal_force_limit_n = self._float_cfg("attach_normal_force_limit_n", 25.0, 0.0)
         self.compliant_velocity_limit = self._float_list_cfg("compliant_velocity_limit_mps", [0.03, 0.03, 0.035])
+        self.compliant_admittance_enabled = bool(self._cfg("compliant_admittance_enabled", True))
         self.compliant_normal_velocity_limit_mps = self._float_cfg(
             "compliant_normal_velocity_limit_mps",
             max(self.compliant_velocity_limit),
@@ -1075,6 +1076,15 @@ class SwingLegController(object):
         state["compliant_normal_offset"] = next_offset
         return next_offset, next_velocity
 
+    def _normal_admittance_command(self, leg_name, state, dt):
+        if not self.compliant_admittance_enabled:
+            state["compliant_force_estimate"] = 0.0
+            state["compliant_normal_offset"] = 0.0
+            state["compliant_normal_velocity"] = 0.0
+            return 0.0, 0.0
+        measured_force_n = self._estimate_leg_normal_force(leg_name, state)
+        return self._update_normal_admittance(state, measured_force_n, dt)
+
     def _freeze_compliant_state(self, state, frozen_position):
         frozen_target = self._clamp_position(
             frozen_position,
@@ -1559,14 +1569,14 @@ class SwingLegController(object):
                     now_sec,
                 )
                 if endpoint_hold_complete and tracking_ready and servo_tracking_ready:
-                    self._capture_compliant_torque_bias(leg_name, state)
+                    if self.compliant_admittance_enabled:
+                        self._capture_compliant_torque_bias(leg_name, state)
                     self._set_phase(state, self.PHASE_ADMIT, now_sec)
             normal_force_limit = self.preload_normal_force_limit_n
             support_leg = False
 
         elif phase == self.PHASE_ADMIT:
-            measured_force_n = self._estimate_leg_normal_force(leg_name, state)
-            normal_offset, normal_velocity = self._update_normal_admittance(state, measured_force_n, dt)
+            normal_offset, normal_velocity = self._normal_admittance_command(leg_name, state, dt)
             target_normal_scalar = vector_dot(state["preload_target"], self.wall_normal_body) + normal_offset
             cmd_position = self._clamp_position(
                 self._compose_tangent_and_normal(state["attach_target"], target_normal_scalar),

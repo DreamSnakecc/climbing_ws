@@ -21,7 +21,8 @@ CSV fields:
                swing_leg, swing_cycle_idx
   Body: body_x, body_vx, est_vx
   Legx4: phase, command xyz/support, fan RPM/current, attachment state,
-         measured UJC, actual-tracking diagnostics, and endpoint-hold state.
+         measured UJC, command-frame FK tracking, actual-tracking diagnostics,
+         and endpoint-hold state.
   Motors: per-ID target tick, board-feedback tick/velocity, and tracking error tick.
 
 Prerequisites:
@@ -36,10 +37,15 @@ from __future__ import print_function
 import argparse
 import csv
 import datetime as _dt
+import math
 import os
 import sys
 import threading
 import time
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
 import rospy
 from sensor_msgs.msg import JointState
@@ -51,10 +57,32 @@ from climbing_msgs.msg import (
     EstimatedState,
     LegCenterCommand,
 )
+from actual_tracking import (
+    estimate_tick_lag,
+    lag_compensated_tracking_samples,
+    summarize_tracking_samples,
+    tracking_sample_is_valid,
+    trajectory_tracking_metrics,
+    ujc_body_to_command_position,
+)
 
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
 DEFAULT_MOTOR_IDS = [11, 1, 2, 15, 12, 3, 4, 16, 13, 5, 6, 17, 14, 7, 8, 18]
+DEFAULT_LEG_MOTOR_IDS = {
+    "lf": [11, 1, 2, 15],
+    "rf": [12, 3, 4, 16],
+    "rr": [13, 5, 6, 17],
+    "lr": [14, 7, 8, 18],
+}
+TRACKING_PHASES = ["LIFT", "TRANSFER", "PRELOAD", "ADMIT"]
+TRACKING_CSV_FIELDS = [
+    "actual_cmd_x", "actual_cmd_y", "actual_cmd_z",
+    "tracking_error_x_m", "tracking_error_y_m", "tracking_error_z_m",
+    "tracking_error_m", "tracking_normal_error_m", "tracking_tangent_error_m",
+    "tracking_valid", "tracking_cmd_stamp_s", "tracking_actual_stamp_s",
+    "tracking_time_skew_s", "tracking_feedback_age_s",
+]
 ACTUAL_TRACKING_DIAG_FIELDS = [
     ("actual_tracking_error_m", 16, 0.0),
     ("actual_tracking_normal_error_m", 17, 0.0),
@@ -96,11 +124,16 @@ class CrawlGaitWithFanTester(object):
         self._latest_swing_diag = {leg: [] for leg in LEG_NAMES}
         self._latest_fan_rpm = [0.0, 0.0, 0.0, 0.0]
         self._latest_fan_currents = [0.0, 0.0, 0.0, 0.0]
+        self._leg_configs = rospy.get_param("/legs", {})
+        self._leg_motor_ids = self._load_leg_motor_ids()
         self._motor_ids = self._load_motor_ids()
         self._latest_command_ticks = {}
         self._latest_actual_ticks = {}
+        self._latest_actual_ticks_received_at = {}
         self._latest_actual_velocity_ticks_s = {}
         self._latest_actual_current_raw = {}
+        self._latest_estimated_state_received_at = None
+        self._latest_swing_target_received_at = {leg: None for leg in LEG_NAMES}
         self._current_lsb_ma = float(rospy.get_param("/dynamixel_telemetry/current_lsb_ma", 2.69))
         self._latest_endpoint_diag = {leg: [0.0, 0.0, 0.0] for leg in LEG_NAMES}
 
@@ -114,6 +147,33 @@ class CrawlGaitWithFanTester(object):
             -100.0,
         ))
         self._operating_z_m = operating_z_mm / 1000.0
+        self._nominal_x_m = float(rospy.get_param("/gait_controller/nominal_x", 127.75)) / 1000.0
+        self._nominal_y_m = float(rospy.get_param("/gait_controller/nominal_y", 0.0)) / 1000.0
+        self._base_radius_m = float(rospy.get_param("/gait_controller/base_radius", 203.06)) / 1000.0
+        self._leg_yaw_rad = {
+            leg: math.radians(float(self._leg_configs.get(leg, {}).get("hip_yaw_deg", 0.0)))
+            for leg in LEG_NAMES
+        }
+        self._wall_normal_body = [
+            float(value) for value in rospy.get_param(
+                "/swing_leg_controller/wall_normal_body", [0.0, 0.0, 1.0],
+            )
+        ]
+        self._tracking_tangent_tolerance_m = float(rospy.get_param(
+            "/swing_leg_controller/actual_tracking_tangent_tolerance_m", 0.006,
+        ))
+        self._tracking_normal_tolerance_m = float(rospy.get_param(
+            "/swing_leg_controller/actual_tracking_normal_tolerance_m", 0.004,
+        ))
+        self._tracking_max_age_s = max(float(args.tracking_max_age_s), 0.0)
+        self._tracking_max_skew_s = max(float(args.tracking_max_skew_s), 0.0)
+        self._tracking_samples = {
+            (leg, phase): [] for leg in LEG_NAMES for phase in TRACKING_PHASES
+        }
+        self._tracking_lag_samples = {leg: [] for leg in LEG_NAMES}
+        self._tracking_summary_path = None
+        self._tracking_summary_rows = []
+        self._tracking_overall_status = "INCOMPLETE"
 
         # publishers, latch=False
         self._mission_start_pub = rospy.Publisher(
@@ -229,14 +289,24 @@ class CrawlGaitWithFanTester(object):
             self._latest_body_reference = msg
 
     def _cb_estimated_state(self, msg):
+        received_at = rospy.Time.now().to_sec()
         with self._lock:
             self._latest_estimated_state = msg
+            self._latest_estimated_state_received_at = received_at
+
+    def _load_leg_motor_ids(self):
+        mapping = {}
+        for leg_name in LEG_NAMES:
+            configured = self._leg_configs.get(leg_name, {}).get(
+                "motor_ids", DEFAULT_LEG_MOTOR_IDS[leg_name],
+            )
+            mapping[leg_name] = [int(motor_id) for motor_id in configured]
+        return mapping
 
     def _load_motor_ids(self):
         motor_ids = []
         for leg_name in LEG_NAMES:
-            leg_cfg = rospy.get_param("/legs/" + leg_name, {})
-            for motor_id in leg_cfg.get("motor_ids", []):
+            for motor_id in self._leg_motor_ids.get(leg_name, []):
                 motor_id = int(motor_id)
                 if motor_id not in motor_ids:
                     motor_ids.append(motor_id)
@@ -260,6 +330,7 @@ class CrawlGaitWithFanTester(object):
             self._latest_command_ticks.update(ticks)
 
     def _cb_board_joint_state(self, msg):
+        received_at = rospy.Time.now().to_sec()
         ticks = self._ticks_by_id(msg)
         if not ticks:
             return
@@ -267,6 +338,8 @@ class CrawlGaitWithFanTester(object):
         currents = self._values_by_id(msg.name, msg.effort)
         with self._lock:
             self._latest_actual_ticks.update(ticks)
+            for motor_id in ticks:
+                self._latest_actual_ticks_received_at[int(motor_id)] = received_at
             self._latest_actual_velocity_ticks_s.update(velocities)
             self._latest_actual_current_raw.update(currents)
 
@@ -296,8 +369,10 @@ class CrawlGaitWithFanTester(object):
     def _cb_swing_target(self, msg):
         if msg.leg_name not in LEG_NAMES:
             return
+        received_at = rospy.Time.now().to_sec()
         with self._lock:
             self._latest_swing_targets[msg.leg_name] = msg
+            self._latest_swing_target_received_at[msg.leg_name] = received_at
 
     def _cb_fan_rpm(self, msg):
         values = [float(v) for v in msg.data[:4]]
@@ -320,6 +395,17 @@ class CrawlGaitWithFanTester(object):
         if self._t_zero_ros is None:
             return 0.0
         return (rospy.Time.now() - self._t_zero_ros).to_sec()
+
+    @staticmethod
+    def _message_stamp_sec(msg, fallback):
+        if msg is not None:
+            try:
+                stamp = float(msg.header.stamp.to_sec())
+                if stamp > 0.0:
+                    return stamp
+            except (AttributeError, TypeError, ValueError):
+                pass
+        return 0.0 if fallback is None else float(fallback)
 
     def _wait_streams(self, timeout_s):
         """Block until all subscriptions received once. Returns False on timeout"""
@@ -629,6 +715,8 @@ class CrawlGaitWithFanTester(object):
                 "motor_%d_actual_current_a" % motor_id,
                 "motor_%d_error_tick" % motor_id,
             ])
+        for leg in LEG_NAMES:
+            cols.extend(["%s_%s" % (leg, field) for field in TRACKING_CSV_FIELDS])
         return cols
 
     def _open_csv(self):
@@ -655,6 +743,137 @@ class CrawlGaitWithFanTester(object):
             self._csv_file = None
             self._csv_writer = None
 
+    def _build_tracking_summary_rows(self):
+        rows = []
+        for leg in LEG_NAMES:
+            lag = estimate_tick_lag(
+                self._tracking_lag_samples.get(leg, []),
+                self._leg_motor_ids.get(leg, []),
+                ["LIFT", "TRANSFER", "PRELOAD"],
+                maximum_lag_s=0.3,
+            )
+            for phase in TRACKING_PHASES:
+                samples = self._tracking_samples.get((leg, phase), [])
+                if not samples:
+                    continue
+                summary = summarize_tracking_samples(
+                    samples,
+                    tangent_tolerance_m=self._tracking_tangent_tolerance_m,
+                    normal_tolerance_m=self._tracking_normal_tolerance_m,
+                    minimum_valid_samples=5,
+                    minimum_valid_ratio=0.95,
+                )
+                compensated_samples = lag_compensated_tracking_samples(
+                    self._tracking_lag_samples.get(leg, []),
+                    lag["shift_samples"],
+                    phase,
+                    self._wall_normal_body,
+                )
+                compensated = summarize_tracking_samples(
+                    compensated_samples,
+                    tangent_tolerance_m=self._tracking_tangent_tolerance_m,
+                    normal_tolerance_m=self._tracking_normal_tolerance_m,
+                    minimum_valid_samples=5,
+                    minimum_valid_ratio=0.95,
+                )
+                summary["leg"] = leg
+                summary["phase"] = phase
+                summary["estimated_lag_s"] = lag["lag_s"]
+                summary["lag_pair_count"] = lag["pair_count"]
+                summary["joint_tick_rmse_raw"] = lag["zero_lag_tick_rmse"]
+                summary["joint_tick_rmse_aligned"] = lag["aligned_tick_rmse"]
+                summary["lag_compensated_total_rmse_m"] = compensated["total_rmse_m"]
+                summary["lag_compensated_total_p95_m"] = compensated["total_p95_m"]
+                summary["lag_compensated_normal_p95_m"] = compensated["normal_p95_m"]
+                summary["lag_compensated_tangent_p95_m"] = compensated["tangent_p95_m"]
+                rows.append(summary)
+        statuses = [row["status"] for row in rows]
+        if "FAIL" in statuses:
+            overall = "FAIL"
+        elif not statuses or "INCOMPLETE" in statuses:
+            overall = "INCOMPLETE"
+        else:
+            overall = "PASS"
+        self._tracking_summary_rows = rows
+        self._tracking_overall_status = overall
+        return rows
+
+    def _write_tracking_summary(self):
+        rows = self._build_tracking_summary_rows()
+        if not self._csv_path:
+            return
+        path = os.path.splitext(self._csv_path)[0] + "_tracking_summary.csv"
+        columns = [
+            "overall_status", "source", "leg", "phase", "status",
+            "total_samples", "valid_samples", "valid_ratio",
+            "total_rmse_mm", "total_p95_mm", "total_max_mm",
+            "normal_rmse_mm", "normal_p95_mm", "normal_max_mm",
+            "tangent_rmse_mm", "tangent_p95_mm", "tangent_max_mm",
+            "normal_tolerance_mm", "tangent_tolerance_mm",
+            "minimum_valid_samples", "minimum_valid_ratio",
+            "maximum_feedback_age_s", "maximum_time_skew_s",
+            "estimated_lag_ms", "lag_pair_count",
+            "joint_tick_rmse_raw", "joint_tick_rmse_aligned",
+            "lag_compensated_total_rmse_mm", "lag_compensated_total_p95_mm",
+            "lag_compensated_normal_p95_mm", "lag_compensated_tangent_p95_mm",
+        ]
+        try:
+            summary_file = open(path, "w")
+            writer = csv.writer(summary_file)
+            writer.writerow(columns)
+            output_rows = rows or [{
+                "leg": "ALL", "phase": "ALL", "status": "INCOMPLETE",
+                "total_samples": 0, "valid_samples": 0, "valid_ratio": 0.0,
+                "total_rmse_m": 0.0, "total_p95_m": 0.0, "total_max_m": 0.0,
+                "normal_rmse_m": 0.0, "normal_p95_m": 0.0, "normal_max_m": 0.0,
+                "tangent_rmse_m": 0.0, "tangent_p95_m": 0.0, "tangent_max_m": 0.0,
+                "estimated_lag_s": 0.0, "lag_pair_count": 0,
+                "joint_tick_rmse_raw": 0.0, "joint_tick_rmse_aligned": 0.0,
+                "lag_compensated_total_rmse_m": 0.0,
+                "lag_compensated_total_p95_m": 0.0,
+                "lag_compensated_normal_p95_m": 0.0,
+                "lag_compensated_tangent_p95_m": 0.0,
+            }]
+            for summary in output_rows:
+                writer.writerow([
+                    self._tracking_overall_status,
+                    "encoder_fk",
+                    summary["leg"],
+                    summary["phase"],
+                    summary["status"],
+                    summary["total_samples"],
+                    summary["valid_samples"],
+                    "%.6f" % summary["valid_ratio"],
+                    "%.3f" % (1000.0 * summary["total_rmse_m"]),
+                    "%.3f" % (1000.0 * summary["total_p95_m"]),
+                    "%.3f" % (1000.0 * summary["total_max_m"]),
+                    "%.3f" % (1000.0 * summary["normal_rmse_m"]),
+                    "%.3f" % (1000.0 * summary["normal_p95_m"]),
+                    "%.3f" % (1000.0 * summary["normal_max_m"]),
+                    "%.3f" % (1000.0 * summary["tangent_rmse_m"]),
+                    "%.3f" % (1000.0 * summary["tangent_p95_m"]),
+                    "%.3f" % (1000.0 * summary["tangent_max_m"]),
+                    "%.3f" % (1000.0 * self._tracking_normal_tolerance_m),
+                    "%.3f" % (1000.0 * self._tracking_tangent_tolerance_m),
+                    5,
+                    "0.950000",
+                    "%.6f" % self._tracking_max_age_s,
+                    "%.6f" % self._tracking_max_skew_s,
+                    "%.3f" % (1000.0 * summary["estimated_lag_s"]),
+                    summary["lag_pair_count"],
+                    "%.3f" % summary["joint_tick_rmse_raw"],
+                    "%.3f" % summary["joint_tick_rmse_aligned"],
+                    "%.3f" % (1000.0 * summary["lag_compensated_total_rmse_m"]),
+                    "%.3f" % (1000.0 * summary["lag_compensated_total_p95_m"]),
+                    "%.3f" % (1000.0 * summary["lag_compensated_normal_p95_m"]),
+                    "%.3f" % (1000.0 * summary["lag_compensated_tangent_p95_m"]),
+                ])
+            summary_file.close()
+            self._tracking_summary_path = path
+            rospy.loginfo("test_crawl_gait_with_fan: tracking summary CSV -> %s", path)
+        except (IOError, OSError, ValueError) as exc:
+            rospy.logerr("test_crawl_gait_with_fan: failed to write tracking summary: %s", exc)
+
     def _detect_swing_leg(self, swings):
         """Return the name of the leg currently in swing (support_leg=False), or '' if none."""
         for leg in LEG_NAMES:
@@ -676,12 +895,16 @@ class CrawlGaitWithFanTester(object):
             fan_curr = list(self._latest_fan_currents)
             command_ticks = dict(self._latest_command_ticks)
             actual_ticks = dict(self._latest_actual_ticks)
+            actual_ticks_received_at = dict(self._latest_actual_ticks_received_at)
             actual_velocity_ticks_s = dict(self._latest_actual_velocity_ticks_s)
             actual_current_raw = dict(self._latest_actual_current_raw)
             endpoint_diag = {leg: list(values) for leg, values in self._latest_endpoint_diag.items()}
+            estimated_state_received_at = self._latest_estimated_state_received_at
+            swing_target_received_at = dict(self._latest_swing_target_received_at)
 
         wall_time = time.time()
         elapsed = self._rel_now()
+        now_ros = rospy.Time.now().to_sec()
 
         # body forward velocity (commanded vs estimated)
         body_x = 0.0
@@ -738,6 +961,7 @@ class CrawlGaitWithFanTester(object):
             "%.4f" % body_vx,
             "%.4f" % est_vx,
         ]
+        tracking_row = []
 
         for leg_index, leg in enumerate(LEG_NAMES):
             cmd = swings.get(leg)
@@ -760,7 +984,8 @@ class CrawlGaitWithFanTester(object):
             ujc_x = 0.0
             ujc_y = 0.0
             ujc_z = 0.0
-            if est is not None and len(est.universal_joint_center_positions) > leg_index:
+            estimated_available = est is not None and len(est.universal_joint_center_positions) > leg_index
+            if estimated_available:
                 ujc_x = float(est.universal_joint_center_positions[leg_index].x)
                 ujc_y = float(est.universal_joint_center_positions[leg_index].y)
                 ujc_z = float(est.universal_joint_center_positions[leg_index].z)
@@ -792,6 +1017,95 @@ class CrawlGaitWithFanTester(object):
                 for _, index, default in ACTUAL_TRACKING_DIAG_FIELDS
             ])
 
+            command_available = cmd is not None
+            actual_cmd = None
+            tracking_metrics = None
+            if estimated_available:
+                actual_cmd = ujc_body_to_command_position(
+                    [ujc_x, ujc_y, ujc_z],
+                    self._leg_yaw_rad[leg],
+                    self._base_radius_m,
+                    self._nominal_x_m,
+                    self._nominal_y_m,
+                )
+                if command_available:
+                    tracking_metrics = trajectory_tracking_metrics(
+                        [cmd_x, cmd_y, cmd_z], actual_cmd, self._wall_normal_body,
+                    )
+
+            command_stamp_s = self._message_stamp_sec(
+                cmd, swing_target_received_at.get(leg),
+            )
+            actual_stamp_s = self._message_stamp_sec(est, estimated_state_received_at)
+            time_skew_s = actual_stamp_s - command_stamp_s
+            estimated_feedback_age_s = (
+                float("inf") if estimated_state_received_at is None
+                else max(0.0, now_ros - float(estimated_state_received_at))
+            )
+            motor_feedback_age_s = {}
+            for motor_id in self._leg_motor_ids.get(leg, []):
+                received_at = actual_ticks_received_at.get(int(motor_id))
+                if received_at is not None and int(motor_id) in actual_ticks:
+                    motor_feedback_age_s[int(motor_id)] = max(
+                        0.0, now_ros - float(received_at),
+                    )
+            tracking_valid = tracking_sample_is_valid(
+                command_available,
+                estimated_available,
+                self._leg_motor_ids.get(leg, []),
+                motor_feedback_age_s,
+                estimated_feedback_age_s,
+                time_skew_s,
+                self._tracking_max_age_s,
+                self._tracking_max_skew_s,
+            )
+            feedback_ages = list(motor_feedback_age_s.values())
+            feedback_ages.append(estimated_feedback_age_s)
+            feedback_age_s = max(feedback_ages) if feedback_ages else float("inf")
+
+            metric_values = tracking_metrics or {}
+            actual_values = actual_cmd or [None, None, None]
+            tracking_row.extend([
+                "" if actual_values[0] is None else "%.6f" % actual_values[0],
+                "" if actual_values[1] is None else "%.6f" % actual_values[1],
+                "" if actual_values[2] is None else "%.6f" % actual_values[2],
+                "" if tracking_metrics is None else "%.6f" % metric_values["error_x_m"],
+                "" if tracking_metrics is None else "%.6f" % metric_values["error_y_m"],
+                "" if tracking_metrics is None else "%.6f" % metric_values["error_z_m"],
+                "" if tracking_metrics is None else "%.6f" % metric_values["total_error_m"],
+                "" if tracking_metrics is None else "%.6f" % metric_values["normal_error_m"],
+                "" if tracking_metrics is None else "%.6f" % metric_values["tangent_error_m"],
+                int(bool(tracking_valid)),
+                "%.6f" % command_stamp_s,
+                "%.6f" % actual_stamp_s,
+                "%.6f" % time_skew_s,
+                "" if math.isinf(feedback_age_s) or math.isnan(feedback_age_s) else "%.6f" % feedback_age_s,
+            ])
+            leg_motor_ids = self._leg_motor_ids.get(leg, [])
+            self._tracking_lag_samples[leg].append({
+                "stamp_s": now_ros,
+                "phase": phase_name,
+                "valid": bool(tracking_valid and tracking_metrics is not None),
+                "command_position": [cmd_x, cmd_y, cmd_z] if command_available else None,
+                "actual_position": list(actual_cmd) if actual_cmd is not None else None,
+                "target_ticks": {
+                    int(motor_id): float(command_ticks[int(motor_id)])
+                    for motor_id in leg_motor_ids if int(motor_id) in command_ticks
+                },
+                "actual_ticks": {
+                    int(motor_id): float(actual_ticks[int(motor_id)])
+                    for motor_id in leg_motor_ids if int(motor_id) in actual_ticks
+                },
+            })
+            if phase_name in TRACKING_PHASES:
+                sample = {
+                    "valid": bool(tracking_valid and tracking_metrics is not None),
+                    "total_error_m": float(metric_values.get("total_error_m", 0.0)),
+                    "normal_error_m": float(metric_values.get("normal_error_m", 0.0)),
+                    "tangent_error_m": float(metric_values.get("tangent_error_m", 0.0)),
+                }
+                self._tracking_samples[(leg, phase_name)].append(sample)
+
         for motor_id in self._motor_ids:
             target_tick = command_ticks.get(motor_id)
             actual_tick = actual_ticks.get(motor_id)
@@ -808,6 +1122,8 @@ class CrawlGaitWithFanTester(object):
                 "" if actual_current is None else "%.6f" % (actual_current * self._current_lsb_ma / 1000.0),
                 "" if error_tick is None else "%.0f" % error_tick,
             ])
+
+        row.extend(tracking_row)
 
         return row
 
@@ -903,14 +1219,24 @@ class CrawlGaitWithFanTester(object):
         # Remove this comment if sequential shutdown becomes needed again.
 
         self._close_csv()
+        self._write_tracking_summary()
         self._print_summary()
-        return 0 if not self._fault_seen else 6
+        if self._fault_seen:
+            return 6
+        if self._tracking_overall_status == "FAIL":
+            return 7
+        if self._tracking_overall_status == "INCOMPLETE":
+            return 8
+        return 0
 
     def _print_summary(self):
         rospy.loginfo("=" * 72)
         rospy.loginfo("test_crawl_gait_with_fan: summary")
         rospy.loginfo("=" * 72)
         rospy.loginfo("  csv: %s", self._csv_path)
+        rospy.loginfo("  tracking summary: %s", self._tracking_summary_path or "(not written)")
+        rospy.loginfo("  tracking source: encoder_fk")
+        rospy.loginfo("  tracking overall: %s", self._tracking_overall_status)
         rospy.loginfo("  samples: %d", self._sample_count)
         rospy.loginfo("  total swing cycles: %d", self._swing_cycle_idx)
         rospy.loginfo("")
@@ -938,6 +1264,29 @@ class CrawlGaitWithFanTester(object):
                     s["mean_vx"], s["min_vx"], s["max_vx"],
                     s["samples"],
                 ))
+        if self._tracking_summary_rows:
+            rospy.loginfo("")
+            rospy.loginfo("  foot trajectory tracking (P95 thresholds: tangent %.1f mm, normal %.1f mm):",
+                          1000.0 * self._tracking_tangent_tolerance_m,
+                          1000.0 * self._tracking_normal_tolerance_m)
+            for summary in self._tracking_summary_rows:
+                rospy.loginfo(
+                    "    %s %-8s %-10s valid=%d/%d (%.1f%%) RMSE=%.2fmm "
+                    "P95[n=%.2f,t=%.2f]mm max=%.2fmm lag=%.0fms "
+                    "tickRMSE=%.1f->%.1f alignedP95[n=%.2f,t=%.2f]mm",
+                    summary["leg"], summary["phase"], summary["status"],
+                    summary["valid_samples"], summary["total_samples"],
+                    100.0 * summary["valid_ratio"],
+                    1000.0 * summary["total_rmse_m"],
+                    1000.0 * summary["normal_p95_m"],
+                    1000.0 * summary["tangent_p95_m"],
+                    1000.0 * summary["total_max_m"],
+                    1000.0 * summary["estimated_lag_s"],
+                    summary["joint_tick_rmse_raw"],
+                    summary["joint_tick_rmse_aligned"],
+                    1000.0 * summary["lag_compensated_normal_p95_m"],
+                    1000.0 * summary["lag_compensated_tangent_p95_m"],
+                )
         rospy.loginfo("=" * 72)
 
 
@@ -952,6 +1301,14 @@ def parse_args(argv):
     parser.add_argument(
         "--log-rate-hz", type=float, default=50.0,
         help="CSV sample rate (Hz, default 50)",
+    )
+    parser.add_argument(
+        "--tracking-max-age-s", type=float, default=0.1,
+        help="Maximum encoder/state feedback age for a valid tracking sample (s, default 0.1)",
+    )
+    parser.add_argument(
+        "--tracking-max-skew-s", type=float, default=0.05,
+        help="Maximum command/state timestamp skew for a valid tracking sample (s, default 0.05)",
     )
     parser.add_argument(
         "--hold-check-s", type=float, default=3.0,

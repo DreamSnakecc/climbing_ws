@@ -36,8 +36,8 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 25000.0
-  climb_rpm: 25000.0
+  attach_rpm: 35000.0
+  climb_rpm: 35000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
@@ -164,9 +164,9 @@ state_logger:
 swing_leg_controller:
   publish_rate_hz: 50.0
   swing_duration_s: 0.65
-  clearance_m: 0.01
+  clearance_m: 0.10
   # Lift/press along wall_normal during swing: positive lifts, negative presses, 0=hold height.
-  swing_lift_normal_m: 0.005
+  swing_lift_normal_m: 0.03
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
   stride_length_m: 0.06
@@ -186,9 +186,9 @@ swing_leg_controller:
   # LIFT_SWING phases: retract + bezier swing to target
   tangential_align_duration_s: 0.28
   # Fixed-stride phases: normal lift first, then joint-space transfer with L/4 body advance.
-  lift_duration_s: 0.25 #0.20
+  lift_duration_s: 0.5 #0.20
   transfer_duration_s: 0.8 #0.28
-  preload_duration_s: 0.25 #0.16
+  preload_duration_s: 0.5 #0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
@@ -199,7 +199,8 @@ swing_leg_controller:
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
   compliant_velocity_limit_mps: [0.3, 0.3, 0.35]
-  # ADMIT uses single-axis normal admittance driven by J^T F ~= tau_ext.
+  # ADMIT keeps attachment confirmation active even when normal admittance is disabled.
+  compliant_admittance_enabled: false
   compliant_normal_velocity_limit_mps: 0.035
   compliant_normal_offset_limit_m: 0.012
   compliant_admittance_mass: 0.35
@@ -224,7 +225,7 @@ swing_leg_controller:
   # Test-only joint-tick endpoint gate.  When enabled, LIFT, TRANSFER and
   # PRELOAD each hold their final command until all four leg joints stay
   # within tolerance, otherwise the phase remains at that endpoint.
-  servo_tracking_gate_enabled: false
+  servo_tracking_gate_enabled: true
   servo_tracking_tolerance_ticks: 20.0
   servo_tracking_hold_s: 0.1
   servo_tracking_timeout_s: 3.0
@@ -472,12 +473,14 @@ left_board:
     "2": {p: 1200, i: 0, d: 0}
     "8": {p: 1200, i: 0, d: 0}
   position_profiles:
-    "11": {velocity: 200, acceleration: 100}
-    "1": {velocity: 200, acceleration: 100}
-    "2": {velocity: 200, acceleration: 100}
-    "14": {velocity: 200, acceleration: 100}
-    "7": {velocity: 200, acceleration: 100}
-    "8": {velocity: 200, acceleration: 100}
+    "11": {velocity: 200, acceleration: 200}
+    "1": {velocity: 200, acceleration: 200}
+    "2": {velocity: 200, acceleration: 200}
+    "15": {velocity: 200, acceleration: 200}
+    "14": {velocity: 200, acceleration: 200}
+    "7": {velocity: 200, acceleration: 200}
+    "8": {velocity: 200, acceleration: 200}
+    "18": {velocity: 200, acceleration: 200}
 
 right_board:
   device_name: /dev/ttyUSB_r
@@ -490,9 +493,11 @@ right_board:
     "4": {p: 1200, i: 0, d: 0}
     "6": {p: 1200, i: 0, d: 0}
   position_profiles:
-    "12": {velocity: 200, acceleration: 100}
-    "3": {velocity: 200, acceleration: 100}
-    "4": {velocity: 200, acceleration: 100}
-    "13": {velocity: 200, acceleration: 100}
-    "5": {velocity: 200, acceleration: 100}
-    "6": {velocity: 200, acceleration: 100}
+    "12": {velocity: 200, acceleration: 200}
+    "3": {velocity: 200, acceleration: 200}
+    "4": {velocity: 200, acceleration: 200}
+    "16": {velocity: 200, acceleration: 200}
+    "13": {velocity: 200, acceleration: 200}
+    "5": {velocity: 200, acceleration: 200}
+    "6": {velocity: 200, acceleration: 200}
+    "17": {velocity: 200, acceleration: 200}
