@@ -397,8 +397,13 @@ gait_controller:
   # Legacy-named nominal_* parameters now describe the foot endpoint in leg frame 0.
   operating_universal_joint_center_x: 267.13 #280.97 #279.71 #267.13 # 270.21 237.04
   operating_universal_joint_center_y: 0.0
-  operating_universal_joint_center_z: -287.3
-  # Automatic control uses the operating foot endpoint as the support/work point.
+<<<<<<< HEAD
+  operating_universal_joint_center_z: -110 #-60  #-20 #-110.0 # -100.0 -150.0
+=======
+  operating_universal_joint_center_z: -110 #-60 #-20 #-110.0 # -100.0 -150.0
+>>>>>>> f3fcdaa0c3ae101a693aa6e3043e6f04f9222a8b
+  # Automatic control uses the operating UJC as the support/work point while
+  # nominal_* remains the IK/home reference.
   startup_target_enabled: true
   startup_target_hold_s: 0.5
   startup_target_move_duration_s: 5.0
