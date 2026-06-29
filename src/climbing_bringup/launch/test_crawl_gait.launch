@@ -12,18 +12,18 @@
     Prereqs:
       - Jetson: roslaunch climbing_bringup jetson_bringup.launch
         enable_auto_current_control:=false
-        (leg_ik_executor completes startup move to operating UJC;
+        (leg_ik_executor completes startup move to the operating foot endpoint;
          dynamixel_bridge current control disabled so supporting legs stay static.)
 
     Params:
-      ujc_z_mm                        nominal UJC z (default -195.5)
-      linear_velocity_x               body planner x velocity (default 0.01 m/s)
+      ujc_z_mm                        legacy name for nominal foot endpoint z (default -375.8)
+      linear_velocity_x               body planner x velocity (default 0.0 m/s)
       use_contact_feedback            false=trajectory+time only (default false)
       enable_auto_adhesion_commands   false=no fan commands (default false for flat ground)
       (additional overrides: all_hold_dwell_s=0.2, tangential_align_duration_s=0.5, clearance_m=0.01)
   -->
 
-  <arg name="ujc_z_mm" default="-195.5" />
+  <arg name="ujc_z_mm" default="-375.8" />
   <arg name="mission_auto_start" default="false" />
   <arg name="enable_auto_adhesion_commands" default="false" />
   <arg name="boost_after_preload_without_contact" default="true" />
@@ -33,9 +33,8 @@
   <arg name="use_contact_feedback" default="false" />
   <arg name="stride_length_m" default="0.06" />
   <!--
-    Flat-ground testing explicitly defaults stride_length_m to 0 because fixed-stride
-    wall gait requires live fan RPM gating.  Override only when fan commands and
-    feedback are active:
+    This test defaults stride_length_m to 0.06. Fixed-stride wall gait requires
+    live fan RPM gating; use 0.0 when fan commands and feedback are unavailable:
       >0  enables adhesion-gated fixed-stride gait.
       Swing distance = 3*stride_length_m/4, body advances stride_length_m/4 per leg.
       The body moves forward as a kinematic consequence of sequential leg swings,

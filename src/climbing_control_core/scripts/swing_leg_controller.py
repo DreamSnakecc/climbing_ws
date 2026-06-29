@@ -16,7 +16,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from workspace_guard import straight_transfer_path, workspace_guard
+from workspace_guard import joint_transfer_path, workspace_guard
 from actual_tracking import tracking_readiness
 
 
@@ -1164,7 +1164,7 @@ class SwingLegController(object):
         }
 
     def _prepare_transfer_path(self, leg_name, state):
-        """Preflight every point on the straight fixed-z transfer path."""
+        """Preflight a joint-interpolated transfer path with free intermediate z."""
         state["transfer_path"] = []
         state["transfer_path_valid"] = False
         state["transfer_path_error"] = ""
@@ -1177,13 +1177,14 @@ class SwingLegController(object):
         swing_target = list(state["lift_swing_target"])
         reference_joint_deg = [math.degrees(value) for value in state.get("last_joint_vector", [0.0, 0.0, 0.0, 0.0])]
         sample_count = max(2, int(round(self.rate_hz * self.transfer_duration_s)) + 1)
-        path = straight_transfer_path(
+        path = joint_transfer_path(
             leg_name=leg_name,
-            start_x_m=lift_target[0],
-            end_x_m=lift_target[0] + self._swing_distance_m,
-            start_y_m=lift_target[1],
-            end_y_m=swing_target[1],
-            fixed_z_m=lift_target[2],
+            start_position_m=lift_target,
+            end_position_m=[
+                lift_target[0] + self._swing_distance_m,
+                swing_target[1],
+                swing_target[2],
+            ],
             model=self._workspace_model(leg_name),
             joint_limits_deg=self.joint_limit_deg,
             reference_joint_deg=reference_joint_deg,
@@ -1191,7 +1192,7 @@ class SwingLegController(object):
             fk_tol_m=self.workspace_fk_tolerance_m,
         )
         if not path:
-            state["transfer_path_error"] = "no reachable fixed-z transfer path"
+            state["transfer_path_error"] = "no reachable joint-space transfer path"
             rospy.logwarn(
                 "transfer path unavailable for %s: %s",
                 leg_name,
@@ -1463,7 +1464,7 @@ class SwingLegController(object):
                 if not state.get("transfer_path_valid", False):
                     rospy.logwarn_throttle(
                         1.0,
-                        "holding %s at LIFT: constrained transfer path unavailable (%s)",
+                        "holding %s at LIFT: transfer path unavailable (%s)",
                         leg_name,
                         state.get("transfer_path_error", "unknown error"),
                     )

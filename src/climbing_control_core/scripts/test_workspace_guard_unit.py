@@ -6,7 +6,7 @@ from workspace_guard import (
     _fk_from_joint_deg,
     _ik_candidates_deg,
     _within_limits,
-    straight_transfer_path,
+    joint_transfer_path,
     workspace_guard,
 )
 
@@ -123,47 +123,40 @@ def run_tests():
     assert clamped2 in [True, False]
     assert len(checked2) == 3
 
-    # Straight transfer holds z/y and validates every point with 4DOF IK.
+    # Joint-space transfer keeps the endpoints but allows intermediate z to vary.
     transfer_start = _reachable_center_body_from_joint(model, "lf", [25.0, 75.0, -78.0, 3.0])
-    transfer_end_x = transfer_start[0] + 0.03
-    path = straight_transfer_path(
+    transfer_end = [transfer_start[0] + 0.03, transfer_start[1], transfer_start[2]]
+    path = joint_transfer_path(
         leg_name="lf",
-        start_x_m=transfer_start[0],
-        end_x_m=transfer_end_x,
-        start_y_m=transfer_start[1],
-        end_y_m=transfer_start[1],
-        fixed_z_m=transfer_start[2],
+        start_position_m=transfer_start,
+        end_position_m=transfer_end,
         model=model,
         joint_limits_deg=limits,
         reference_joint_deg=[25.0, 75.0, -78.0, 3.0],
         sample_count=31,
         fk_tol_m=0.003,
     )
-    assert path is not None, "constrained transfer should have a reachable path"
-    assert abs(path[0]["position"][0] - transfer_start[0]) < 1e-9
-    assert abs(path[-1]["position"][0] - transfer_end_x) < 1e-9
-    assert all(abs(point["position"][2] - transfer_start[2]) < 1e-9 for point in path)
-    assert all(abs(point["position"][1] - transfer_start[1]) < 1e-9 for point in path)
+    assert path is not None, "joint-space transfer should have a reachable path"
+    assert max(abs(path[0]["position"][axis] - transfer_start[axis]) for axis in range(3)) < 1e-9
+    assert max(abs(path[-1]["position"][axis] - transfer_end[axis]) for axis in range(3)) < 1e-9
+    assert any(abs(point["position"][2] - transfer_start[2]) > 1e-6 for point in path[1:-1])
     assert all(point["joint_deg"][2] < 0.0 for point in path)
     assert any(abs(point["joint_deg"][1] + point["joint_deg"][2]) > 5.0 for point in path)
     assert all(abs(point["q234_sum_deg"]) <= 5.0 + 1e-6 for point in path)
     assert all(point["fk_error_m"] <= 0.003 for point in path)
 
-    # No fallback is permitted when the requested straight path is unreachable.
-    impossible = straight_transfer_path(
+    # No fallback is permitted when a requested endpoint is unreachable.
+    impossible = joint_transfer_path(
         leg_name="lf",
-        start_x_m=transfer_start[0],
-        end_x_m=transfer_start[0] + 1.0,
-        start_y_m=transfer_start[1],
-        end_y_m=transfer_start[1],
-        fixed_z_m=transfer_start[2],
+        start_position_m=transfer_start,
+        end_position_m=[transfer_start[0] + 1.0, transfer_start[1], transfer_start[2]],
         model=model,
         joint_limits_deg=limits,
         reference_joint_deg=[25.0, 75.0, -78.0, 3.0],
         sample_count=31,
         fk_tol_m=0.003,
     )
-    assert impossible is None, "unreachable straight path must fail closed"
+    assert impossible is None, "unreachable transfer endpoint must fail closed"
 
     print("workspace_guard unit tests passed")
 

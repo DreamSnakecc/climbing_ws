@@ -141,44 +141,66 @@ def _to_leg_frame_m(leg_name, center_body_m, model):
     ]
 
 
-def straight_transfer_path(
+def _from_leg_frame_m(leg_name, point_leg_m, model):
+    yaw = float(model["leg_yaw_rad"][leg_name])
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    dx_leg = float(point_leg_m[0]) - float(model["nominal_x_m"])
+    dy_leg = float(point_leg_m[1]) - float(model["nominal_y_m"])
+    return [
+        cos_yaw * dx_leg - sin_yaw * dy_leg,
+        sin_yaw * dx_leg + cos_yaw * dy_leg,
+        float(point_leg_m[2]),
+    ]
+
+
+def joint_transfer_path(
     leg_name,
-    start_x_m,
-    end_x_m,
-    start_y_m,
-    end_y_m,
-    fixed_z_m,
+    start_position_m,
+    end_position_m,
     model,
     joint_limits_deg,
     reference_joint_deg,
     sample_count=41,
     fk_tol_m=0.002,
 ):
-    """Preflight a straight fixed-z transfer path with 4DOF IK."""
+    """Generate a reachable transfer by interpolating joints and applying FK."""
     count = max(int(sample_count), 2)
     reference = list(reference_joint_deg) if len(reference_joint_deg) == 4 else [0.0, 90.0, -60.0, -30.0]
     q234_limit = model.get("q234_sum_limit_deg", [-5.0, 5.0])
+    start_leg = _to_leg_frame_m(leg_name, start_position_m, model)
+    end_leg = _to_leg_frame_m(leg_name, end_position_m, model)
+    start_joint = _solve_reachable(
+        start_leg, model, joint_limits_deg, reference, fk_tol_m, q234_limit,
+    )
+    if start_joint is None:
+        return None
+    end_joint = _solve_reachable(
+        end_leg, model, joint_limits_deg, start_joint, fk_tol_m, q234_limit,
+    )
+    if end_joint is None:
+        return None
+
     path = []
     for index in range(count):
         fraction = float(index) / float(count - 1)
-        fixed_x = float(start_x_m) + fraction * (float(end_x_m) - float(start_x_m))
-        desired_y = float(start_y_m) + fraction * (float(end_y_m) - float(start_y_m))
-        position = [fixed_x, desired_y, float(fixed_z_m)]
-        point_leg = _to_leg_frame_m(leg_name, position, model)
-        joint_deg = _solve_reachable(
-            point_leg, model, joint_limits_deg, reference, fk_tol_m, q234_limit,
-        )
-        if joint_deg is None:
+        joint_deg = [
+            float(start_joint[joint_index])
+            + fraction * (float(end_joint[joint_index]) - float(start_joint[joint_index]))
+            for joint_index in range(4)
+        ]
+        if not _within_limits(joint_deg, joint_limits_deg, q234_limit):
             return None
-        fk = _fk_from_joint_deg(joint_deg, model)
-        fk_error = math.sqrt(sum((fk[axis] - point_leg[axis]) ** 2 for axis in range(3)))
+        point_leg = _fk_from_joint_deg(joint_deg, model)
+        position = _from_leg_frame_m(leg_name, point_leg, model)
+        roundtrip_leg = _to_leg_frame_m(leg_name, position, model)
+        fk_error = math.sqrt(sum((roundtrip_leg[axis] - point_leg[axis]) ** 2 for axis in range(3)))
         path.append({
             "position": position,
             "joint_deg": joint_deg,
             "q234_sum_deg": sum(joint_deg[1:4]),
             "fk_error_m": fk_error,
         })
-        reference = list(joint_deg)
     return path
 
 

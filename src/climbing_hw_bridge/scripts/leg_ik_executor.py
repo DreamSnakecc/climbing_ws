@@ -290,6 +290,21 @@ class LegIkExecutor(object):
         q234 = sum(float(candidate_deg[index]) for index in [1, 2, 3])
         return float(self.q234_sum_limit_deg[0]) <= q234 <= float(self.q234_sum_limit_deg[1])
 
+    def _candidate_limit_violations(self, candidate_deg):
+        violations = []
+        for index, key in enumerate(["j1", "j2", "j3", "j4"]):
+            value = float(candidate_deg[index])
+            lower = float(self.joint_limit_deg[key][0])
+            upper = float(self.joint_limit_deg[key][1])
+            if value < lower or value > upper:
+                violations.append("%s=%.3f outside [%.3f,%.3f]" % (key, value, lower, upper))
+        q234 = sum(float(candidate_deg[index]) for index in [1, 2, 3])
+        q234_lower = float(self.q234_sum_limit_deg[0])
+        q234_upper = float(self.q234_sum_limit_deg[1])
+        if q234 < q234_lower or q234 > q234_upper:
+            violations.append("q234=%.3f outside [%.3f,%.3f]" % (q234, q234_lower, q234_upper))
+        return violations
+
     def _ik_solution_cost(self, candidate_deg, reference_deg):
         return sum((float(candidate_deg[index]) - float(reference_deg[index])) ** 2 for index in range(4))
 
@@ -317,12 +332,32 @@ class LegIkExecutor(object):
             candidates.append([math.degrees(q1), q2_deg, q3_deg, -(q2_deg + q3_deg)])
         return candidates
 
-    def _ik_transform_matrix_solve(self, x_mm, y_mm, z_mm, reference_deg=None):
-        candidates = [candidate for candidate in self._ik_candidates_deg(x_mm, y_mm, z_mm) if self._candidate_within_limits(candidate)]
+    def _ik_transform_matrix_solve(self, x_mm, y_mm, z_mm, reference_deg=None, leg_name=None):
+        raw_candidates = self._ik_candidates_deg(x_mm, y_mm, z_mm)
+        candidates = [candidate for candidate in raw_candidates if self._candidate_within_limits(candidate)]
         if reference_deg is None:
             reference_deg = [0.0, 0.0, 0.0, 0.0]
         if not candidates:
-            rospy.logerr_throttle(1.0, "IK target violates 4DOF joint or q2+q3+q4 limits; holding previous joint target")
+            candidate_details = []
+            for index, candidate in enumerate(raw_candidates):
+                violations = self._candidate_limit_violations(candidate)
+                candidate_details.append(
+                    "c%d=[%s] violations=%s" % (
+                        index,
+                        ",".join("%.3f" % value for value in candidate),
+                        ";".join(violations) if violations else "none",
+                    )
+                )
+            rospy.logerr_throttle(
+                1.0,
+                "IK target invalid leg=%s target_leg_mm=[%.3f,%.3f,%.3f] %s; holding previous joint target" % (
+                    str(leg_name or "unknown"),
+                    float(x_mm),
+                    float(y_mm),
+                    float(z_mm),
+                    " | ".join(candidate_details),
+                ),
+            )
             return tuple(reference_deg)
 
         if len(candidates) == 1:
@@ -398,7 +433,7 @@ class LegIkExecutor(object):
     def _compute_leg_ticks_from_leg_frame_mm(self, leg_name, tx_mm, ty_mm, tz_mm):
         leg = self.legs[leg_name]
         reference_deg = self.last_joint_deg_by_leg.get(leg_name, self.nominal_joint_deg)
-        joint_deg = list(self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg))
+        joint_deg = list(self._ik_transform_matrix_solve(tx_mm, ty_mm, tz_mm, reference_deg, leg_name))
         self.last_joint_deg_by_leg[leg_name] = joint_deg
 
         cmd_deg = [
