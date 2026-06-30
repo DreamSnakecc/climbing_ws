@@ -44,6 +44,7 @@ DEFAULT_AUTOTUNE = {
     "minimum_valid_ratio": 0.95,
     "minimum_cycles_per_leg": 2,
     "leg_max_trials": 12,
+    "extended_max_candidates": 8,
     "p_multipliers": [0.75, 1.0, 1.25, 1.5],
     "i_candidates": [0, 25, 50, 100, 200],
     "d_candidates": [0, 16, 32, 64, 128],
@@ -421,6 +422,33 @@ def tuning_axis_candidates(original, active, config):
             candidate[key] = int(value)
             candidates.append(("%s_%d" % (key, value), candidate))
     return candidates
+
+
+def ranked_safe_tuning_trials(result):
+    ranked = sorted(
+        [trial for trial in result.get("trials", [])
+         if trial.get("safe") and trial.get("score") is not None],
+        key=lambda trial: float(trial["score"]),
+    )
+    unique = []
+    signatures = set()
+    for trial in ranked:
+        tuning = trial.get("tuning", {})
+        signature = tuple(int(tuning.get(key, 0)) for key in (
+            "p", "i", "d", "velocity", "acceleration",
+        ))
+        if signature in signatures:
+            continue
+        signatures.add(signature)
+        unique.append(trial)
+    return unique
+
+
+def bench_result_passed(result):
+    return bool(
+        result.get("selected", {}).get("safe") and
+        result.get("extended", {}).get("candidate", {}).get("safe")
+    )
 
 
 def motor_current_limit_a(config, motor_id, hardware_limit_a):
@@ -925,24 +953,53 @@ class DxlAutoTuner(object):
 
     def _validate_extended(self, motor_id, result, session_dir):
         baseline = result["baseline"]
-        candidate = result["selected"]
         baseline_trial = self._run_trial(
             motor_id, baseline["tuning"], int(self.autotune["validation_step_ticks"]),
             "extended_baseline", session_dir,
         )
-        candidate_trial = self._run_trial(
-            motor_id, candidate["tuning"], int(self.autotune["validation_step_ticks"]),
-            "extended_candidate", session_dir,
-        )
-        result["extended"] = {"baseline": baseline_trial, "candidate": candidate_trial}
-        if not candidate_trial.get("safe") or (
-                baseline_trial.get("score") is not None and candidate_trial.get("score") is not None and
-                candidate_trial["score"] > baseline_trial["score"]):
+        selected = baseline if baseline.get("safe") and baseline_trial.get("safe") else None
+        selected_trial = baseline_trial if selected is not None else None
+        attempts = []
+        candidates = ranked_safe_tuning_trials(result)
+        limit = max(1, int(self.autotune.get("extended_max_candidates", 8)))
+        baseline_signature = tuple(int(baseline["tuning"].get(key, 0)) for key in (
+            "p", "i", "d", "velocity", "acceleration",
+        ))
+        for index, candidate in enumerate(candidates[:limit]):
+            candidate_signature = tuple(int(candidate["tuning"].get(key, 0)) for key in (
+                "p", "i", "d", "velocity", "acceleration",
+            ))
+            if candidate_signature == baseline_signature:
+                candidate_trial = baseline_trial
+            else:
+                candidate_trial = self._run_trial(
+                    motor_id, candidate["tuning"], int(self.autotune["validation_step_ticks"]),
+                    "extended_candidate_%02d" % (index + 1), session_dir,
+                )
+            attempts.append({"bench": candidate, "validation": candidate_trial})
+            if not candidate_trial.get("safe"):
+                continue
+            if selected_trial is None or (
+                    candidate_trial.get("score") is not None and
+                    (selected_trial.get("score") is None or
+                     candidate_trial["score"] < selected_trial["score"])):
+                selected = candidate
+                selected_trial = candidate_trial
+
+        result["extended"] = {
+            "baseline": baseline_trial,
+            "candidate": selected_trial,
+            "attempts": attempts,
+        }
+        if selected is None:
             self._set_tuning(motor_id, baseline["tuning"])
             result["selected"] = baseline
             result["extended_reverted"] = True
-        else:
-            self._set_tuning(motor_id, candidate["tuning"])
+            return False
+        self._set_tuning(motor_id, selected["tuning"])
+        result["selected"] = selected
+        result["extended_reverted"] = selected is baseline
+        return True
 
 
 def new_session(args):
@@ -1343,7 +1400,7 @@ def main():
         bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
             existing = bench_results.get(str(motor_id))
-            if existing is not None and existing.get("selected", {}).get("safe"):
+            if existing is not None and bench_result_passed(existing):
                 tuner._set_tuning(motor_id, existing["selected"]["tuning"])
                 rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
                 continue
@@ -1362,14 +1419,18 @@ def main():
                 session["bench"] = {"motors": bench_results}
                 save_session(session_path, session)
                 raise RuntimeError("motor %d has no candidate satisfying strict endpoint and overshoot limits" % motor_id)
-            tuner._validate_extended(motor_id, bench_results[str(motor_id)], session["session_dir"])
-            if not bench_results[str(motor_id)]["selected"].get("safe"):
-                session["stage"] = "bench_failed_extended"
-                save_session(session_path, session)
-                raise RuntimeError("motor %d failed the extended validation step" % motor_id)
+            extended_passed = tuner._validate_extended(
+                motor_id, bench_results[str(motor_id)], session["session_dir"],
+            )
             session["baseline_tuning"] = baseline_tuning
             session["bench"] = {"motors": bench_results}
             save_session(session_path, session)
+            if not extended_passed:
+                session["stage"] = "bench_failed_extended"
+                save_session(session_path, session)
+                raise RuntimeError(
+                    "motor %d has no candidate satisfying the extended validation limits" % motor_id
+                )
 
         candidates = {"left_board": {}, "right_board": {}}
         for motor_id, result in bench_results.items():

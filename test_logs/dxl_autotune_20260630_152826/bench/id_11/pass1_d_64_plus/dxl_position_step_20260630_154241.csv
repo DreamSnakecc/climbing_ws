@@ -1,2 +1,0 @@
-wall_time,elapsed_s,motor_id,board,phase,step_index,target_tick,actual_tick,error_tick,abs_error_tick,velocity_tick_s,effort_raw,current_a,feedback_age_s
-1782805361.166897,0.711174,11,left_board,ramp_out,1,2307,2267.000,-40.000,40.000,-19.981,23.000,0.061870,0.166002

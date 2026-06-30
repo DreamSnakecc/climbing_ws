@@ -206,6 +206,41 @@ class DxlTuningUnitTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             tuner.DxlAutoTuner._validate_tuning_mode(15, tuning)
 
+    def test_extended_validation_falls_back_to_next_safe_candidate(self):
+        baseline = {
+            "safe": True, "score": 3.0,
+            "tuning": {"p": 800, "i": 0, "d": 0, "velocity": 200, "acceleration": 300},
+        }
+        first = {
+            "safe": True, "score": 1.0,
+            "tuning": {"p": 1000, "i": 0, "d": 0, "velocity": 200, "acceleration": 300},
+        }
+        second = {
+            "safe": True, "score": 2.0,
+            "tuning": {"p": 700, "i": 0, "d": 32, "velocity": 150, "acceleration": 200},
+        }
+        result = {"baseline": baseline, "selected": first, "trials": [first, second]}
+        test_tuner = object.__new__(tuner.DxlAutoTuner)
+        test_tuner.autotune = {"validation_step_ticks": 100, "extended_max_candidates": 8}
+        selected = []
+
+        def run_trial(_motor_id, tuning, _step_ticks, _label, _session_dir):
+            if tuning["p"] == 1000:
+                return {"safe": False, "score": None, "overshoot_safe": False}
+            if tuning["p"] == 700:
+                return {"safe": True, "score": 1.5, "overshoot_safe": True}
+            return {"safe": True, "score": 2.5, "overshoot_safe": True}
+
+        test_tuner._run_trial = run_trial
+        test_tuner._set_tuning = lambda _motor_id, tuning: selected.append(dict(tuning))
+        self.assertTrue(test_tuner._validate_extended(11, result, "/tmp"))
+        self.assertEqual(result["selected"]["tuning"]["p"], 700)
+        self.assertEqual(len(result["extended"]["attempts"]), 2)
+        self.assertEqual(selected[-1]["p"], 700)
+        self.assertTrue(tuner.bench_result_passed(result))
+        result["extended"]["candidate"]["safe"] = False
+        self.assertFalse(tuner.bench_result_passed(result))
+
 
 if __name__ == "__main__":
     unittest.main()
