@@ -818,7 +818,10 @@ class DxlAutoTuner(object):
                 motor_id, int(tuning["operating_mode"]),
             ))
         if int(tuning.get("drive_mode", 0)) & 0x04:
-            raise RuntimeError("motor %d uses time-based profile; velocity-based profile is required" % motor_id)
+            raise RuntimeError(
+                "motor %d uses time-based profile; restart the updated multi_dxl_node "
+                "to select velocity-based profile" % motor_id
+            )
 
     def _set_tuning(self, motor_id, tuning):
         board_name = self.board_by_motor[int(motor_id)]

@@ -29,6 +29,7 @@
 #define ADDR_CURRENT_LIMIT 38
 #define ADDR_TORQUE_ENABLE 64
 #define ADDR_DRIVE_MODE 10
+#define DRIVE_MODE_TIME_BASED_PROFILE 0x04
 #define ADDR_POSITION_D_GAIN 80
 #define ADDR_POSITION_I_GAIN 82
 #define ADDR_POSITION_P_GAIN 84
@@ -345,6 +346,26 @@ bool setOperatingModeInternal(uint8_t id, uint8_t mode)
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_TORQUE_ENABLE, 0, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
         ROS_ERROR("[ID %d] Failed disable torque before mode set: %s", id, packetHandler->getTxRxResult(dxl_comm_result));
+
+    uint8_t drive_mode = 0;
+    dxl_comm_result = packetHandler->read1ByteTxRx(portHandler, id, ADDR_DRIVE_MODE, &drive_mode, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS || dxl_error != 0)
+    {
+        ROS_ERROR("[ID %d] Failed read Drive Mode before profile setup", id);
+    }
+    else if ((drive_mode & DRIVE_MODE_TIME_BASED_PROFILE) != 0)
+    {
+        const uint8_t velocity_based_drive_mode =
+            static_cast<uint8_t>(drive_mode & ~DRIVE_MODE_TIME_BASED_PROFILE);
+        dxl_comm_result = packetHandler->write1ByteTxRx(
+            portHandler, id, ADDR_DRIVE_MODE, velocity_based_drive_mode, &dxl_error);
+        if (dxl_comm_result != COMM_SUCCESS || dxl_error != 0)
+            ROS_ERROR("[ID %d] Failed switch Drive Mode to velocity-based profile", id);
+        else
+            ROS_WARN("[ID %d] Drive Mode changed from %u to %u for velocity-based profile", id,
+                     static_cast<unsigned int>(drive_mode),
+                     static_cast<unsigned int>(velocity_based_drive_mode));
+    }
 
     dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, id, ADDR_OPERATING_MODE, mode, &dxl_error);
     if (dxl_comm_result != COMM_SUCCESS)
