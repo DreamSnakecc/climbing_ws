@@ -351,7 +351,7 @@ position_autotune:
   max_foot_overshoot_mm: 1.0
   max_zero_crossings: 1
   max_current_ratio: 0.80
-  feedback_age_limit_s: 0.10
+  feedback_age_limit_s: 0.15
   normal_p95_limit_mm: 4.0
   tangent_p95_limit_mm: 6.0
   lag_limit_ms: 80.0

@@ -1,0 +1,25 @@
+{
+  "created_at": "2026-06-30T15:28:26",
+  "motor_ids": [
+    11,
+    1,
+    2,
+    15,
+    12,
+    3,
+    4,
+    16,
+    13,
+    5,
+    6,
+    17,
+    14,
+    7,
+    8,
+    18
+  ],
+  "robot_config": "/home/cc/climbing_ws/src/climbing_description/config/robot.yaml",
+  "session_dir": "/home/cc/climbing_ws/test_logs/dxl_autotune_20260630_152826",
+  "stage": "created",
+  "updated_at": "2026-06-30T15:28:26"
+}

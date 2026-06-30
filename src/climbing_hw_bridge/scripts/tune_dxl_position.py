@@ -1343,7 +1343,7 @@ def main():
         bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
             existing = bench_results.get(str(motor_id))
-            if existing is not None and existing.get("selected", {}).get("tuning"):
+            if existing is not None and existing.get("selected", {}).get("safe"):
                 tuner._set_tuning(motor_id, existing["selected"]["tuning"])
                 rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
                 continue
