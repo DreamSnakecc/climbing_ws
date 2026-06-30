@@ -36,7 +36,7 @@ class DxlPositionStepTester(object):
         self.safe_mode = False
         self.home_ticks = {}
 
-        self.command_pub = rospy.Publisher("/set_position", SetPosition, queue_size=20)
+        self.command_pub = rospy.Publisher("/set_position", SetPosition, queue_size=1)
         rospy.Subscriber(
             "/jetson/left_board/joint_state",
             JointState,
@@ -207,16 +207,12 @@ class DxlPositionStepTester(object):
         rate = rospy.Rate(max(1.0, float(self.args.sample_rate_hz)))
         deadline = time.time() + max(0.0, float(hold_s))
         last = None
+        self._publish_target(motor_id, target_tick)
         while not rospy.is_shutdown() and time.time() < deadline:
-            # A direct diagnostic command has no upstream publisher retrying it.
-            # Re-send the unchanged goal with each sample to avoid one dropped ROS
-            # message being mistaken for a slow or weak servo response.
-            self._publish_target(motor_id, target_tick)
             last = self._write_sample(motor_id, phase, step_index, target_tick) or last
             if last is not None and origin_tick is not None:
                 self._check_sample_safety(last, origin_tick, target_tick)
             rate.sleep()
-        self._publish_target(motor_id, target_tick)
         last = self._write_sample(motor_id, phase, step_index, target_tick) or last
         if last is not None and origin_tick is not None:
             self._check_sample_safety(last, origin_tick, target_tick)
@@ -339,7 +335,7 @@ class DxlPositionStepTester(object):
         for index in range(1, 11):
             target = start + (float(home_tick) - start) * float(index) / 10.0
             self._publish_target(motor_id, target)
-            rospy.sleep(0.05)
+            rospy.sleep(0.10)
         return True
 
     def _print_plan(self):
