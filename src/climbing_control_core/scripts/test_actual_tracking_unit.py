@@ -5,6 +5,7 @@ import math
 from actual_tracking import (
     estimate_tick_lag,
     lag_compensated_tracking_samples,
+    phase_endpoint_overshoot,
     summarize_tracking_samples,
     tracking_sample_is_valid,
     tracking_readiness,
@@ -126,6 +127,13 @@ def run_tests():
     compensated_summary = summarize_tracking_samples(compensated)
     assert compensated_summary["valid_samples"] == 24
     assert compensated_summary["total_max_m"] < 1e-9
+
+    overshoot_samples = [
+        {"phase": "TRANSFER", "command_position": [0.00, 0.0, 0.0], "actual_position": [0.00, 0.0, 0.0]},
+        {"phase": "TRANSFER", "command_position": [0.01, 0.0, 0.0], "actual_position": [0.012, 0.0, 0.0]},
+    ]
+    overshoot = phase_endpoint_overshoot(overshoot_samples, "TRANSFER")
+    assert abs(overshoot["max_overshoot_m"] - 0.002) < 1e-9
 
     print("actual_tracking unit tests passed")
 

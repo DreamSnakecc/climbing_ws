@@ -8,11 +8,16 @@ import time
 
 import rospy
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool
 
 from dynamixel_control.msg import SetPosition
 
 
 DEFAULT_MOTOR_IDS = [2, 4, 6, 8]
+
+
+class SafetyAbort(RuntimeError):
+    pass
 
 
 class DxlPositionStepTester(object):
@@ -28,6 +33,8 @@ class DxlPositionStepTester(object):
         self.csv_file = None
         self.csv_writer = None
         self.results = []
+        self.safe_mode = False
+        self.home_ticks = {}
 
         self.command_pub = rospy.Publisher("/set_position", SetPosition, queue_size=20)
         rospy.Subscriber(
@@ -44,6 +51,15 @@ class DxlPositionStepTester(object):
             callback_args="right_board",
             queue_size=20,
         )
+        rospy.Subscriber(
+            "/jetson/local_safety_supervisor/safe_mode",
+            Bool,
+            self._safe_mode_callback,
+            queue_size=5,
+        )
+
+    def _safe_mode_callback(self, msg):
+        self.safe_mode = bool(msg.data)
 
     def _joint_state_callback(self, msg, board_name):
         now = time.time()
@@ -169,7 +185,25 @@ class DxlPositionStepTester(object):
             "feedback_age_s": feedback_age_s,
         }
 
-    def _hold_target(self, motor_id, phase, step_index, target_tick, hold_s):
+    def _check_sample_safety(self, sample, origin_tick, target_tick):
+        if self.safe_mode:
+            raise SafetyAbort("local safety supervisor entered safe mode")
+        if sample["feedback_age_s"] > float(self.args.feedback_age_limit_s):
+            raise SafetyAbort("feedback age %.3fs exceeded %.3fs" % (
+                sample["feedback_age_s"], float(self.args.feedback_age_limit_s),
+            ))
+        if float(self.args.max_current_a) > 0.0 and abs(sample["current_a"]) > float(self.args.max_current_a):
+            raise SafetyAbort("current %.3fA exceeded %.3fA" % (
+                abs(sample["current_a"]), float(self.args.max_current_a),
+            ))
+        low = min(float(origin_tick), float(target_tick)) - float(self.args.max_overshoot_ticks)
+        high = max(float(origin_tick), float(target_tick)) + float(self.args.max_overshoot_ticks)
+        if sample["actual"] < low or sample["actual"] > high:
+            raise SafetyAbort("position %.1f left safe envelope [%.1f, %.1f]" % (
+                sample["actual"], low, high,
+            ))
+
+    def _hold_target(self, motor_id, phase, step_index, target_tick, hold_s, origin_tick=None):
         rate = rospy.Rate(max(1.0, float(self.args.sample_rate_hz)))
         deadline = time.time() + max(0.0, float(hold_s))
         last = None
@@ -179,9 +213,13 @@ class DxlPositionStepTester(object):
             # message being mistaken for a slow or weak servo response.
             self._publish_target(motor_id, target_tick)
             last = self._write_sample(motor_id, phase, step_index, target_tick) or last
+            if last is not None and origin_tick is not None:
+                self._check_sample_safety(last, origin_tick, target_tick)
             rate.sleep()
         self._publish_target(motor_id, target_tick)
         last = self._write_sample(motor_id, phase, step_index, target_tick) or last
+        if last is not None and origin_tick is not None:
+            self._check_sample_safety(last, origin_tick, target_tick)
         if self.csv_file is not None:
             self.csv_file.flush()
         return last
@@ -203,7 +241,9 @@ class DxlPositionStepTester(object):
                 "test_dxl_position_step: ID %d %s ramp out step %d/%d target=%d",
                 motor_id, direction_name, step_index, int(self.args.ramp_steps), target,
             )
-            sample = self._hold_target(motor_id, "ramp_out", step_index, target, self.args.hold_s)
+            sample = self._hold_target(
+                motor_id, "ramp_out", step_index, target, self.args.hold_s, home_tick,
+            )
             if sample is not None:
                 max_abs_error = max(max_abs_error, sample["abs_error"])
                 max_abs_current = max(max_abs_current, abs(sample["current_a"]))
@@ -211,7 +251,8 @@ class DxlPositionStepTester(object):
                 final_sample = sample
 
         final_sample = self._hold_target(
-            motor_id, "settle", int(self.args.ramp_steps), final_target, self.args.settle_s,
+            motor_id, "settle", int(self.args.ramp_steps), final_target,
+            self.args.settle_s, home_tick,
         ) or final_sample
         if final_sample is not None:
             max_abs_error = max(max_abs_error, final_sample["abs_error"])
@@ -224,7 +265,9 @@ class DxlPositionStepTester(object):
 
         for step_index in range(int(self.args.ramp_steps) - 1, -1, -1):
             target = self._target_for_step(home_tick, step_index, step_ticks)
-            sample = self._hold_target(motor_id, "ramp_back", step_index, target, self.args.hold_s)
+            sample = self._hold_target(
+                motor_id, "ramp_back", step_index, target, self.args.hold_s,
+            )
             if sample is not None:
                 max_abs_error = max(max_abs_error, sample["abs_error"])
                 max_abs_current = max(max_abs_current, abs(sample["current_a"]))
@@ -252,6 +295,7 @@ class DxlPositionStepTester(object):
             }
 
         home_tick = int(round(home_sample["position"]))
+        self.home_ticks[int(motor_id)] = home_tick
         direction_results = []
         for direction in parse_directions(self.args.directions):
             signed_step_ticks = int(self.args.step_ticks) * direction
@@ -280,6 +324,23 @@ class DxlPositionStepTester(object):
             "passed": all(result["passed"] for result in direction_results),
             "reason": "ok" if all(result["passed"] for result in direction_results) else "final_error",
         }
+
+    def _recover_home(self, motor_id):
+        sample = self._latest_sample(motor_id)
+        home_tick = self.home_ticks.get(int(motor_id))
+        if sample is None or home_tick is None:
+            return False
+        feedback_age_s = max(0.0, time.time() - float(sample["wall_time"]))
+        if feedback_age_s > float(self.args.feedback_age_limit_s):
+            return False
+        start = float(sample["position"])
+        self._publish_target(motor_id, start)
+        rospy.sleep(0.10)
+        for index in range(1, 11):
+            target = start + (float(home_tick) - start) * float(index) / 10.0
+            self._publish_target(motor_id, target)
+            rospy.sleep(0.05)
+        return True
 
     def _print_plan(self):
         print("Dynamixel position step test plan:")
@@ -338,9 +399,24 @@ class DxlPositionStepTester(object):
         overall_pass = True
         try:
             for motor_id in self.motor_ids:
-                result = self._test_motor(motor_id)
+                try:
+                    result = self._test_motor(motor_id)
+                except SafetyAbort as exc:
+                    sample = self._latest_sample(motor_id)
+                    if sample is not None:
+                        self._publish_target(motor_id, sample["position"])
+                    recovered = self._recover_home(motor_id)
+                    result = {
+                        "motor_id": motor_id,
+                        "passed": False,
+                        "reason": "safety_abort: %s" % exc,
+                        "home_recovered": recovered,
+                    }
+                    rospy.logerr("test_dxl_position_step: ID %d safety abort: %s", motor_id, exc)
                 self.results.append(result)
                 overall_pass = overall_pass and bool(result["passed"])
+                if not result["passed"] and str(result.get("reason", "")).startswith("safety_abort"):
+                    break
         finally:
             if self.csv_file is not None:
                 self.csv_file.close()
@@ -406,6 +482,9 @@ def parse_args():
     parser.add_argument("--output-dir", default="test_logs", help="CSV output directory")
     parser.add_argument("--sample-rate-hz", type=float, default=50.0, help="CSV sample rate while holding targets")
     parser.add_argument("--stream-timeout-s", type=float, default=10.0, help="Feedback/topic wait timeout")
+    parser.add_argument("--feedback-age-limit-s", type=float, default=0.10, help="Abort if feedback is older than this")
+    parser.add_argument("--max-current-a", type=float, default=0.0, help="Abort above this absolute current; 0 disables")
+    parser.add_argument("--max-overshoot-ticks", type=float, default=2.0, help="Allowed position outside the commanded step envelope")
     parser.add_argument("--no-confirm", action="store_true", help="Skip interactive safety confirmation")
     parser.add_argument("--dry-run", action="store_true", help="Print plan and exit without sending commands")
     return parser.parse_args()

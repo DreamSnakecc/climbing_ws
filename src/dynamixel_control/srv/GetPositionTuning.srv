@@ -2,6 +2,7 @@ int32 id
 ---
 bool success
 string message
+int32 drive_mode
 int32 operating_mode
 int32 pwm_limit
 int32 current_limit

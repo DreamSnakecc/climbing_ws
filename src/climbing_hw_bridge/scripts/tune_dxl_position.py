@@ -25,9 +25,31 @@ import yaml
 from dynamixel_control.srv import GetPositionTuning, SetPositionTuning
 
 
-DEFAULT_MOTOR_IDS = [11, 1, 2, 12, 3, 4, 13, 5, 6, 14, 7, 8]
+DEFAULT_MOTOR_IDS = [11, 1, 2, 15, 12, 3, 4, 16, 13, 5, 6, 17, 14, 7, 8, 18]
 MOVING_PHASES = set(["LIFT", "TRANSFER", "PRELOAD", "ADMIT", "LIFT_SWING"])
 SERVO_ENDPOINT_PHASES = [(5, "LIFT"), (6, "TRANSFER"), (2, "PRELOAD")]
+SERVO_JOINT_COUNT = 4
+DEFAULT_AUTOTUNE = {
+    "bench_step_ticks": 40,
+    "validation_step_ticks": 100,
+    "pass_error_ticks": 3.0,
+    "max_overshoot_ticks": 2.0,
+    "max_foot_overshoot_mm": 1.0,
+    "max_zero_crossings": 1,
+    "max_current_ratio": 0.80,
+    "feedback_age_limit_s": 0.10,
+    "normal_p95_limit_mm": 4.0,
+    "tangent_p95_limit_mm": 6.0,
+    "lag_limit_ms": 80.0,
+    "minimum_valid_ratio": 0.95,
+    "minimum_cycles_per_leg": 2,
+    "leg_max_trials": 12,
+    "p_multipliers": [0.75, 1.0, 1.25, 1.5],
+    "i_candidates": [0, 25, 50, 100, 200],
+    "d_candidates": [0, 16, 32, 64, 128],
+    "velocity_candidates": [100, 150, 200, 250, 300],
+    "acceleration_candidates": [100, 200, 300, 400, 600],
+}
 
 
 def percentile(values, fraction):
@@ -51,6 +73,12 @@ def ensure_dir(path):
 def load_yaml(path):
     with open(path, "r") as stream:
         return yaml.safe_load(stream) or {}
+
+
+def autotune_config(config):
+    result = dict(DEFAULT_AUTOTUNE)
+    result.update(config.get("position_autotune", {}))
+    return result
 
 
 def write_yaml(path, data):
@@ -84,6 +112,7 @@ def confirm(args, prompt):
 
 def tuning_from_response(response):
     return {
+        "drive_mode": int(getattr(response, "drive_mode", 0)),
         "operating_mode": int(response.operating_mode),
         "pwm_limit": int(response.pwm_limit),
         "current_limit": int(response.current_limit),
@@ -95,18 +124,35 @@ def tuning_from_response(response):
     }
 
 
-def metric_score(metrics, step_ticks):
+def metric_score(metrics, step_ticks, pass_error_ticks=3.0, lag_limit_s=0.08):
     if not metrics or not metrics.get("hard_safe"):
         return None
     step = max(1.0, abs(float(step_ticks)))
-    response = float(metrics.get("response_error_tick", step)) / step
+    integrated = float(metrics.get("integrated_abs_error_tick_s", step * 0.8)) / (step * 0.8)
     settling = float(metrics.get("settling_time_s", 0.8)) / 0.8
-    overshoot = float(metrics.get("overshoot_tick", 0.0)) / step
+    endpoint = float(metrics.get("final_error_tick", pass_error_ticks)) / max(float(pass_error_ticks), 1.0)
+    lag = float(metrics.get("lag_time_s", lag_limit_s)) / max(float(lag_limit_s), 1e-3)
     current = float(metrics.get("current_ratio", 1.0))
-    return 0.55 * response + 0.30 * settling + 0.10 * overshoot + 0.05 * current
+    return 0.35 * integrated + 0.25 * settling + 0.20 * endpoint + 0.10 * lag + 0.10 * current
 
 
-def parse_step_csv(path, pass_error_ticks, feedback_age_limit_s):
+def error_zero_crossings(samples, deadband=0.5):
+    signs = []
+    for sample in samples:
+        error = float(sample["error"])
+        if abs(error) <= float(deadband):
+            continue
+        signs.append(1 if error > 0.0 else -1)
+    return sum(1 for index in range(1, len(signs)) if signs[index] != signs[index - 1])
+
+
+def parse_step_csv(
+    path,
+    pass_error_ticks,
+    feedback_age_limit_s,
+    max_overshoot_ticks=2.0,
+    max_zero_crossings=1,
+):
     with open(path, newline="") as stream:
         rows = list(csv.DictReader(stream))
     rows = [row for row in rows if row.get("phase") in ("ramp_out", "settle")]
@@ -130,6 +176,12 @@ def parse_step_csv(path, pass_error_ticks, feedback_age_limit_s):
     initial = samples[0]["actual"]
     direction = 1.0 if target >= initial else -1.0
     response_sample = min(samples, key=lambda sample: abs(sample["t"] - 0.20))
+    step_distance = max(abs(target - initial), 1.0)
+    lag_time = None
+    for sample in samples:
+        if direction * (sample["actual"] - initial) >= 0.10 * step_distance:
+            lag_time = sample["t"]
+            break
     settling_time = None
     for index, sample in enumerate(samples):
         if abs(sample["error"]) <= pass_error_ticks and all(
@@ -139,16 +191,32 @@ def parse_step_csv(path, pass_error_ticks, feedback_age_limit_s):
     overshoot = max([max(0.0, direction * (sample["actual"] - target)) for sample in samples])
     max_current = max(sample["current_a"] for sample in samples)
     max_age = max(sample["feedback_age_s"] for sample in samples)
+    zero_crossings = error_zero_crossings(samples)
+    integrated_abs_error = 0.0
+    for index in range(1, len(samples)):
+        dt = max(0.0, samples[index]["t"] - samples[index - 1]["t"])
+        integrated_abs_error += 0.5 * dt * (
+            abs(samples[index - 1]["error"]) + abs(samples[index]["error"])
+        )
+    error_rmse = math.sqrt(mean([sample["error"] ** 2 for sample in samples]) or 0.0)
     endpoint_pass = abs(samples[-1]["error"]) <= pass_error_ticks
     feedback_safe = max_age <= feedback_age_limit_s
+    overshoot_safe = overshoot <= float(max_overshoot_ticks)
+    oscillation_safe = zero_crossings <= int(max_zero_crossings)
     return {
-        "safe": endpoint_pass and feedback_safe,
+        "safe": endpoint_pass and feedback_safe and overshoot_safe and oscillation_safe,
         "endpoint_pass": endpoint_pass,
         "feedback_safe": feedback_safe,
+        "overshoot_safe": overshoot_safe,
+        "oscillation_safe": oscillation_safe,
         "final_error_tick": abs(samples[-1]["error"]),
         "response_error_tick": abs(response_sample["error"]),
         "settling_time_s": settling_time,
+        "lag_time_s": lag_time,
         "overshoot_tick": overshoot,
+        "zero_crossings": zero_crossings,
+        "integrated_abs_error_tick_s": integrated_abs_error,
+        "error_rmse_tick": error_rmse,
         "max_current_a": max_current,
         "max_feedback_age_s": max_age,
         "sample_count": len(samples),
@@ -183,9 +251,8 @@ def parse_single_leg_csv(path, pass_error_ticks):
         if sequence <= last_sequence or phase_id not in [item[0] for item in SERVO_ENDPOINT_PHASES]:
             continue
         errors = [
-            value(row, "servo_last_pass_error_joint1_tick"),
-            value(row, "servo_last_pass_error_joint2_tick"),
-            value(row, "servo_last_pass_error_joint3_tick"),
+            value(row, "servo_last_pass_error_joint%d_tick" % joint_index)
+            for joint_index in range(1, SERVO_JOINT_COUNT + 1)
         ]
         if all(abs(error) <= pass_error_ticks for error in errors):
             endpoint_errors[phase_id] = errors
@@ -199,9 +266,8 @@ def parse_single_leg_csv(path, pass_error_ticks):
     waiting_rows = [row for row in rows if value(row, "servo_wait_s") > 0.0]
     terminal_row = waiting_rows[-1] if waiting_rows else rows[-1]
     terminal_errors = [
-        value(terminal_row, "servo_error_joint1_tick"),
-        value(terminal_row, "servo_error_joint2_tick"),
-        value(terminal_row, "servo_error_joint3_tick"),
+        value(terminal_row, "servo_error_joint%d_tick" % joint_index)
+        for joint_index in range(1, SERVO_JOINT_COUNT + 1)
     ]
     timed_out = any(value(row, "servo_timed_out") >= 0.5 for row in rows)
     endpoint_count = len(passed_phase_ids)
@@ -224,6 +290,11 @@ def parse_single_leg_csv(path, pass_error_ticks):
 def leg_endpoint_improves(candidate, baseline):
     if candidate.get("passed"):
         return True
+    candidate_tracking = candidate.get("tracking", {})
+    baseline_tracking = baseline.get("tracking", {})
+    if candidate_tracking.get("score") is not None and baseline_tracking.get("score") is not None:
+        if candidate_tracking["score"] < baseline_tracking["score"] * 0.98:
+            return True
     if candidate.get("timed_out") and not baseline.get("timed_out"):
         return False
     if candidate.get("endpoint_count", 0) != baseline.get("endpoint_count", 0):
@@ -231,7 +302,14 @@ def leg_endpoint_improves(candidate, baseline):
     return candidate.get("terminal_max_abs_error_tick", float("inf")) < baseline.get("terminal_max_abs_error_tick", float("inf"))
 
 
-def combine_step_metrics(direction_metrics, current_limit_a, step_ticks, pass_error_ticks):
+def combine_step_metrics(
+    direction_metrics,
+    current_limit_a,
+    step_ticks,
+    pass_error_ticks,
+    max_current_ratio=0.80,
+    lag_limit_s=0.08,
+):
     if len(direction_metrics) != 2:
         return {"safe": False, "reason": "missing_direction"}
     max_current = max(metric["max_current_a"] for metric in direction_metrics)
@@ -245,17 +323,33 @@ def combine_step_metrics(direction_metrics, current_limit_a, step_ticks, pass_er
             metric["settling_time_s"] if metric["settling_time_s"] is not None else 0.8
             for metric in direction_metrics
         ]),
+        "lag_time_s": mean([
+            metric["lag_time_s"] if metric.get("lag_time_s") is not None else lag_limit_s
+            for metric in direction_metrics
+        ]),
         "overshoot_tick": max(metric["overshoot_tick"] for metric in direction_metrics),
+        "zero_crossings": max(metric.get("zero_crossings", 0) for metric in direction_metrics),
+        "integrated_abs_error_tick_s": mean([
+            metric.get("integrated_abs_error_tick_s", 0.0) for metric in direction_metrics
+        ]),
+        "error_rmse_tick": mean([
+            metric.get("error_rmse_tick", 0.0) for metric in direction_metrics
+        ]),
         "max_current_a": max_current,
         "max_feedback_age_s": max_age,
         "current_ratio": max_current / max(current_limit_a, 1e-6),
     }
     result["feedback_safe"] = all(metric.get("feedback_safe", metric["safe"]) for metric in direction_metrics)
-    result["current_safe"] = result["current_ratio"] < 0.80
+    result["current_safe"] = result["current_ratio"] <= float(max_current_ratio)
     result["endpoint_pass"] = all(metric.get("endpoint_pass", metric["safe"]) for metric in direction_metrics)
-    result["hard_safe"] = result["feedback_safe"] and result["current_safe"]
+    result["overshoot_safe"] = all(metric.get("overshoot_safe", False) for metric in direction_metrics)
+    result["oscillation_safe"] = all(metric.get("oscillation_safe", False) for metric in direction_metrics)
+    result["hard_safe"] = (
+        result["feedback_safe"] and result["current_safe"] and
+        result["overshoot_safe"] and result["oscillation_safe"]
+    )
     result["safe"] = result["hard_safe"] and result["endpoint_pass"]
-    result["score"] = metric_score(result, step_ticks)
+    result["score"] = metric_score(result, step_ticks, pass_error_ticks, lag_limit_s)
     return result
 
 
@@ -282,33 +376,67 @@ def motor_ids_for_leg(config, leg_name):
 
 def failed_leg_motor_id(result, motor_ids, pass_error_ticks):
     errors = list(result.get("terminal_errors_tick", []))
-    if len(motor_ids) != 3 or len(errors) != 3:
+    if len(motor_ids) != SERVO_JOINT_COUNT or len(errors) != SERVO_JOINT_COUNT:
         return None
     failing = [
         (abs(float(error)), int(motor_id))
         for motor_id, error in zip(motor_ids, errors)
         if abs(float(error)) > float(pass_error_ticks)
     ]
-    return max(failing)[1] if failing else None
+    if failing:
+        return max(failing)[1]
+    p95_errors = result.get("motor_p95_abs_error_tick", {})
+    available = [
+        (float(p95_errors[str(int(motor_id))]), int(motor_id))
+        for motor_id in motor_ids if str(int(motor_id)) in p95_errors
+    ]
+    return max(available)[1] if available else None
 
 
 def leg_endpoint_candidates(original, active):
-    """Bounded P/Profile candidates relative to the original motor settings."""
+    return tuning_axis_candidates(original, active, DEFAULT_AUTOTUNE)
+
+
+def tuning_axis_values(original, config):
+    p_values = [
+        int(round(float(original["p"]) * float(multiplier)))
+        for multiplier in config["p_multipliers"]
+    ]
+    return [
+        ("p", sorted(set(max(0, min(16383, value)) for value in p_values))),
+        ("d", [int(value) for value in config["d_candidates"]]),
+        ("i", [int(value) for value in config["i_candidates"]]),
+        ("velocity", [int(value) for value in config["velocity_candidates"]]),
+        ("acceleration", [int(value) for value in config["acceleration_candidates"]]),
+    ]
+
+
+def tuning_axis_candidates(original, active, config):
     candidates = []
-    profile = dict(active)
-    profile["velocity"] = int(round(float(original["velocity"]) * 1.25))
-    profile["acceleration"] = int(round(float(original["acceleration"]) * 1.25))
-    if profile != active:
-        candidates.append(("profile_125", profile))
-    for percentage in (110, 120, 130):
-        candidate = dict(active)
-        candidate["p"] = int(round(float(original["p"]) * percentage / 100.0))
-        if candidate != active:
-            candidates.append(("p_%d" % percentage, candidate))
+    for key, values in tuning_axis_values(original, config):
+        for value in values:
+            if int(active[key]) == int(value):
+                continue
+            candidate = dict(active)
+            candidate[key] = int(value)
+            candidates.append(("%s_%d" % (key, value), candidate))
     return candidates
 
 
-def transformed_ujc_error(row, leg_name, config):
+def motor_current_limit_a(config, motor_id, hardware_limit_a):
+    limits = [float(hardware_limit_a)] if float(hardware_limit_a) > 0.0 else []
+    telemetry = config.get("dynamixel_telemetry", {})
+    model_name = telemetry.get("torque_model_by_motor", {}).get(str(int(motor_id)))
+    model = telemetry.get("torque_models", {}).get(model_name, {})
+    if model.get("max_current_a") is not None:
+        limits.append(float(model["max_current_a"]))
+    return min(limits) if limits else float(hardware_limit_a)
+
+
+def actual_command_position(row, leg_name, config):
+    actual_fields = ["%s_actual_cmd_%s" % (leg_name, axis) for axis in "xyz"]
+    if all(row.get(field, "") != "" for field in actual_fields):
+        return [float(row[field]) for field in actual_fields]
     leg_config = config.get("legs", {}).get(leg_name, {})
     gait = config.get("gait_controller", {})
     yaw = math.radians(float(leg_config.get("hip_yaw_deg", 0.0)))
@@ -328,20 +456,60 @@ def transformed_ujc_error(row, leg_name, config):
     dy_leg = -sin_yaw * dx + cos_yaw * dy
     actual_x = cos_yaw * (dx_leg - nominal_x) - sin_yaw * (dy_leg - nominal_y)
     actual_y = sin_yaw * (dx_leg - nominal_x) + cos_yaw * (dy_leg - nominal_y)
+    return [actual_x, actual_y, ujc_z]
+
+
+def transformed_ujc_error(row, leg_name, config):
+    actual_x, actual_y, actual_z = actual_command_position(row, leg_name, config)
     error_x = actual_x - float(row["%s_cmd_x" % leg_name])
     error_y = actual_y - float(row["%s_cmd_y" % leg_name])
-    error_z = ujc_z - float(row["%s_cmd_z" % leg_name])
+    error_z = actual_z - float(row["%s_cmd_z" % leg_name])
     return math.hypot(error_x, error_y), abs(error_z), math.sqrt(error_x * error_x + error_y * error_y + error_z * error_z)
 
 
+def segment_overshoot_metrics(segment, leg_name, config):
+    if len(segment) < 2:
+        return {"overshoot_mm": 0.0, "zero_crossings": 0}
+    start = [float(segment[0]["%s_cmd_%s" % (leg_name, axis)]) for axis in "xyz"]
+    target = [float(segment[-1]["%s_cmd_%s" % (leg_name, axis)]) for axis in "xyz"]
+    direction = [target[index] - start[index] for index in range(3)]
+    span = math.sqrt(sum(value * value for value in direction))
+    if span <= 1e-9:
+        return {"overshoot_mm": 0.0, "zero_crossings": 0}
+    unit = [value / span for value in direction]
+    projected_errors = []
+    for row in segment:
+        actual = actual_command_position(row, leg_name, config)
+        projected_errors.append(sum((actual[index] - target[index]) * unit[index] for index in range(3)))
+    overshoot_mm = 1000.0 * max([0.0] + projected_errors)
+    signs = []
+    for error in projected_errors:
+        if abs(error) <= 0.001:
+            continue
+        signs.append(1 if error > 0.0 else -1)
+    zero_crossings = sum(1 for index in range(1, len(signs)) if signs[index] != signs[index - 1])
+    return {"overshoot_mm": overshoot_mm, "zero_crossings": zero_crossings}
+
+
 def parse_crawl_metrics(path, config):
+    tuning = autotune_config(config)
     motor_legs = leg_by_motor(config)
     motor_errors = {motor_id: [] for motor_id in motor_legs}
     motor_currents = {motor_id: [] for motor_id in motor_legs}
     leg_errors = {leg_name: [] for leg_name in config.get("legs", {})}
+    phase_errors = {
+        (leg_name, phase): []
+        for leg_name in config.get("legs", {}) for phase in ("LIFT", "TRANSFER", "PRELOAD", "ADMIT")
+    }
+    phase_total = {key: 0 for key in phase_errors}
+    phase_valid = {key: 0 for key in phase_errors}
+    phase_segments = {key: [] for key in phase_errors}
+    active_phase = {leg_name: None for leg_name in config.get("legs", {})}
+    active_segment = {leg_name: [] for leg_name in config.get("legs", {})}
     fault_seen = False
     with open(path, newline="") as stream:
-        for row in csv.DictReader(stream):
+        rows = list(csv.DictReader(stream))
+        for row in rows:
             fault_seen = fault_seen or row.get("mission_state") == "FAULT"
             for motor_id, leg_name in motor_legs.items():
                 if row.get("%s_phase" % leg_name) not in MOVING_PHASES:
@@ -353,22 +521,118 @@ def parse_crawl_metrics(path, config):
                 if current != "":
                     motor_currents[motor_id].append(abs(float(current)))
             for leg_name in leg_errors:
-                if row.get("%s_phase" % leg_name) in MOVING_PHASES:
+                phase = row.get("%s_phase" % leg_name)
+                if phase != active_phase[leg_name]:
+                    previous = active_phase[leg_name]
+                    if previous in ("LIFT", "TRANSFER", "PRELOAD", "ADMIT") and active_segment[leg_name]:
+                        phase_segments[(leg_name, previous)].append(active_segment[leg_name])
+                    active_phase[leg_name] = phase
+                    active_segment[leg_name] = []
+                if phase in ("LIFT", "TRANSFER", "PRELOAD", "ADMIT"):
+                    active_segment[leg_name].append(row)
+                    phase_total[(leg_name, phase)] += 1
+                    valid = row.get("%s_tracking_valid" % leg_name, "1")
+                    if str(valid) in ("1", "1.0", "True", "true"):
+                        phase_valid[(leg_name, phase)] += 1
+                if phase in MOVING_PHASES:
                     try:
-                        leg_errors[leg_name].append(transformed_ujc_error(row, leg_name, config))
+                        errors = transformed_ujc_error(row, leg_name, config)
+                        leg_errors[leg_name].append(errors)
+                        valid = row.get("%s_tracking_valid" % leg_name, "1")
+                        if (leg_name, phase) in phase_errors and str(valid) in ("1", "1.0", "True", "true"):
+                            phase_errors[(leg_name, phase)].append(errors)
                     except (KeyError, TypeError, ValueError):
                         pass
 
+    for leg_name, phase in active_phase.items():
+        if phase in ("LIFT", "TRANSFER", "PRELOAD", "ADMIT") and active_segment[leg_name]:
+            phase_segments[(leg_name, phase)].append(active_segment[leg_name])
+
+    lag_by_leg = {}
+    summary_path = os.path.splitext(path)[0] + "_tracking_summary.csv"
+    if os.path.isfile(summary_path):
+        with open(summary_path, newline="") as stream:
+            for row in csv.DictReader(stream):
+                if row.get("leg") in config.get("legs", {}) and row.get("estimated_lag_ms", "") != "":
+                    lag_by_leg[row["leg"]] = max(
+                        lag_by_leg.get(row["leg"], 0.0), float(row["estimated_lag_ms"]),
+                    )
+
+    phase_results = {}
+    reasons = []
+    required_phases = ("LIFT", "TRANSFER", "PRELOAD", "ADMIT")
+    for leg_name in config.get("legs", {}):
+        for phase in required_phases:
+            errors = phase_errors[(leg_name, phase)]
+            segments = phase_segments[(leg_name, phase)]
+            overshoot = [segment_overshoot_metrics(segment, leg_name, config) for segment in segments]
+            result = {
+                "sample_count": len(errors),
+                "valid_ratio": (
+                    float(phase_valid[(leg_name, phase)]) / float(phase_total[(leg_name, phase)])
+                    if phase_total[(leg_name, phase)] else 0.0
+                ),
+                "cycle_count": len(segments),
+                "p95_tangent_error_mm": percentile([item[0] * 1000.0 for item in errors], 0.95),
+                "p95_normal_error_mm": percentile([item[1] * 1000.0 for item in errors], 0.95),
+                "p95_total_error_mm": percentile([item[2] * 1000.0 for item in errors], 0.95),
+                "max_overshoot_mm": max([item["overshoot_mm"] for item in overshoot] or [0.0]),
+                "max_zero_crossings": max([item["zero_crossings"] for item in overshoot] or [0]),
+            }
+            phase_results["%s:%s" % (leg_name, phase)] = result
+            if len(segments) < int(tuning["minimum_cycles_per_leg"]):
+                reasons.append("%s %s has %d/%d cycles" % (
+                    leg_name, phase, len(segments), int(tuning["minimum_cycles_per_leg"]),
+                ))
+            if result["valid_ratio"] < float(tuning["minimum_valid_ratio"]):
+                reasons.append("%s %s valid ratio %.3f below %.3f" % (
+                    leg_name, phase, result["valid_ratio"], float(tuning["minimum_valid_ratio"]),
+                ))
+            if result["p95_normal_error_mm"] is None or result["p95_normal_error_mm"] > float(tuning["normal_p95_limit_mm"]):
+                reasons.append("%s %s normal P95 exceeds %.1f mm" % (leg_name, phase, float(tuning["normal_p95_limit_mm"])))
+            if result["p95_tangent_error_mm"] is None or result["p95_tangent_error_mm"] > float(tuning["tangent_p95_limit_mm"]):
+                reasons.append("%s %s tangent P95 exceeds %.1f mm" % (leg_name, phase, float(tuning["tangent_p95_limit_mm"])))
+            if result["max_overshoot_mm"] > float(tuning["max_foot_overshoot_mm"]):
+                reasons.append("%s %s overshoot %.2f mm exceeds %.2f mm" % (
+                    leg_name, phase, result["max_overshoot_mm"], float(tuning["max_foot_overshoot_mm"]),
+                ))
+            if result["max_zero_crossings"] > int(tuning["max_zero_crossings"]):
+                reasons.append("%s %s oscillation crossings %d exceed %d" % (
+                    leg_name, phase, result["max_zero_crossings"], int(tuning["max_zero_crossings"]),
+                ))
+        if lag_by_leg.get(leg_name, float("inf")) > float(tuning["lag_limit_ms"]):
+            reasons.append("%s lag exceeds %.1f ms" % (leg_name, float(tuning["lag_limit_ms"])))
+
+    if fault_seen:
+        reasons.append("candidate crawl entered FAULT")
+
+    motor_results = {}
+    telemetry = config.get("dynamixel_telemetry", {})
+    default_current_limit = float(telemetry.get("max_goal_current_a", 4.8))
+    for motor_id, errors in motor_errors.items():
+        values = motor_currents[motor_id]
+        result = {
+            "p95_abs_error_tick": percentile(errors, 0.95),
+            "p95_current_a": percentile(values, 0.95),
+            "max_current_a": max(values or [0.0]),
+        }
+        current_limit = motor_current_limit_a(config, motor_id, default_current_limit)
+        allowed_current = float(tuning["max_current_ratio"]) * current_limit
+        if result["max_current_a"] > allowed_current:
+            reasons.append("motor %d current %.3fA exceeds %.3fA" % (
+                motor_id, result["max_current_a"], allowed_current,
+            ))
+        motor_results[str(motor_id)] = result
+
     return {
         "csv": path,
+        "tracking_summary_csv": summary_path if os.path.isfile(summary_path) else None,
         "fault_seen": fault_seen,
-        "motors": {
-            str(motor_id): {
-                "p95_abs_error_tick": percentile(errors, 0.95),
-                "p95_current_a": percentile(motor_currents[motor_id], 0.95),
-            }
-            for motor_id, errors in motor_errors.items()
-        },
+        "passed": not reasons,
+        "reasons": reasons,
+        "phases": phase_results,
+        "lag_ms_by_leg": lag_by_leg,
+        "motors": motor_results,
         "legs": {
             leg_name: {
                 "p95_tangent_error_mm": None if not errors else percentile([item[0] * 1000.0 for item in errors], 0.95),
@@ -380,10 +644,94 @@ def parse_crawl_metrics(path, config):
     }
 
 
-def compare_crawl_metrics(baseline, candidate):
+def parse_single_leg_tracking(path, config, leg_name):
+    tuning = autotune_config(config)
+    phase_by_id = {5: "LIFT", 6: "TRANSFER", 2: "PRELOAD"}
+    errors = {phase: [] for phase in phase_by_id.values()}
+    segments = {phase: [] for phase in phase_by_id.values()}
+    active_phase = None
+    active_segment = []
+    with open(path, newline="") as stream:
+        for source in csv.DictReader(stream):
+            try:
+                phase = phase_by_id.get(int(round(float(source.get("servo_phase_id", -1)))))
+            except (TypeError, ValueError):
+                phase = None
+            row = dict(source)
+            for axis in "xyz":
+                row["%s_cmd_%s" % (leg_name, axis)] = source.get("cmd_%s" % axis, "0")
+                row["%s_ujc_%s" % (leg_name, axis)] = source.get("ujc_%s" % axis, "0")
+            if phase != active_phase:
+                if active_phase in segments and active_segment:
+                    segments[active_phase].append(active_segment)
+                active_phase = phase
+                active_segment = []
+            if phase in errors:
+                active_segment.append(row)
+                try:
+                    errors[phase].append(transformed_ujc_error(row, leg_name, config))
+                except (KeyError, TypeError, ValueError):
+                    pass
+    if active_phase in segments and active_segment:
+        segments[active_phase].append(active_segment)
+
+    phase_results = {}
     reasons = []
-    if candidate.get("fault_seen"):
-        reasons.append("candidate crawl entered FAULT")
+    score_parts = []
+    for phase in ("LIFT", "TRANSFER", "PRELOAD"):
+        values = errors[phase]
+        overshoot = [segment_overshoot_metrics(segment, leg_name, config) for segment in segments[phase]]
+        result = {
+            "sample_count": len(values),
+            "cycle_count": len(segments[phase]),
+            "p95_tangent_error_mm": percentile([item[0] * 1000.0 for item in values], 0.95),
+            "p95_normal_error_mm": percentile([item[1] * 1000.0 for item in values], 0.95),
+            "max_overshoot_mm": max([item["overshoot_mm"] for item in overshoot] or [0.0]),
+            "max_zero_crossings": max([item["zero_crossings"] for item in overshoot] or [0]),
+        }
+        phase_results[phase] = result
+        if result["cycle_count"] < int(tuning["minimum_cycles_per_leg"]):
+            reasons.append("%s has %d/%d cycles" % (
+                phase, result["cycle_count"], int(tuning["minimum_cycles_per_leg"]),
+            ))
+        if result["p95_normal_error_mm"] is None or result["p95_normal_error_mm"] > float(tuning["normal_p95_limit_mm"]):
+            reasons.append("%s normal P95 failed" % phase)
+        if result["p95_tangent_error_mm"] is None or result["p95_tangent_error_mm"] > float(tuning["tangent_p95_limit_mm"]):
+            reasons.append("%s tangent P95 failed" % phase)
+        if result["max_overshoot_mm"] > float(tuning["max_foot_overshoot_mm"]):
+            reasons.append("%s overshoot failed" % phase)
+        if result["max_zero_crossings"] > int(tuning["max_zero_crossings"]):
+            reasons.append("%s oscillation failed" % phase)
+        score_parts.extend([
+            (result["p95_normal_error_mm"] if result["p95_normal_error_mm"] is not None else 1000.0) / float(tuning["normal_p95_limit_mm"]),
+            (result["p95_tangent_error_mm"] if result["p95_tangent_error_mm"] is not None else 1000.0) / float(tuning["tangent_p95_limit_mm"]),
+            result["max_overshoot_mm"] / max(float(tuning["max_foot_overshoot_mm"]), 1e-6),
+        ])
+    return {
+        "passed": not reasons,
+        "reasons": reasons,
+        "score": mean(score_parts),
+        "phases": phase_results,
+    }
+
+
+def parse_single_leg_motor_errors(path, motor_ids):
+    errors = {str(int(motor_id)): [] for motor_id in motor_ids}
+    with open(path, newline="") as stream:
+        for row in csv.DictReader(stream):
+            for motor_id in motor_ids:
+                command = row.get("ticks_cmd_%d" % int(motor_id), "")
+                actual = row.get("ticks_act_%d" % int(motor_id), "")
+                if command != "" and actual != "":
+                    errors[str(int(motor_id))].append(abs(float(actual) - float(command)))
+    return {
+        motor_id: percentile(values, 0.95)
+        for motor_id, values in errors.items() if values
+    }
+
+
+def compare_crawl_metrics(baseline, candidate):
+    reasons = list(candidate.get("reasons", []))
     for motor_id, baseline_values in baseline.get("motors", {}).items():
         baseline_p95 = baseline_values.get("p95_abs_error_tick")
         candidate_p95 = candidate.get("motors", {}).get(motor_id, {}).get("p95_abs_error_tick")
@@ -403,6 +751,7 @@ class DxlAutoTuner(object):
     def __init__(self, args):
         self.args = args
         self.config = load_yaml(args.robot_config)
+        self.autotune = autotune_config(self.config)
         self.board_by_motor = board_by_motor(self.config)
         self.motor_ids = [int(value) for value in args.motor_ids.split(",") if value.strip()]
         self.current_lsb_ma = float(rospy.get_param("/dynamixel_telemetry/current_lsb_ma", 2.69))
@@ -434,6 +783,15 @@ class DxlAutoTuner(object):
             raise RuntimeError("motor %d tuning read failed: %s" % (motor_id, response.message))
         return tuning_from_response(response)
 
+    @staticmethod
+    def _validate_tuning_mode(motor_id, tuning):
+        if int(tuning["operating_mode"]) != 3:
+            raise RuntimeError("motor %d must be in Position Control Mode (3), got %d" % (
+                motor_id, int(tuning["operating_mode"]),
+            ))
+        if int(tuning.get("drive_mode", 0)) & 0x04:
+            raise RuntimeError("motor %d uses time-based profile; velocity-based profile is required" % motor_id)
+
     def _set_tuning(self, motor_id, tuning):
         board_name = self.board_by_motor[int(motor_id)]
         response = self.set_clients[board_name](
@@ -443,7 +801,7 @@ class DxlAutoTuner(object):
         if not response.success:
             raise RuntimeError("motor %d tuning write failed: %s" % (motor_id, response.message))
 
-    def _run_step(self, motor_id, step_ticks, label, session_dir):
+    def _run_step(self, motor_id, step_ticks, label, session_dir, max_current_a):
         output_dir = os.path.join(session_dir, "bench", "id_%d" % motor_id, label)
         ensure_dir(output_dir)
         command = [
@@ -454,8 +812,11 @@ class DxlAutoTuner(object):
             "--directions", "+",
             "--hold-s", "0.6",
             "--settle-s", "0.2",
-            "--pass-error-ticks", str(self.args.pass_error_ticks),
-            "--sample-rate-hz", "50",
+            "--pass-error-ticks", str(self.autotune["pass_error_ticks"]),
+            "--sample-rate-hz", "100",
+            "--feedback-age-limit-s", str(self.autotune["feedback_age_limit_s"]),
+            "--max-current-a", str(max_current_a),
+            "--max-overshoot-ticks", str(self.autotune["max_overshoot_ticks"]),
             "--no-confirm",
             "--output-dir", output_dir,
         ]
@@ -463,18 +824,57 @@ class DxlAutoTuner(object):
         paths = glob.glob(os.path.join(output_dir, "dxl_position_step_*.csv"))
         if not paths:
             raise RuntimeError("position step produced no CSV for motor %d" % motor_id)
-        metrics = parse_step_csv(max(paths, key=os.path.getmtime), self.args.pass_error_ticks, 0.15)
+        metrics = parse_step_csv(
+            max(paths, key=os.path.getmtime),
+            self.autotune["pass_error_ticks"],
+            self.autotune["feedback_age_limit_s"],
+            self.autotune["max_overshoot_ticks"],
+            self.autotune["max_zero_crossings"],
+        )
         metrics["process_returncode"] = int(result)
         return metrics
 
     def _run_trial(self, motor_id, tuning, step_ticks, label, session_dir):
         self._set_tuning(motor_id, tuning)
         rospy.sleep(0.10)
-        positive = self._run_step(motor_id, abs(step_ticks), label + "_plus", session_dir)
-        negative = self._run_step(motor_id, -abs(step_ticks), label + "_minus", session_dir)
-        current_limit_a = float(tuning["current_limit"]) * self.current_lsb_ma / 1000.0
+        hardware_limit_a = float(tuning["current_limit"]) * self.current_lsb_ma / 1000.0
+        current_limit_a = motor_current_limit_a(self.config, motor_id, hardware_limit_a)
+        max_current_a = float(self.autotune["max_current_ratio"]) * current_limit_a
+        positive = self._run_step(
+            motor_id, abs(step_ticks), label + "_plus", session_dir, max_current_a,
+        )
+        positive_hard_safe = (
+            positive.get("feedback_safe") and positive.get("overshoot_safe") and
+            positive.get("oscillation_safe") and
+            float(positive.get("max_current_a", float("inf"))) <= max_current_a
+        )
+        if not positive_hard_safe:
+            combined = {"safe": False, "hard_safe": False, "directions": [positive], "score": None}
+            combined["tuning"] = dict(tuning)
+            combined["label"] = label
+            return combined
+        negative = self._run_step(
+            motor_id, -abs(step_ticks), label + "_minus", session_dir, max_current_a,
+        )
+        negative_hard_safe = (
+            negative.get("feedback_safe") and negative.get("overshoot_safe") and
+            negative.get("oscillation_safe") and
+            float(negative.get("max_current_a", float("inf"))) <= max_current_a
+        )
+        if not negative_hard_safe:
+            combined = {
+                "safe": False,
+                "hard_safe": False,
+                "directions": [positive, negative],
+                "score": None,
+            }
+            combined["tuning"] = dict(tuning)
+            combined["label"] = label
+            return combined
         combined = combine_step_metrics(
-            [positive, negative], current_limit_a, step_ticks, self.args.pass_error_ticks,
+            [positive, negative], current_limit_a, step_ticks,
+            self.autotune["pass_error_ticks"], self.autotune["max_current_ratio"],
+            float(self.autotune["lag_limit_ms"]) / 1000.0,
         )
         combined["tuning"] = dict(tuning)
         combined["label"] = label
@@ -485,43 +885,34 @@ class DxlAutoTuner(object):
         candidate_score = candidate.get("score")
         baseline_score = baseline.get("score")
         return (
-            candidate.get("safe") and candidate_score is not None and baseline_score is not None and
-            candidate_score <= baseline_score * 0.90
+            candidate.get("safe") and candidate_score is not None and
+            (baseline_score is None or candidate_score < baseline_score)
         )
 
     def _tune_motor(self, motor_id, baseline_tuning, session_dir):
         try:
-            baseline = self._run_trial(motor_id, baseline_tuning, self.args.step_ticks, "baseline", session_dir)
+            step_ticks = int(self.autotune["bench_step_ticks"])
+            baseline = self._run_trial(motor_id, baseline_tuning, step_ticks, "baseline", session_dir)
             if not baseline.get("hard_safe"):
                 raise RuntimeError("motor %d baseline exceeded the hard current or feedback safety limit" % motor_id)
             best = baseline
             trials = [baseline]
 
-            profile_candidate = dict(baseline_tuning)
-            profile_candidate["velocity"] = int(round(profile_candidate["velocity"] * 1.25))
-            profile_candidate["acceleration"] = int(round(profile_candidate["acceleration"] * 1.25))
-            profile_trial = self._run_trial(motor_id, profile_candidate, self.args.step_ticks, "profile_125", session_dir)
-            trials.append(profile_trial)
-            if self._improves(profile_trial, baseline):
-                best = profile_trial
-
-            profile_source = dict(best["tuning"])
-            for percentage in (110, 120, 130):
-                candidate = dict(profile_source)
-                candidate["p"] = int(round(baseline_tuning["p"] * percentage / 100.0))
-                trial = self._run_trial(motor_id, candidate, self.args.step_ticks, "p_%d" % percentage, session_dir)
-                trials.append(trial)
-                if self._improves(trial, baseline) and (best.get("score") is None or trial["score"] < best["score"]):
-                    best = trial
-
-            if best.get("overshoot_tick", 0.0) > abs(float(self.args.step_ticks)) * 0.10:
-                for d_gain in (20, 40):
-                    candidate = dict(best["tuning"])
-                    candidate["d"] = d_gain
-                    trial = self._run_trial(motor_id, candidate, self.args.step_ticks, "d_%d" % d_gain, session_dir)
-                    trials.append(trial)
-                    if self._improves(trial, baseline) and trial["score"] < best["score"]:
-                        best = trial
+            for pass_index in range(2):
+                for key, values in tuning_axis_values(baseline_tuning, self.autotune):
+                    axis_best = best
+                    for value in values:
+                        if int(best["tuning"][key]) == int(value):
+                            continue
+                        candidate = dict(best["tuning"])
+                        candidate[key] = int(value)
+                        label = "pass%d_%s_%d" % (pass_index + 1, key, int(value))
+                        trial = self._run_trial(motor_id, candidate, step_ticks, label, session_dir)
+                        trials.append(trial)
+                        if self._improves(trial, axis_best):
+                            axis_best = trial
+                    best = axis_best
+                    self._set_tuning(motor_id, best["tuning"])
 
             self._set_tuning(motor_id, best["tuning"])
             return {"baseline": baseline, "trials": trials, "selected": best}
@@ -536,10 +927,12 @@ class DxlAutoTuner(object):
         baseline = result["baseline"]
         candidate = result["selected"]
         baseline_trial = self._run_trial(
-            motor_id, baseline["tuning"], self.args.extended_step_ticks, "extended_baseline", session_dir,
+            motor_id, baseline["tuning"], int(self.autotune["validation_step_ticks"]),
+            "extended_baseline", session_dir,
         )
         candidate_trial = self._run_trial(
-            motor_id, candidate["tuning"], self.args.extended_step_ticks, "extended_candidate", session_dir,
+            motor_id, candidate["tuning"], int(self.autotune["validation_step_ticks"]),
+            "extended_candidate", session_dir,
         )
         result["extended"] = {"baseline": baseline_trial, "candidate": candidate_trial}
         if not candidate_trial.get("safe") or (
@@ -590,6 +983,15 @@ def run_crawl(args, session, label):
 def run_single_leg_test(args, session, label):
     output_dir = os.path.join(session["session_dir"], "leg_endpoint", label)
     ensure_dir(output_dir)
+    config = load_yaml(args.robot_config)
+    tuning = autotune_config(config)
+    default_current_limit = float(config.get("dynamixel_telemetry", {}).get("max_goal_current_a", 4.8))
+    current_limits = []
+    for motor_id in motor_ids_for_leg(config, args.leg):
+        limit_a = motor_current_limit_a(config, motor_id, default_current_limit)
+        current_limits.append("%d:%.6f" % (
+            motor_id, float(tuning["max_current_ratio"]) * limit_a,
+        ))
     command = [
         "rosrun", "climbing_control_core", "test_single_leg_swing.py",
         "--leg", args.leg,
@@ -598,14 +1000,27 @@ def run_single_leg_test(args, session, label):
         "--hold-before", str(args.leg_hold_before_s),
         "--hold-after", str(args.leg_hold_after_s),
         "--output-dir", output_dir,
+        "--motor-current-limits", ",".join(current_limits),
     ]
     returncode = subprocess.call(command)
     paths = glob.glob(os.path.join(output_dir, "single_swing_%s_*.csv" % args.leg))
     if not paths:
         raise RuntimeError("single-leg endpoint test produced no CSV")
-    metrics = parse_single_leg_csv(max(paths, key=os.path.getmtime), args.pass_error_ticks)
+    endpoint_tolerance = float(config.get("swing_leg_controller", {}).get(
+        "servo_tracking_tolerance_ticks", args.pass_error_ticks,
+    ))
+    metrics = parse_single_leg_csv(max(paths, key=os.path.getmtime), endpoint_tolerance)
+    metrics["endpoint_tolerance_ticks"] = endpoint_tolerance
+    motor_ids = motor_ids_for_leg(config, args.leg)
+    metrics["motor_p95_abs_error_tick"] = parse_single_leg_motor_errors(metrics["csv"], motor_ids)
+    metrics["tracking"] = parse_single_leg_tracking(metrics["csv"], load_yaml(args.robot_config), args.leg)
     metrics["process_returncode"] = int(returncode)
-    metrics["passed"] = bool(metrics.get("passed")) and returncode == 0
+    metrics["passed"] = (
+        bool(metrics.get("passed")) and bool(metrics["tracking"].get("passed")) and
+        returncode == 0
+    )
+    if returncode == 5:
+        raise RuntimeError("single-leg test triggered a current or feedback safety abort")
     if returncode not in (0, 4):
         raise RuntimeError("single-leg endpoint test returned %d" % returncode)
     return metrics
@@ -701,10 +1116,13 @@ def run_leg_endpoint_stage(args, session_path, session):
     tuner = DxlAutoTuner(args)
     tuner._wait_services()
     motor_ids = motor_ids_for_leg(tuner.config, args.leg)
-    if len(motor_ids) != 3:
-        raise RuntimeError("leg %s must define exactly three motor_ids" % args.leg)
+    if len(motor_ids) != SERVO_JOINT_COUNT:
+        raise RuntimeError("leg %s must define exactly four motor_ids" % args.leg)
 
-    endpoint = session.get("leg_endpoint")
+    endpoints = session.setdefault("leg_endpoints", {})
+    if session.get("leg_endpoint") is not None and session["leg_endpoint"].get("leg") == args.leg:
+        endpoints.setdefault(args.leg, session.pop("leg_endpoint"))
+    endpoint = endpoints.get(args.leg)
     if endpoint is None:
         if not tuner._confirm(
                 "Robot is supported and normal bringup has servo_tracking_gate_enabled:=true. "
@@ -713,9 +1131,7 @@ def run_leg_endpoint_stage(args, session_path, session):
         original_tuning = {}
         for motor_id in motor_ids:
             tuning = tuner._get_tuning(motor_id)
-            if tuning["operating_mode"] != 3:
-                raise RuntimeError("motor %d must be in Position Control Mode (3), got %d" % (
-                    motor_id, tuning["operating_mode"]))
+            tuner._validate_tuning_mode(motor_id, tuning)
             original_tuning[str(motor_id)] = tuning
         endpoint = {
             "leg": args.leg,
@@ -726,7 +1142,7 @@ def run_leg_endpoint_stage(args, session_path, session):
             "status": "running",
         }
         session["motor_ids"] = list(motor_ids)
-        session["leg_endpoint"] = endpoint
+        endpoints[args.leg] = endpoint
         session["stage"] = "leg_endpoint_running"
         save_session(session_path, session)
     elif endpoint.get("leg") != args.leg:
@@ -745,11 +1161,13 @@ def run_leg_endpoint_stage(args, session_path, session):
 
     while not current.get("passed"):
         candidate_trials = len(endpoint["trials"]) - 1
-        if candidate_trials >= args.leg_max_trials:
+        if candidate_trials >= int(tuner.autotune["leg_max_trials"]):
             endpoint["status"] = "failed_max_trials"
             break
 
-        failed_motor = failed_leg_motor_id(current, motor_ids, args.pass_error_ticks)
+        failed_motor = failed_leg_motor_id(
+            current, motor_ids, current.get("endpoint_tolerance_ticks", args.pass_error_ticks),
+        )
         if failed_motor is None:
             endpoint["status"] = "failed_without_identifiable_tick_error"
             break
@@ -758,7 +1176,11 @@ def run_leg_endpoint_stage(args, session_path, session):
         original = endpoint["original_tuning"][motor_key]
         active = endpoint["active_tuning"][motor_key]
         accepted = False
-        for label, candidate in leg_endpoint_candidates(original, active):
+        if not tuner._confirm("Run loaded candidate search for motor %d on leg %s?" % (failed_motor, args.leg)):
+            endpoint["status"] = "paused_by_operator"
+            save_session(session_path, session)
+            return 0
+        for label, candidate in tuning_axis_candidates(original, active, tuner.autotune):
             trial_label = "trial_%02d_id_%d_%s" % (candidate_trials + 1, failed_motor, label)
             try:
                 tuner._set_tuning(failed_motor, candidate)
@@ -788,7 +1210,7 @@ def run_leg_endpoint_stage(args, session_path, session):
             tuner._set_tuning(failed_motor, active)
             save_session(session_path, session)
             candidate_trials += 1
-            if candidate_trials >= args.leg_max_trials:
+            if candidate_trials >= int(tuner.autotune["leg_max_trials"]):
                 break
 
         if not accepted:
@@ -822,30 +1244,52 @@ def run_leg_endpoint_stage(args, session_path, session):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Operator-gated Dynamixel position tuning workflow")
-    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "crawl-candidate", "commit", "leg-endpoint"])
+    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "crawl-candidate", "commit", "leg-endpoint", "status"])
     parser.add_argument("--session", default="", help="Session JSON path; omitted for crawl-baseline or leg-endpoint")
     parser.add_argument("--output-dir", default="test_logs")
     parser.add_argument("--robot-config", default="src/climbing_description/config/robot.yaml")
     parser.add_argument("--motor-ids", default=",".join(str(value) for value in DEFAULT_MOTOR_IDS))
-    parser.add_argument("--crawl-duration-s", type=float, default=40.0)
-    parser.add_argument("--step-ticks", type=int, default=100)
-    parser.add_argument("--extended-step-ticks", type=int, default=300)
-    parser.add_argument("--pass-error-ticks", type=float, default=10.0)
+    parser.add_argument("--crawl-duration-s", type=float, default=120.0)
+    parser.add_argument("--step-ticks", type=int, default=40)
+    parser.add_argument("--extended-step-ticks", type=int, default=100)
+    parser.add_argument("--pass-error-ticks", type=float, default=3.0)
     parser.add_argument("--stream-timeout-s", type=float, default=10.0)
-    parser.add_argument("--leg", default="lf", choices=["lf", "rf", "rr", "lr"])
-    parser.add_argument("--leg-cycles", type=int, default=1)
+    parser.add_argument("--leg", default="lf", choices=["lf", "rf", "rr", "lr", "all"])
+    parser.add_argument("--leg-cycles", type=int, default=2)
     parser.add_argument("--leg-swing-wait-s", type=float, default=15.0)
     parser.add_argument("--leg-hold-before-s", type=float, default=1.0)
     parser.add_argument("--leg-hold-after-s", type=float, default=1.0)
-    parser.add_argument("--leg-max-trials", type=int, default=8)
+    parser.add_argument("--leg-max-trials", type=int, default=12)
     parser.add_argument("--no-confirm", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Print the bounded search plan without ROS or motor writes")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    if args.stage in ("crawl-baseline", "leg-endpoint") and not args.session:
+    if args.dry_run:
+        config = load_yaml(args.robot_config)
+        tuning = autotune_config(config)
+        motor_ids = [int(value) for value in args.motor_ids.split(",") if value.strip()]
+        print("Dynamixel autotune dry run")
+        print("  stage: %s" % args.stage)
+        print("  motors: %s" % ",".join(str(value) for value in motor_ids))
+        print("  bench/validation step: %d/%d tick" % (
+            int(tuning["bench_step_ticks"]), int(tuning["validation_step_ticks"]),
+        ))
+        print("  hard limits: overshoot<=%.1f tick foot<=%.1f mm current<=%.0f%%" % (
+            float(tuning["max_overshoot_ticks"]), float(tuning["max_foot_overshoot_mm"]),
+            100.0 * float(tuning["max_current_ratio"]),
+        ))
+        print("  per-motor candidates per pass: %d" % sum(
+            len(values) for _, values in tuning_axis_values(
+                {"p": 1000, "i": 0, "d": 0, "velocity": 200, "acceleration": 300}, tuning,
+            )
+        ))
+        return 0
+    if args.stage in ("crawl-baseline", "leg-endpoint", "bench") and not args.session:
         session_path, session = new_session(args)
+        print("Session: %s" % session_path)
     elif args.session:
         session_path = os.path.abspath(args.session)
         session = load_session(session_path)
@@ -854,8 +1298,28 @@ def main():
     else:
         raise RuntimeError("--session is required after the baseline stage")
 
-    if args.stage == "leg-endpoint":
+    if args.stage == "status":
+        print(json.dumps(session, indent=2, sort_keys=True))
+        return 0
+
+    if args.stage == "leg-endpoint" and args.leg != "all":
         return run_leg_endpoint_stage(args, session_path, session)
+
+    if args.stage == "leg-endpoint" and args.leg == "all":
+        for leg_name in ("lf", "rf", "rr", "lr"):
+            command = [
+                "rosrun", "climbing_hw_bridge", "tune_dxl_position.py",
+                "--stage", "leg-endpoint", "--session", session_path,
+                "--leg", leg_name, "--leg-cycles", str(args.leg_cycles),
+                "--leg-swing-wait-s", str(args.leg_swing_wait_s),
+                "--leg-hold-before-s", str(args.leg_hold_before_s),
+                "--leg-hold-after-s", str(args.leg_hold_after_s),
+            ]
+            if args.no_confirm:
+                command.append("--no-confirm")
+            if subprocess.call(command) != 0:
+                return 1
+        return 0
 
     if args.stage == "crawl-baseline":
         if not confirm(args, "Robot is ready for a 40 s flat adhesion crawl baseline. Start now?"):
@@ -873,7 +1337,7 @@ def main():
         rospy.init_node("tune_dxl_position", anonymous=False)
         tuner = DxlAutoTuner(args)
         tuner._wait_services()
-        if not tuner._confirm("Robot is supported; auto position/mode/current control is disabled. Run direct 100 tick tuning now?"):
+        if not tuner._confirm("Robot is supported; auto position/mode/current control is disabled. Start guarded 16-motor tuning?"):
             return 0
         baseline_tuning = dict(session.get("baseline_tuning", {}))
         bench_results = dict(session.get("bench", {}).get("motors", {}))
@@ -884,22 +1348,28 @@ def main():
                 rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
                 continue
             tuning = tuner._get_tuning(motor_id)
-            if tuning["operating_mode"] != 3:
-                raise RuntimeError("motor %d must be in Position Control Mode (3), got %d" % (motor_id, tuning["operating_mode"]))
+            tuner._validate_tuning_mode(motor_id, tuning)
+            if not tuner._confirm("Motor %d is mechanically clear for +/- %d tick tests. Continue?" % (
+                    motor_id, int(tuner.autotune["validation_step_ticks"]))):
+                session["stage"] = "bench_paused"
+                save_session(session_path, session)
+                return 0
             baseline_tuning[str(motor_id)] = tuning
             bench_results[str(motor_id)] = tuner._tune_motor(motor_id, tuning, session["session_dir"])
+            if not bench_results[str(motor_id)]["selected"].get("safe"):
+                session["stage"] = "bench_failed"
+                session["baseline_tuning"] = baseline_tuning
+                session["bench"] = {"motors": bench_results}
+                save_session(session_path, session)
+                raise RuntimeError("motor %d has no candidate satisfying strict endpoint and overshoot limits" % motor_id)
+            tuner._validate_extended(motor_id, bench_results[str(motor_id)], session["session_dir"])
+            if not bench_results[str(motor_id)]["selected"].get("safe"):
+                session["stage"] = "bench_failed_extended"
+                save_session(session_path, session)
+                raise RuntimeError("motor %d failed the extended validation step" % motor_id)
             session["baseline_tuning"] = baseline_tuning
             session["bench"] = {"motors": bench_results}
             save_session(session_path, session)
-
-        if tuner._confirm("All 100 tick trials passed. Run the selected candidates and baselines at 300 tick?"):
-            for motor_id in tuner.motor_ids:
-                result = bench_results[str(motor_id)]
-                if result["selected"].get("safe"):
-                    tuner._validate_extended(motor_id, result, session["session_dir"])
-                else:
-                    result["extended_skipped"] = "no candidate met the endpoint criterion at 100 tick"
-                save_session(session_path, session)
 
         candidates = {"left_board": {}, "right_board": {}}
         for motor_id, result in bench_results.items():
@@ -920,8 +1390,15 @@ def main():
         rospy.init_node("tune_dxl_position", anonymous=False)
         tuner = DxlAutoTuner(args)
         tuner._wait_services()
-        if "baseline_crawl" not in session or "candidate_override_file" not in session:
-            raise RuntimeError("baseline crawl and bench candidate are required before crawl-candidate")
+        if "candidate_override_file" not in session:
+            raise RuntimeError("bench candidate is required before crawl-candidate")
+        endpoint_status = session.get("leg_endpoints", {})
+        missing_legs = [
+            leg_name for leg_name in ("lf", "rf", "rr", "lr")
+            if endpoint_status.get(leg_name, {}).get("status") != "passed"
+        ]
+        if missing_legs:
+            raise RuntimeError("loaded single-leg validation is incomplete: %s" % ",".join(missing_legs))
         for board_name, values in session["candidates"].items():
             for motor_id, expected in values.items():
                 actual = tuner._get_tuning(int(motor_id))
@@ -933,7 +1410,7 @@ def main():
         csv_path, returncode = run_crawl(args, session, "crawl_candidate")
         candidate_metrics = parse_crawl_metrics(csv_path, tuner.config)
         candidate_metrics["process_returncode"] = returncode
-        comparison = compare_crawl_metrics(session["baseline_crawl"], candidate_metrics)
+        comparison = compare_crawl_metrics(session.get("baseline_crawl", {}), candidate_metrics)
         if returncode != 0:
             comparison["passed"] = False
             comparison["reasons"].append("candidate crawl process returned %d" % returncode)

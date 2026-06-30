@@ -60,6 +60,7 @@ from climbing_msgs.msg import (
 from actual_tracking import (
     estimate_tick_lag,
     lag_compensated_tracking_samples,
+    phase_endpoint_overshoot,
     summarize_tracking_samples,
     tracking_sample_is_valid,
     trajectory_tracking_metrics,
@@ -164,6 +165,12 @@ class CrawlGaitWithFanTester(object):
         ))
         self._tracking_normal_tolerance_m = float(rospy.get_param(
             "/swing_leg_controller/actual_tracking_normal_tolerance_m", 0.004,
+        ))
+        self._tracking_max_overshoot_m = float(rospy.get_param(
+            "/position_autotune/max_foot_overshoot_mm", 1.0,
+        )) / 1000.0
+        self._tracking_max_zero_crossings = int(rospy.get_param(
+            "/position_autotune/max_zero_crossings", 1,
         ))
         self._tracking_max_age_s = max(float(args.tracking_max_age_s), 0.0)
         self._tracking_max_skew_s = max(float(args.tracking_max_skew_s), 0.0)
@@ -776,6 +783,17 @@ class CrawlGaitWithFanTester(object):
                     minimum_valid_samples=5,
                     minimum_valid_ratio=0.95,
                 )
+                overshoot = phase_endpoint_overshoot(
+                    self._tracking_lag_samples.get(leg, []), phase,
+                )
+                if (
+                    summary["status"] == "PASS" and
+                    (
+                        overshoot["max_overshoot_m"] > self._tracking_max_overshoot_m or
+                        overshoot["max_zero_crossings"] > self._tracking_max_zero_crossings
+                    )
+                ):
+                    summary["status"] = "FAIL"
                 summary["leg"] = leg
                 summary["phase"] = phase
                 summary["estimated_lag_s"] = lag["lag_s"]
@@ -786,6 +804,8 @@ class CrawlGaitWithFanTester(object):
                 summary["lag_compensated_total_p95_m"] = compensated["total_p95_m"]
                 summary["lag_compensated_normal_p95_m"] = compensated["normal_p95_m"]
                 summary["lag_compensated_tangent_p95_m"] = compensated["tangent_p95_m"]
+                summary["max_endpoint_overshoot_m"] = overshoot["max_overshoot_m"]
+                summary["max_zero_crossings"] = overshoot["max_zero_crossings"]
                 rows.append(summary)
         statuses = [row["status"] for row in rows]
         if "FAIL" in statuses:
@@ -816,6 +836,8 @@ class CrawlGaitWithFanTester(object):
             "joint_tick_rmse_raw", "joint_tick_rmse_aligned",
             "lag_compensated_total_rmse_mm", "lag_compensated_total_p95_mm",
             "lag_compensated_normal_p95_mm", "lag_compensated_tangent_p95_mm",
+            "max_endpoint_overshoot_mm", "max_zero_crossings",
+            "maximum_endpoint_overshoot_mm", "maximum_zero_crossings",
         ]
         try:
             summary_file = open(path, "w")
@@ -833,6 +855,8 @@ class CrawlGaitWithFanTester(object):
                 "lag_compensated_total_p95_m": 0.0,
                 "lag_compensated_normal_p95_m": 0.0,
                 "lag_compensated_tangent_p95_m": 0.0,
+                "max_endpoint_overshoot_m": 0.0,
+                "max_zero_crossings": 0,
             }]
             for summary in output_rows:
                 writer.writerow([
@@ -867,6 +891,10 @@ class CrawlGaitWithFanTester(object):
                     "%.3f" % (1000.0 * summary["lag_compensated_total_p95_m"]),
                     "%.3f" % (1000.0 * summary["lag_compensated_normal_p95_m"]),
                     "%.3f" % (1000.0 * summary["lag_compensated_tangent_p95_m"]),
+                    "%.3f" % (1000.0 * summary["max_endpoint_overshoot_m"]),
+                    summary["max_zero_crossings"],
+                    "%.3f" % (1000.0 * self._tracking_max_overshoot_m),
+                    self._tracking_max_zero_crossings,
                 ])
             summary_file.close()
             self._tracking_summary_path = path

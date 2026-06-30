@@ -29,6 +29,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray, String, Int32MultiArray
 
 LEG_NAMES = ["lf", "rf", "rr", "lr"]
+MOTOR_IDS = [11, 1, 2, 15, 12, 3, 4, 16, 13, 5, 6, 17, 14, 7, 8, 18]
 STATE_FAULT = "FAULT"
 STATE_CLIMB = "CLIMB"
 SERVO_ENDPOINT_PHASES = {5: "LIFT", 6: "TRANSFER", 2: "PRELOAD"}
@@ -62,6 +63,10 @@ class SingleLegSwingTest(object):
         self.hold_after_s = max(0.5, args.hold_after)
         self.output_dir = args.output_dir
         self.require_servo_gate = not args.allow_servo_gate_disabled
+        self.current_limits_a = parse_current_limits(args.motor_current_limits)
+        self.current_lsb_ma = float(rospy.get_param("/dynamixel_telemetry/current_lsb_ma", 2.69))
+        self.latest_motor_current_a = {}
+        self.latest_motor_feedback_time = {}
 
         self.latest_estimated = None
         self.latest_mission_state = "INIT"
@@ -83,6 +88,8 @@ class SingleLegSwingTest(object):
         rospy.Subscriber("/control/mission_state", String, self._state_cb, queue_size=10)
         rospy.Subscriber("/jetson/joint_position_ticks_cmd", JointState, self._ticks_cmd_cb, queue_size=10)
         rospy.Subscriber("/jetson/dynamixel_bridge/joint_ticks", Int32MultiArray, self._ticks_actual_cb, queue_size=10)
+        rospy.Subscriber("/jetson/left_board/joint_state", JointState, self._board_state_cb, queue_size=10)
+        rospy.Subscriber("/jetson/right_board/joint_state", JointState, self._board_state_cb, queue_size=10)
         rospy.Subscriber(
             "/control/swing_leg_servo_tracking/" + self.leg_name,
             Float32MultiArray,
@@ -113,6 +120,28 @@ class SingleLegSwingTest(object):
     def _ticks_actual_cb(self, msg):
         self.latest_ticks_actual = msg
 
+    def _board_state_cb(self, msg):
+        now = time.time()
+        for index, name in enumerate(msg.name):
+            try:
+                motor_id = int(name)
+            except ValueError:
+                continue
+            if index < len(msg.effort):
+                self.latest_motor_current_a[motor_id] = abs(float(msg.effort[index])) * self.current_lsb_ma / 1000.0
+                self.latest_motor_feedback_time[motor_id] = now
+
+    def _safety_error(self):
+        now = time.time()
+        for motor_id, limit_a in self.current_limits_a.items():
+            received = self.latest_motor_feedback_time.get(motor_id)
+            if received is None or now - received > 0.25:
+                return "motor %d feedback is stale" % motor_id
+            current_a = self.latest_motor_current_a.get(motor_id, 0.0)
+            if current_a > limit_a:
+                return "motor %d current %.3fA exceeded %.3fA" % (motor_id, current_a, limit_a)
+        return None
+
     def _servo_tracking_cb(self, msg):
         self.latest_servo_tracking = list(msg.data)
 
@@ -121,9 +150,9 @@ class SingleLegSwingTest(object):
 
     def _servo_tracking_values(self):
         values = list(self.latest_servo_tracking or [])
-        while len(values) < 15:
+        while len(values) < 17:
             values.append(0.0)
-        return values[:15]
+        return values[:17]
 
     def _transfer_path_values(self):
         values = list(self.latest_transfer_path or [])
@@ -140,7 +169,7 @@ class SingleLegSwingTest(object):
         phase_id = int(round(values[7]))
         sequence = int(round(values[8]))
         if sequence > start_sequence and phase_id in SERVO_ENDPOINT_PHASES:
-            self._cycle_servo_passes[phase_id] = list(values[12:15])
+            self._cycle_servo_passes[phase_id] = list(values[12:15]) + [values[16]]
 
     def _make_body_ref(self, support_mask):
         msg = BodyReference()
@@ -220,6 +249,8 @@ class SingleLegSwingTest(object):
             "ticks_act_12", "ticks_act_3", "ticks_act_4", "ticks_act_16",
             "ticks_act_13", "ticks_act_5", "ticks_act_6", "ticks_act_17",
             "ticks_act_14", "ticks_act_7", "ticks_act_8", "ticks_act_18",
+            "servo_error_joint4_tick", "servo_last_pass_error_joint4_tick",
+            ] + ["motor_%d_current_a" % motor_id for motor_id in MOTOR_IDS
         ])
         t0 = time.time()
         rate = rospy.Rate(50)
@@ -245,6 +276,7 @@ class SingleLegSwingTest(object):
         self._publish_ref([True] * 4, int(self.hold_before_s * 50))
 
         all_cycles_passed = True
+        safety_aborted = False
 
         for cycle in range(1, self.cycles + 1):
             rospy.loginfo("")
@@ -275,6 +307,12 @@ class SingleLegSwingTest(object):
                 cmd_x, cmd_y, cmd_z, cmd_support = self._swing_target_for_leg(self.leg_name)
                 servo_values = self._servo_tracking_values()
                 transfer_values = self._transfer_path_values()
+                safety_error = self._safety_error()
+                if safety_error is not None:
+                    rospy.logerr("Single-leg safety abort: %s", safety_error)
+                    safety_aborted = True
+                    all_cycles_passed = False
+                    break
 
                 # Log
                 est = self.latest_estimated
@@ -343,7 +381,8 @@ class SingleLegSwingTest(object):
                     "%.0f" % (self.latest_ticks_actual.data[13] if self.latest_ticks_actual else 0),
                     "%.0f" % (self.latest_ticks_actual.data[14] if self.latest_ticks_actual else 0),
                     "%.0f" % (self.latest_ticks_actual.data[15] if self.latest_ticks_actual else 0),
-                ])
+                    "%.1f" % servo_values[15], "%.1f" % servo_values[16],
+                ] + ["%.6f" % self.latest_motor_current_a.get(motor_id, 0.0) for motor_id in MOTOR_IDS])
 
                 # Detect swing started (cmd_support transitions False)
                 if cmd_support is not None and not cmd_support:
@@ -395,6 +434,9 @@ class SingleLegSwingTest(object):
                 rospy.loginfo("  Cycle %d: swing wait timeout (%.1f s).", cycle, self.swing_wait_s)
                 all_cycles_passed = False
 
+            if safety_aborted:
+                break
+
             # Post-swing all-support hold
             rospy.loginfo("  Post-swing hold (%.1f s)...", self.hold_after_s)
             self._publish_ref([True] * 4, int(self.hold_after_s * 50))
@@ -412,7 +454,17 @@ class SingleLegSwingTest(object):
         # Print per-cycle summary
         rospy.loginfo("Summary: leg=%s, cycles=%d", self.leg_name, self.cycles)
         rospy.loginfo("Test finished. Restart the roslaunch to resume body_planner.")
-        return 0 if all_cycles_passed else 4
+        return 5 if safety_aborted else (0 if all_cycles_passed else 4)
+
+
+def parse_current_limits(value):
+    result = {}
+    for item in str(value or "").split(","):
+        if not item.strip():
+            continue
+        motor_id, limit_a = item.split(":", 1)
+        result[int(motor_id)] = float(limit_a)
+    return result
 
 
 if __name__ == "__main__":
@@ -423,6 +475,7 @@ if __name__ == "__main__":
     parser.add_argument("--hold-before", type=float, default=1.0, help="All-support hold before first swing (s, default 1)")
     parser.add_argument("--hold-after", type=float, default=1.0, help="All-support hold after each swing (s, default 1)")
     parser.add_argument("--output-dir", default=_default_test_logs_dir(), help="CSV output directory")
+    parser.add_argument("--motor-current-limits", default="", help="Comma-separated id:amp safety limits")
     parser.add_argument(
         "--allow-servo-gate-disabled",
         action="store_true",

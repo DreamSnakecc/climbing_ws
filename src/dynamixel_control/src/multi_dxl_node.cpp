@@ -28,6 +28,7 @@
 #define ADDR_PWM_LIMIT 36
 #define ADDR_CURRENT_LIMIT 38
 #define ADDR_TORQUE_ENABLE 64
+#define ADDR_DRIVE_MODE 10
 #define ADDR_POSITION_D_GAIN 80
 #define ADDR_POSITION_I_GAIN 82
 #define ADDR_POSITION_P_GAIN 84
@@ -563,6 +564,7 @@ bool readPositionTuningLocked(
     dynamixel_control::GetPositionTuning::Response *res,
     std::string *error)
 {
+    uint8_t drive_mode = 0;
     uint8_t operating_mode = 0;
     uint16_t pwm_limit = 0;
     uint16_t current_limit = 0;
@@ -572,7 +574,8 @@ bool readPositionTuningLocked(
     uint32_t profile_velocity = 0;
     uint32_t profile_acceleration = 0;
 
-    if (!read1Byte(id, ADDR_OPERATING_MODE, &operating_mode, error) ||
+    if (!read1Byte(id, ADDR_DRIVE_MODE, &drive_mode, error) ||
+        !read1Byte(id, ADDR_OPERATING_MODE, &operating_mode, error) ||
         !read2Byte(id, ADDR_PWM_LIMIT, &pwm_limit, error) ||
         !read2Byte(id, ADDR_CURRENT_LIMIT, &current_limit, error) ||
         !read2Byte(id, ADDR_POSITION_P_GAIN, &p_gain, error) ||
@@ -582,6 +585,7 @@ bool readPositionTuningLocked(
         !read4Byte(id, ADDR_PROFILE_ACCELERATION, &profile_acceleration, error))
         return false;
 
+    res->drive_mode = static_cast<int32_t>(drive_mode);
     res->operating_mode = static_cast<int32_t>(operating_mode);
     res->pwm_limit = static_cast<int32_t>(pwm_limit);
     res->current_limit = static_cast<int32_t>(current_limit);
@@ -624,7 +628,8 @@ bool setPositionTuningService(dynamixel_control::SetPositionTuning::Request &req
     if (req.position_p_gain < 0 || req.position_p_gain > 16383 ||
         req.position_i_gain < 0 || req.position_i_gain > 16383 ||
         req.position_d_gain < 0 || req.position_d_gain > 16383 ||
-        req.profile_velocity < 0 || req.profile_acceleration < 0)
+        req.profile_velocity < 0 || req.profile_velocity > 32767 ||
+        req.profile_acceleration < 0 || req.profile_acceleration > 32767)
     {
         res.success = false;
         res.message = "requested tuning values are outside the allowed range";

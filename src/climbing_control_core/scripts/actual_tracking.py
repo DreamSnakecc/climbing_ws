@@ -189,6 +189,54 @@ def lag_compensated_tracking_samples(samples, shift_samples, phase_name, wall_no
     return compensated
 
 
+def phase_endpoint_overshoot(samples, phase_name, deadband_m=0.001):
+    phase = str(phase_name).upper()
+    segments = []
+    active = []
+    for sample in samples:
+        if str(sample.get("phase", "")).upper() == phase:
+            active.append(sample)
+        elif active:
+            segments.append(active)
+            active = []
+    if active:
+        segments.append(active)
+
+    max_overshoot_m = 0.0
+    max_zero_crossings = 0
+    for segment in segments:
+        usable = [
+            sample for sample in segment
+            if sample.get("command_position") is not None and sample.get("actual_position") is not None
+        ]
+        if len(usable) < 2:
+            continue
+        start = usable[0]["command_position"]
+        target = usable[-1]["command_position"]
+        direction = [float(target[index]) - float(start[index]) for index in range(3)]
+        span = _norm(direction)
+        if span <= 1e-9:
+            continue
+        unit = [value / span for value in direction]
+        projected = [
+            _dot(_sub(sample["actual_position"], target), unit)
+            for sample in usable
+        ]
+        max_overshoot_m = max(max_overshoot_m, max([0.0] + projected))
+        signs = []
+        for error in projected:
+            if abs(error) <= float(deadband_m):
+                continue
+            signs.append(1 if error > 0.0 else -1)
+        crossings = sum(1 for index in range(1, len(signs)) if signs[index] != signs[index - 1])
+        max_zero_crossings = max(max_zero_crossings, crossings)
+    return {
+        "segment_count": len(segments),
+        "max_overshoot_m": max_overshoot_m,
+        "max_zero_crossings": max_zero_crossings,
+    }
+
+
 def summarize_tracking_samples(
     samples,
     tangent_tolerance_m=0.006,
