@@ -45,7 +45,7 @@ DEFAULT_AUTOTUNE = {
     "minimum_cycles_per_leg": 2,
     "leg_max_trials": 12,
     "extended_max_candidates": 8,
-    "p_multipliers": [0.75, 1.0, 1.25, 1.5],
+    "p_multipliers": [0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
     "i_candidates": [0, 25, 50, 100, 200],
     "d_candidates": [0, 16, 32, 64, 128],
     "velocity_candidates": [100, 150, 200, 250, 300],
@@ -303,6 +303,13 @@ def leg_endpoint_improves(candidate, baseline):
     return candidate.get("terminal_max_abs_error_tick", float("inf")) < baseline.get("terminal_max_abs_error_tick", float("inf"))
 
 
+def step_fatal_safe(metric, max_current_a):
+    return bool(
+        metric.get("feedback_safe") and
+        float(metric.get("max_current_a", float("inf"))) <= float(max_current_a)
+    )
+
+
 def combine_step_metrics(
     direction_metrics,
     current_limit_a,
@@ -342,6 +349,7 @@ def combine_step_metrics(
     }
     result["feedback_safe"] = all(metric.get("feedback_safe", metric["safe"]) for metric in direction_metrics)
     result["current_safe"] = result["current_ratio"] <= float(max_current_ratio)
+    result["fatal_safe"] = result["feedback_safe"] and result["current_safe"]
     result["endpoint_pass"] = all(metric.get("endpoint_pass", metric["safe"]) for metric in direction_metrics)
     result["overshoot_safe"] = all(metric.get("overshoot_safe", False) for metric in direction_metrics)
     result["oscillation_safe"] = all(metric.get("oscillation_safe", False) for metric in direction_metrics)
@@ -874,28 +882,35 @@ class DxlAutoTuner(object):
         positive = self._run_step(
             motor_id, abs(step_ticks), label + "_plus", session_dir, max_current_a,
         )
+        positive_fatal_safe = step_fatal_safe(positive, max_current_a)
         positive_hard_safe = (
-            positive.get("feedback_safe") and positive.get("overshoot_safe") and
-            positive.get("oscillation_safe") and
-            float(positive.get("max_current_a", float("inf"))) <= max_current_a
+            positive_fatal_safe and positive.get("overshoot_safe") and
+            positive.get("oscillation_safe")
         )
         if not positive_hard_safe:
-            combined = {"safe": False, "hard_safe": False, "directions": [positive], "score": None}
+            combined = {
+                "safe": False,
+                "hard_safe": False,
+                "fatal_safe": positive_fatal_safe,
+                "directions": [positive],
+                "score": None,
+            }
             combined["tuning"] = dict(tuning)
             combined["label"] = label
             return combined
         negative = self._run_step(
             motor_id, -abs(step_ticks), label + "_minus", session_dir, max_current_a,
         )
+        negative_fatal_safe = step_fatal_safe(negative, max_current_a)
         negative_hard_safe = (
-            negative.get("feedback_safe") and negative.get("overshoot_safe") and
-            negative.get("oscillation_safe") and
-            float(negative.get("max_current_a", float("inf"))) <= max_current_a
+            negative_fatal_safe and negative.get("overshoot_safe") and
+            negative.get("oscillation_safe")
         )
         if not negative_hard_safe:
             combined = {
                 "safe": False,
                 "hard_safe": False,
+                "fatal_safe": positive_fatal_safe and negative_fatal_safe,
                 "directions": [positive, negative],
                 "score": None,
             }
@@ -915,16 +930,20 @@ class DxlAutoTuner(object):
     def _improves(candidate, baseline):
         candidate_score = candidate.get("score")
         baseline_score = baseline.get("score")
-        return (
-            candidate.get("safe") and candidate_score is not None and
-            (baseline_score is None or candidate_score < baseline_score)
-        )
+        if candidate_score is None or not candidate.get("hard_safe"):
+            return False
+        if baseline.get("safe"):
+            return bool(candidate.get("safe") and
+                        (baseline_score is None or candidate_score < baseline_score))
+        if candidate.get("safe"):
+            return True
+        return baseline_score is None or candidate_score < baseline_score
 
     def _tune_motor(self, motor_id, baseline_tuning, session_dir):
         try:
             step_ticks = int(self.autotune["bench_step_ticks"])
             baseline = self._run_trial(motor_id, baseline_tuning, step_ticks, "baseline", session_dir)
-            if not baseline.get("hard_safe"):
+            if not baseline.get("fatal_safe"):
                 raise RuntimeError("motor %d baseline exceeded the hard current or feedback safety limit" % motor_id)
             best = baseline
             trials = [baseline]
@@ -1417,6 +1436,7 @@ def main():
             baseline_tuning[str(motor_id)] = tuning
             bench_results[str(motor_id)] = tuner._tune_motor(motor_id, tuning, session["session_dir"])
             if not bench_results[str(motor_id)]["selected"].get("safe"):
+                tuner._set_tuning(motor_id, tuning)
                 session["stage"] = "bench_failed"
                 session["baseline_tuning"] = baseline_tuning
                 session["bench"] = {"motors": bench_results}

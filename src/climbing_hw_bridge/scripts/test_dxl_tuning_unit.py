@@ -55,6 +55,7 @@ class DxlTuningUnitTest(unittest.TestCase):
         metric = tuner.parse_step_csv(path, 3.0, 0.10, 2.0, 1)
         self.assertFalse(metric["safe"])
         self.assertFalse(metric["overshoot_safe"])
+        self.assertTrue(tuner.step_fatal_safe(metric, 1.0))
 
     def test_crawl_metric_comparison(self):
         baseline = {
@@ -153,6 +154,7 @@ class DxlTuningUnitTest(unittest.TestCase):
         candidates = tuner.leg_endpoint_candidates(original, original)
         labels = [item[0] for item in candidates]
         self.assertIn("p_600", labels)
+        self.assertIn("p_4800", labels)
         self.assertIn("i_200", labels)
         self.assertIn("d_128", labels)
         self.assertIn("velocity_300", labels)
@@ -240,6 +242,49 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertTrue(tuner.bench_result_passed(result))
         result["extended"]["candidate"]["safe"] = False
         self.assertFalse(tuner.bench_result_passed(result))
+
+    def test_baseline_overshoot_continues_candidate_search(self):
+        original = {
+            "p": 800, "i": 0, "d": 0, "velocity": 200, "acceleration": 300,
+            "current_limit": 2047,
+        }
+        test_tuner = object.__new__(tuner.DxlAutoTuner)
+        test_tuner.autotune = dict(tuner.DEFAULT_AUTOTUNE)
+        test_tuner.autotune.update({
+            "p_multipliers": [0.75, 1.0],
+            "i_candidates": [0],
+            "d_candidates": [0],
+            "velocity_candidates": [200],
+            "acceleration_candidates": [300],
+        })
+        applied = []
+
+        def run_trial(_motor_id, tuning, _step_ticks, label, _session_dir):
+            safe = int(tuning["p"]) == 600
+            return {
+                "fatal_safe": True,
+                "hard_safe": safe,
+                "safe": safe,
+                "score": 1.0 if safe else None,
+                "tuning": dict(tuning),
+                "label": label,
+            }
+
+        test_tuner._run_trial = run_trial
+        test_tuner._set_tuning = lambda _motor_id, tuning: applied.append(dict(tuning))
+        result = test_tuner._tune_motor(1, original, "/tmp")
+        self.assertEqual(result["selected"]["tuning"]["p"], 600)
+        self.assertEqual(applied[-1]["p"], 600)
+
+    def test_partial_candidate_can_seed_combined_search(self):
+        overshooting = {"safe": False, "hard_safe": False, "score": None}
+        partial = {"safe": False, "hard_safe": True, "score": 2.0}
+        improved_partial = {"safe": False, "hard_safe": True, "score": 1.0}
+        passed = {"safe": True, "hard_safe": True, "score": 1.5}
+        self.assertTrue(tuner.DxlAutoTuner._improves(partial, overshooting))
+        self.assertTrue(tuner.DxlAutoTuner._improves(improved_partial, partial))
+        self.assertTrue(tuner.DxlAutoTuner._improves(passed, improved_partial))
+        self.assertFalse(tuner.DxlAutoTuner._improves(improved_partial, passed))
 
 
 if __name__ == "__main__":
