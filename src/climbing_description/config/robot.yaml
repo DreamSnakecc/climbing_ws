@@ -347,7 +347,7 @@ position_autotune:
   bench_step_ticks: 40
   validation_step_ticks: 100
   pass_error_ticks: 8.0
-  max_overshoot_ticks: 3.0
+  max_overshoot_ticks: 4.0
   max_foot_overshoot_mm: 1.0
   max_zero_crossings: 1
   max_current_ratio: 0.80

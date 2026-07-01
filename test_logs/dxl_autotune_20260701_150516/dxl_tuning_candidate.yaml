@@ -1,0 +1,34 @@
+left_board:
+  position_gains:
+    '11':
+      p: 1600
+      i: 0
+      d: 32
+    '1':
+      p: 900
+      i: 0
+      d: 0
+    '2':
+      p: 2400
+      i: 0
+      d: 0
+    '15':
+      p: 1800
+      i: 0
+      d: 0
+  position_profiles:
+    '11':
+      velocity: 250
+      acceleration: 300
+    '1':
+      velocity: 200
+      acceleration: 300
+    '2':
+      velocity: 200
+      acceleration: 300
+    '15':
+      velocity: 200
+      acceleration: 300
+right_board:
+  position_gains: {}
+  position_profiles: {}

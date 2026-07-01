@@ -267,6 +267,28 @@ class DxlTuningUnitTest(unittest.TestCase):
         result["stable_tuning"] = {"p": 600}
         self.assertFalse(tuner.bench_result_passed(result, tuner.DEFAULT_AUTOTUNE))
 
+    def test_existing_extended_results_fall_back_to_best_loaded_candidate(self):
+        stable = {"p": 1200, "i": 0, "d": 0, "velocity": 200, "acceleration": 300}
+        aggressive = dict(stable)
+        aggressive["p"] = 3600
+        safe = dict(stable)
+        safe.update({"p": 1800, "i": 100})
+        result = {
+            "stable_tuning": stable,
+            "baseline": {"safe": False, "tuning": stable},
+            "selected": {"safe": True, "tuning": aggressive},
+            "extended": {
+                "candidate": {"safe": True, "score": 0.2, "tuning": aggressive},
+                "attempts": [{
+                    "bench": {"safe": True, "score": 0.4, "tuning": safe},
+                    "validation": {"safe": True, "score": 0.5, "tuning": safe},
+                }],
+            },
+        }
+        self.assertTrue(tuner.select_best_loaded_extended(result, tuner.DEFAULT_AUTOTUNE))
+        self.assertEqual(result["selected"]["tuning"]["p"], 1800)
+        self.assertTrue(tuner.bench_result_passed(result, tuner.DEFAULT_AUTOTUNE))
+
     def test_baseline_overshoot_continues_candidate_search(self):
         original = {
             "p": 800, "i": 0, "d": 0, "velocity": 200, "acceleration": 300,

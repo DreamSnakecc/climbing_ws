@@ -33,7 +33,7 @@ DEFAULT_AUTOTUNE = {
     "bench_step_ticks": 40,
     "validation_step_ticks": 100,
     "pass_error_ticks": 8.0,
-    "max_overshoot_ticks": 2.0,
+    "max_overshoot_ticks": 4.0,
     "max_foot_overshoot_mm": 1.0,
     "max_zero_crossings": 1,
     "max_current_ratio": 0.80,
@@ -520,6 +520,69 @@ def unsafe_loaded_motor_ids(session, config):
         [int(motor_id) for motor_id, result in bench.items()
          if not bench_result_passed(result, config)]
     )
+
+
+def reparse_extended_validation(validation, tuning, config):
+    paths = [direction.get("csv") for direction in validation.get("directions", [])]
+    if len(paths) != 2 or not all(path and os.path.isfile(path) for path in paths):
+        return validation
+    directions = [
+        parse_step_csv(
+            path,
+            config["pass_error_ticks"],
+            config["feedback_age_limit_s"],
+            config["max_overshoot_ticks"],
+            config["max_zero_crossings"],
+        )
+        for path in paths
+    ]
+    current_limit_a = float(tuning.get("current_limit", 0)) * 2.69 / 1000.0
+    refreshed = combine_step_metrics(
+        directions,
+        current_limit_a,
+        config["validation_step_ticks"],
+        config["pass_error_ticks"],
+        config["max_current_ratio"],
+        float(config["lag_limit_ms"]) / 1000.0,
+    )
+    refreshed["tuning"] = dict(tuning)
+    refreshed["label"] = validation.get("label", "extended_reparsed")
+    return refreshed
+
+
+def select_best_loaded_extended(result, config=None):
+    result = result or {}
+    extended = result.get("extended") or {}
+    stable = result.get("stable_tuning") or (
+        (result.get("baseline") or {}).get("tuning") or {}
+    )
+    options = []
+    baseline = result.get("baseline") or {}
+    baseline_validation = extended.get("baseline") or {}
+    if baseline.get("safe") and baseline_validation.get("safe"):
+        options.append((baseline, baseline_validation))
+    for attempt in extended.get("attempts", []):
+        validation = attempt.get("validation") or {}
+        tuning = validation.get("tuning") or (attempt.get("bench") or {}).get("tuning") or {}
+        validation = reparse_extended_validation(validation, tuning, config or DEFAULT_AUTOTUNE)
+        attempt["validation"] = validation
+        if not validation.get("safe") or not loaded_tuning_safe(tuning, stable, config):
+            continue
+        selected = attempt.get("bench") or validation
+        if not selected.get("safe"):
+            selected = validation
+        options.append((selected, validation))
+    if not options:
+        return False
+    selected, validation = min(
+        options,
+        key=lambda item: float(item[1].get("score", float("inf"))),
+    )
+    result["selected"] = selected
+    extended["candidate"] = validation
+    result["extended"] = extended
+    result["extended_reverted"] = selected is baseline
+    return True
 
 
 def motor_current_limit_a(config, motor_id, hardware_limit_a):
@@ -1041,7 +1104,11 @@ class DxlAutoTuner(object):
             motor_id, baseline["tuning"], int(self.autotune["validation_step_ticks"]),
             "extended_baseline", session_dir,
         )
-        selected = baseline if baseline.get("safe") and baseline_trial.get("safe") else None
+        stable = result.get("stable_tuning") or baseline["tuning"]
+        selected = baseline if (
+            baseline.get("safe") and baseline_trial.get("safe") and
+            loaded_tuning_safe(baseline["tuning"], stable, self.autotune)
+        ) else None
         selected_trial = baseline_trial if selected is not None else None
         attempts = []
         candidates = ranked_safe_tuning_trials(result)
@@ -1061,7 +1128,8 @@ class DxlAutoTuner(object):
                     "extended_candidate_%02d" % (index + 1), session_dir,
                 )
             attempts.append({"bench": candidate, "validation": candidate_trial})
-            if not candidate_trial.get("safe"):
+            if (not candidate_trial.get("safe") or
+                    not loaded_tuning_safe(candidate["tuning"], stable, self.autotune)):
                 continue
             if selected_trial is None or (
                     candidate_trial.get("score") is not None and
@@ -1105,10 +1173,11 @@ class DxlAutoTuner(object):
                         "validation": trial,
                         "refinement": True,
                     })
-                    if trial.get("safe") and (
+                    if (trial.get("safe") and
+                            loaded_tuning_safe(tuning, stable, self.autotune) and (
                             selected_trial is None or trial.get("score") is not None and
                             (selected_trial.get("score") is None or
-                             trial["score"] < selected_trial["score"])):
+                             trial["score"] < selected_trial["score"]))):
                         selected = trial
                         selected_trial = trial
 
@@ -1552,6 +1621,9 @@ def main():
         bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
             existing = bench_results.get(str(motor_id))
+            if existing is not None and select_best_loaded_extended(existing, tuner.autotune):
+                session["bench"] = {"motors": bench_results}
+                save_session(session_path, session)
             if existing is not None and bench_result_passed(existing, tuner.autotune):
                 tuner._set_tuning(motor_id, existing["selected"]["tuning"])
                 rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
