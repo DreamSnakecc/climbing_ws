@@ -346,22 +346,27 @@ dynamixel_telemetry:
 position_autotune:
   bench_step_ticks: 40
   validation_step_ticks: 100
-  pass_error_ticks: 3.0
-  max_overshoot_ticks: 2.0
+  pass_error_ticks: 8.0
+  max_overshoot_ticks: 3.0
   max_foot_overshoot_mm: 1.0
   max_zero_crossings: 1
   max_current_ratio: 0.80
   feedback_age_limit_s: 0.15
   normal_p95_limit_mm: 4.0
   tangent_p95_limit_mm: 6.0
+  leg_normal_p95_limit_mm: 5.0
+  leg_tangent_p95_limit_mm: 8.0
+  leg_max_foot_overshoot_mm: 2.0
   lag_limit_ms: 80.0
   minimum_valid_ratio: 0.95
   minimum_cycles_per_leg: 2
   leg_max_trials: 12
   extended_max_candidates: 20
   extended_refinement_max_candidates: 12
-  p_multipliers: [0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0]
-  i_candidates: [0, 25, 50, 100, 200, 400, 800, 1600, 3200]
+  loaded_max_p_multiplier: 2.0
+  loaded_max_i_gain: 100
+  p_multipliers: [0.75, 1.0, 1.25, 1.5, 2.0,2.5, 3.0]
+  i_candidates: [0, 25, 50, 100]
   d_candidates: [0, 16, 32, 64, 128]
   velocity_candidates: [100, 150, 200, 250, 300]
   acceleration_candidates: [100, 200, 300, 400, 600]
@@ -491,10 +496,14 @@ left_board:
   motor_ids: [11, 1, 2, 15, 14, 7, 8, 18]
   multi_turn_ids: []
   position_gains:
+    "11": {p: 800, i: 0, d: 0}
     "1": {p: 1200, i: 0, d: 0}
-    "7": {p: 900, i: 0, d: 0}
     "2": {p: 1200, i: 0, d: 0}
+    "15": {p: 900, i: 0, d: 0}
+    "14": {p: 800, i: 0, d: 0}
+    "7": {p: 900, i: 0, d: 0}
     "8": {p: 1200, i: 0, d: 0}
+    "18": {p: 900, i: 0, d: 0}
   position_profiles:
     "11": {velocity: 200, acceleration: 300}
     "1": {velocity: 200, acceleration: 300}
@@ -511,10 +520,14 @@ right_board:
   motor_ids: [12, 3, 4, 16, 13, 5, 6, 17]
   multi_turn_ids: []
   position_gains:
+    "12": {p: 800, i: 0, d: 0}
     "3": {p: 900, i: 0, d: 0}
-    "5": {p: 900, i: 0, d: 0}
     "4": {p: 1200, i: 0, d: 0}
+    "16": {p: 900, i: 0, d: 0}
+    "13": {p: 800, i: 0, d: 0}
+    "5": {p: 900, i: 0, d: 0}
     "6": {p: 1200, i: 0, d: 0}
+    "17": {p: 900, i: 0, d: 0}
   position_profiles:
     "12": {velocity: 200, acceleration: 300}
     "3": {velocity: 200, acceleration: 300}

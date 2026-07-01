@@ -161,10 +161,10 @@ class DxlTuningUnitTest(unittest.TestCase):
         candidates = tuner.leg_endpoint_candidates(original, original)
         labels = [item[0] for item in candidates]
         self.assertIn("p_600", labels)
-        self.assertIn("p_4800", labels)
-        self.assertIn("p_9600", labels)
-        self.assertIn("i_200", labels)
-        self.assertIn("i_3200", labels)
+        self.assertIn("p_1600", labels)
+        self.assertNotIn("p_2400", labels)
+        self.assertIn("i_100", labels)
+        self.assertNotIn("i_200", labels)
         self.assertIn("d_128", labels)
         self.assertIn("velocity_300", labels)
         self.assertIn("acceleration_600", labels)
@@ -254,6 +254,18 @@ class DxlTuningUnitTest(unittest.TestCase):
         result["extended"]["candidate"] = None
         self.assertFalse(tuner.bench_result_passed(result))
         self.assertFalse(tuner.bench_result_passed(None))
+
+    def test_loaded_gain_limits_reject_aggressive_candidate(self):
+        result = {
+            "baseline": {"tuning": {"p": 800}},
+            "selected": {"safe": True, "tuning": {"p": 2400, "i": 0}},
+            "extended": {"candidate": {"safe": True}},
+        }
+        self.assertFalse(tuner.bench_result_passed(result, tuner.DEFAULT_AUTOTUNE))
+        result["selected"]["tuning"] = {"p": 1600, "i": 100}
+        self.assertTrue(tuner.bench_result_passed(result, tuner.DEFAULT_AUTOTUNE))
+        result["stable_tuning"] = {"p": 600}
+        self.assertFalse(tuner.bench_result_passed(result, tuner.DEFAULT_AUTOTUNE))
 
     def test_baseline_overshoot_continues_candidate_search(self):
         original = {

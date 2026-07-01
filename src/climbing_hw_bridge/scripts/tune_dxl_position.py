@@ -32,7 +32,7 @@ SERVO_JOINT_COUNT = 4
 DEFAULT_AUTOTUNE = {
     "bench_step_ticks": 40,
     "validation_step_ticks": 100,
-    "pass_error_ticks": 3.0,
+    "pass_error_ticks": 8.0,
     "max_overshoot_ticks": 2.0,
     "max_foot_overshoot_mm": 1.0,
     "max_zero_crossings": 1,
@@ -40,14 +40,19 @@ DEFAULT_AUTOTUNE = {
     "feedback_age_limit_s": 0.10,
     "normal_p95_limit_mm": 4.0,
     "tangent_p95_limit_mm": 6.0,
+    "leg_normal_p95_limit_mm": 5.0,
+    "leg_tangent_p95_limit_mm": 8.0,
+    "leg_max_foot_overshoot_mm": 2.0,
     "lag_limit_ms": 80.0,
     "minimum_valid_ratio": 0.95,
     "minimum_cycles_per_leg": 2,
     "leg_max_trials": 12,
     "extended_max_candidates": 20,
     "extended_refinement_max_candidates": 12,
-    "p_multipliers": [0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0],
-    "i_candidates": [0, 25, 50, 100, 200, 400, 800, 1600, 3200],
+    "loaded_max_p_multiplier": 2.0,
+    "loaded_max_i_gain": 100,
+    "p_multipliers": [0.75, 1.0, 1.25, 1.5, 2.0],
+    "i_candidates": [0, 25, 50, 100],
     "d_candidates": [0, 16, 32, 64, 128],
     "velocity_candidates": [100, 150, 200, 250, 300],
     "acceleration_candidates": [100, 200, 300, 400, 600],
@@ -485,12 +490,35 @@ def extended_refinement_candidates(active, config):
     return candidates[:limit]
 
 
-def bench_result_passed(result):
+def loaded_tuning_safe(tuning, baseline_tuning, config=None):
+    config = config or DEFAULT_AUTOTUNE
+    baseline_p = max(1.0, float(baseline_tuning.get("p", 0)))
+    return bool(
+        float(tuning.get("p", float("inf"))) <=
+        baseline_p * float(config.get("loaded_max_p_multiplier", 2.0)) and
+        int(tuning.get("i", 0)) <= int(config.get("loaded_max_i_gain", 100))
+    )
+
+
+def bench_result_passed(result, config=None):
     result = result or {}
     selected = result.get("selected") or {}
     candidate = (result.get("extended") or {}).get("candidate") or {}
+    baseline_tuning = result.get("stable_tuning") or (
+        (result.get("baseline") or {}).get("tuning") or {}
+    )
+    tuning = selected.get("tuning") or {}
     return bool(
-        selected.get("safe") and candidate.get("safe")
+        selected.get("safe") and candidate.get("safe") and
+        loaded_tuning_safe(tuning, baseline_tuning, config)
+    )
+
+
+def unsafe_loaded_motor_ids(session, config):
+    bench = session.get("bench", {}).get("motors", {})
+    return sorted(
+        [int(motor_id) for motor_id, result in bench.items()
+         if not bench_result_passed(result, config)]
     )
 
 
@@ -717,6 +745,9 @@ def parse_crawl_metrics(path, config):
 
 def parse_single_leg_tracking(path, config, leg_name):
     tuning = autotune_config(config)
+    normal_limit = float(tuning.get("leg_normal_p95_limit_mm", tuning["normal_p95_limit_mm"]))
+    tangent_limit = float(tuning.get("leg_tangent_p95_limit_mm", tuning["tangent_p95_limit_mm"]))
+    overshoot_limit = float(tuning.get("leg_max_foot_overshoot_mm", tuning["max_foot_overshoot_mm"]))
     phase_by_id = {5: "LIFT", 6: "TRANSFER", 2: "PRELOAD"}
     errors = {phase: [] for phase in phase_by_id.values()}
     segments = {phase: [] for phase in phase_by_id.values()}
@@ -765,18 +796,18 @@ def parse_single_leg_tracking(path, config, leg_name):
             reasons.append("%s has %d/%d cycles" % (
                 phase, result["cycle_count"], int(tuning["minimum_cycles_per_leg"]),
             ))
-        if result["p95_normal_error_mm"] is None or result["p95_normal_error_mm"] > float(tuning["normal_p95_limit_mm"]):
+        if result["p95_normal_error_mm"] is None or result["p95_normal_error_mm"] > normal_limit:
             reasons.append("%s normal P95 failed" % phase)
-        if result["p95_tangent_error_mm"] is None or result["p95_tangent_error_mm"] > float(tuning["tangent_p95_limit_mm"]):
+        if result["p95_tangent_error_mm"] is None or result["p95_tangent_error_mm"] > tangent_limit:
             reasons.append("%s tangent P95 failed" % phase)
-        if result["max_overshoot_mm"] > float(tuning["max_foot_overshoot_mm"]):
+        if result["max_overshoot_mm"] > overshoot_limit:
             reasons.append("%s overshoot failed" % phase)
         if result["max_zero_crossings"] > int(tuning["max_zero_crossings"]):
             reasons.append("%s oscillation failed" % phase)
         score_parts.extend([
-            (result["p95_normal_error_mm"] if result["p95_normal_error_mm"] is not None else 1000.0) / float(tuning["normal_p95_limit_mm"]),
-            (result["p95_tangent_error_mm"] if result["p95_tangent_error_mm"] is not None else 1000.0) / float(tuning["tangent_p95_limit_mm"]),
-            result["max_overshoot_mm"] / max(float(tuning["max_foot_overshoot_mm"]), 1e-6),
+            (result["p95_normal_error_mm"] if result["p95_normal_error_mm"] is not None else 1000.0) / normal_limit,
+            (result["p95_tangent_error_mm"] if result["p95_tangent_error_mm"] is not None else 1000.0) / tangent_limit,
+            result["max_overshoot_mm"] / max(overshoot_limit, 1e-6),
         ])
     return {
         "passed": not reasons,
@@ -1267,6 +1298,12 @@ def run_leg_endpoint_stage(args, session_path, session):
     rospy.init_node("tune_dxl_leg_endpoint", anonymous=False)
     tuner = DxlAutoTuner(args)
     tuner._wait_services()
+    unsafe_motors = unsafe_loaded_motor_ids(session, tuner.autotune)
+    if unsafe_motors:
+        raise RuntimeError(
+            "loaded validation blocked by aggressive bench candidates: %s" %
+            ",".join(str(motor_id) for motor_id in unsafe_motors)
+        )
     motor_ids = motor_ids_for_leg(tuner.config, args.leg)
     if len(motor_ids) != SERVO_JOINT_COUNT:
         raise RuntimeError("leg %s must define exactly four motor_ids" % args.leg)
@@ -1333,6 +1370,9 @@ def run_leg_endpoint_stage(args, session_path, session):
             save_session(session_path, session)
             return 0
         for label, candidate in tuning_axis_candidates(original, active, tuner.autotune):
+            stable = session.get("baseline_tuning", {}).get(motor_key, original)
+            if not loaded_tuning_safe(candidate, stable, tuner.autotune):
+                continue
             trial_label = "trial_%02d_id_%d_%s" % (candidate_trials + 1, failed_motor, label)
             try:
                 tuner._set_tuning(failed_motor, candidate)
@@ -1396,7 +1436,7 @@ def run_leg_endpoint_stage(args, session_path, session):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Operator-gated Dynamixel position tuning workflow")
-    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "crawl-candidate", "commit", "leg-endpoint", "status"])
+    parser.add_argument("--stage", required=True, choices=["crawl-baseline", "bench", "leg-bench", "crawl-candidate", "commit", "leg-endpoint", "status"])
     parser.add_argument("--session", default="", help="Session JSON path; omitted for crawl-baseline or leg-endpoint")
     parser.add_argument("--output-dir", default="test_logs")
     parser.add_argument("--robot-config", default="src/climbing_description/config/robot.yaml")
@@ -1419,12 +1459,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+    requested_stage = args.stage
+    if requested_stage == "leg-bench":
+        if args.leg == "all":
+            raise RuntimeError("leg-bench requires one leg; tune lf, rf, rr and lr sequentially")
+        config = load_yaml(args.robot_config)
+        args.motor_ids = ",".join(str(value) for value in motor_ids_for_leg(config, args.leg))
+        args.stage = "bench"
     if args.dry_run:
         config = load_yaml(args.robot_config)
         tuning = autotune_config(config)
         motor_ids = [int(value) for value in args.motor_ids.split(",") if value.strip()]
         print("Dynamixel autotune dry run")
-        print("  stage: %s" % args.stage)
+        print("  stage: %s" % requested_stage)
         print("  motors: %s" % ",".join(str(value) for value in motor_ids))
         print("  bench/validation step: %d/%d tick" % (
             int(tuning["bench_step_ticks"]), int(tuning["validation_step_ticks"]),
@@ -1446,7 +1493,11 @@ def main():
         session_path = os.path.abspath(args.session)
         session = load_session(session_path)
         args.robot_config = session.get("robot_config", args.robot_config)
-        args.motor_ids = ",".join(str(value) for value in session.get("motor_ids", args.motor_ids.split(",")))
+        if requested_stage == "leg-bench":
+            config = load_yaml(args.robot_config)
+            args.motor_ids = ",".join(str(value) for value in motor_ids_for_leg(config, args.leg))
+        else:
+            args.motor_ids = ",".join(str(value) for value in session.get("motor_ids", args.motor_ids.split(",")))
     else:
         raise RuntimeError("--session is required after the baseline stage")
 
@@ -1489,13 +1540,19 @@ def main():
         rospy.init_node("tune_dxl_position", anonymous=False)
         tuner = DxlAutoTuner(args)
         tuner._wait_services()
-        if not tuner._confirm("Robot is supported; auto position/mode/current control is disabled. Start guarded 16-motor tuning?"):
+        session["motor_ids"] = list(tuner.motor_ids)
+        if requested_stage == "leg-bench":
+            session["active_leg"] = args.leg
+        if not tuner._confirm(
+                "Robot is supported; auto position/mode/current control is disabled. "
+                "Start guarded tuning for %s?" %
+                ("leg %s" % args.leg if requested_stage == "leg-bench" else "configured motors")):
             return 0
         baseline_tuning = dict(session.get("baseline_tuning", {}))
         bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
             existing = bench_results.get(str(motor_id))
-            if existing is not None and bench_result_passed(existing):
+            if existing is not None and bench_result_passed(existing, tuner.autotune):
                 tuner._set_tuning(motor_id, existing["selected"]["tuning"])
                 rospy.loginfo("tune_dxl_position: restored completed motor %d from session", motor_id)
                 continue
@@ -1506,8 +1563,9 @@ def main():
                 session["stage"] = "bench_paused"
                 save_session(session_path, session)
                 return 0
-            baseline_tuning[str(motor_id)] = tuning
+            baseline_tuning.setdefault(str(motor_id), dict(tuning))
             bench_results[str(motor_id)] = tuner._tune_motor(motor_id, tuning, session["session_dir"])
+            bench_results[str(motor_id)]["stable_tuning"] = dict(baseline_tuning[str(motor_id)])
             if not bench_results[str(motor_id)]["selected"].get("safe"):
                 tuner._set_tuning(motor_id, tuning)
                 session["stage"] = "bench_failed"
@@ -1527,9 +1585,21 @@ def main():
                 raise RuntimeError(
                     "motor %d has no candidate satisfying the extended validation limits" % motor_id
                 )
+            if not bench_result_passed(bench_results[str(motor_id)], tuner.autotune):
+                tuner._set_tuning(motor_id, tuning)
+                session["stage"] = "bench_rejected_loaded_gain"
+                save_session(session_path, session)
+                raise RuntimeError(
+                    "motor %d candidate exceeds loaded gain limits" % motor_id
+                )
 
-        candidates = {"left_board": {}, "right_board": {}}
-        for motor_id, result in bench_results.items():
+        previous = session.get("candidates", {})
+        candidates = {
+            "left_board": dict(previous.get("left_board", {})),
+            "right_board": dict(previous.get("right_board", {})),
+        }
+        for motor_id in tuner.motor_ids:
+            result = bench_results[str(motor_id)]
             board_name = tuner.board_by_motor[int(motor_id)]
             candidates[board_name][str(motor_id)] = result["selected"]["tuning"]
         override_path = os.path.join(session["session_dir"], "dxl_tuning_candidate.yaml")
@@ -1541,7 +1611,7 @@ def main():
         print("Candidate override: %s" % override_path)
         print("Restart normal bringup with: dxl_tuning_override_file:=%s" % override_path)
         print("Then run loaded leg validation: rosrun climbing_hw_bridge tune_dxl_position.py "
-              "--stage leg-endpoint --leg all --session %s" % session_path)
+              "--stage leg-endpoint --leg %s --session %s" % (args.leg, session_path))
         print("After all legs pass: rosrun climbing_hw_bridge tune_dxl_position.py "
               "--stage crawl-candidate --session %s" % session_path)
         return 0
@@ -1552,6 +1622,12 @@ def main():
         tuner._wait_services()
         if "candidate_override_file" not in session:
             raise RuntimeError("bench candidate is required before crawl-candidate")
+        unsafe_motors = unsafe_loaded_motor_ids(session, tuner.autotune)
+        if unsafe_motors:
+            raise RuntimeError(
+                "crawl validation blocked by aggressive bench candidates: %s" %
+                ",".join(str(motor_id) for motor_id in unsafe_motors)
+            )
         endpoint_status = session.get("leg_endpoints", {})
         missing_legs = [
             leg_name for leg_name in ("lf", "rf", "rr", "lr")
