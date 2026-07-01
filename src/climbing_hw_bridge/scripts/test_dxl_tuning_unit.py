@@ -57,6 +57,13 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertFalse(metric["overshoot_safe"])
         self.assertTrue(tuner.step_fatal_safe(metric, 1.0))
 
+    def test_zero_crossings_ignore_endpoint_quantization(self):
+        samples = [
+            {"error": -20.0}, {"error": 1.0}, {"error": -2.0}, {"error": 0.0},
+        ]
+        self.assertEqual(tuner.error_zero_crossings(samples, deadband=3.0), 0)
+        self.assertEqual(tuner.error_zero_crossings(samples, deadband=0.5), 2)
+
     def test_crawl_metric_comparison(self):
         baseline = {
             "fault_seen": False,
@@ -244,6 +251,9 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertTrue(tuner.bench_result_passed(result))
         result["extended"]["candidate"]["safe"] = False
         self.assertFalse(tuner.bench_result_passed(result))
+        result["extended"]["candidate"] = None
+        self.assertFalse(tuner.bench_result_passed(result))
+        self.assertFalse(tuner.bench_result_passed(None))
 
     def test_baseline_overshoot_continues_candidate_search(self):
         original = {

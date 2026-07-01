@@ -1,0 +1,118 @@
+left_board:
+  position_gains:
+    '1':
+      p: 7200
+      i: 200
+      d: 0
+    '11':
+      p: 800
+      i: 0
+      d: 0
+    '15':
+      p: 9000
+      i: 100
+      d: 128
+    '2':
+      p: 12000
+      i: 0
+      d: 32
+    '14':
+      p: 8000
+      i: 0
+      d: 16
+    '7':
+      p: 9000
+      i: 0
+      d: 128
+    '8':
+      p: 4800
+      i: 3200
+      d: 64
+    '18':
+      p: 9000
+      i: 3200
+      d: 32
+  position_profiles:
+    '1':
+      velocity: 300
+      acceleration: 300
+    '11':
+      velocity: 200
+      acceleration: 300
+    '15':
+      velocity: 200
+      acceleration: 300
+    '2':
+      velocity: 200
+      acceleration: 300
+    '14':
+      velocity: 200
+      acceleration: 100
+    '7':
+      velocity: 100
+      acceleration: 300
+    '8':
+      velocity: 200
+      acceleration: 200
+    '18':
+      velocity: 100
+      acceleration: 300
+right_board:
+  position_gains:
+    '12':
+      p: 800
+      i: 0
+      d: 16
+    '13':
+      p: 3200
+      i: 100
+      d: 0
+    '16':
+      p: 9000
+      i: 0
+      d: 32
+    '3':
+      p: 9000
+      i: 3200
+      d: 16
+    '4':
+      p: 12000
+      i: 800
+      d: 64
+    '5':
+      p: 9000
+      i: 1600
+      d: 128
+    '6':
+      p: 12000
+      i: 3200
+      d: 128
+    '17':
+      p: 9000
+      i: 25
+      d: 32
+  position_profiles:
+    '12':
+      velocity: 250
+      acceleration: 300
+    '13':
+      velocity: 150
+      acceleration: 300
+    '16':
+      velocity: 200
+      acceleration: 300
+    '3':
+      velocity: 200
+      acceleration: 400
+    '4':
+      velocity: 300
+      acceleration: 300
+    '5':
+      velocity: 250
+      acceleration: 300
+    '6':
+      velocity: 200
+      acceleration: 300
+    '17':
+      velocity: 100
+      acceleration: 300

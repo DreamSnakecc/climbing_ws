@@ -193,7 +193,9 @@ def parse_step_csv(
     overshoot = max([max(0.0, direction * (sample["actual"] - target)) for sample in samples])
     max_current = max(sample["current_a"] for sample in samples)
     max_age = max(sample["feedback_age_s"] for sample in samples)
-    zero_crossings = error_zero_crossings(samples)
+    zero_crossings = error_zero_crossings(
+        samples, deadband=max(0.5, float(pass_error_ticks)),
+    )
     integrated_abs_error = 0.0
     for index in range(1, len(samples)):
         dt = max(0.0, samples[index]["t"] - samples[index - 1]["t"])
@@ -484,9 +486,11 @@ def extended_refinement_candidates(active, config):
 
 
 def bench_result_passed(result):
+    result = result or {}
+    selected = result.get("selected") or {}
+    candidate = (result.get("extended") or {}).get("candidate") or {}
     return bool(
-        result.get("selected", {}).get("safe") and
-        result.get("extended", {}).get("candidate", {}).get("safe")
+        selected.get("safe") and candidate.get("safe")
     )
 
 
@@ -1536,7 +1540,10 @@ def main():
         save_session(session_path, session)
         print("Candidate override: %s" % override_path)
         print("Restart normal bringup with: dxl_tuning_override_file:=%s" % override_path)
-        print("Then run: rosrun climbing_hw_bridge tune_dxl_position.py --stage crawl-candidate --session %s" % session_path)
+        print("Then run loaded leg validation: rosrun climbing_hw_bridge tune_dxl_position.py "
+              "--stage leg-endpoint --leg all --session %s" % session_path)
+        print("After all legs pass: rosrun climbing_hw_bridge tune_dxl_position.py "
+              "--stage crawl-candidate --session %s" % session_path)
         return 0
 
     if args.stage == "crawl-candidate":
