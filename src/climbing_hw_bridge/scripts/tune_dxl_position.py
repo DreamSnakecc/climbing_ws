@@ -44,9 +44,10 @@ DEFAULT_AUTOTUNE = {
     "minimum_valid_ratio": 0.95,
     "minimum_cycles_per_leg": 2,
     "leg_max_trials": 12,
-    "extended_max_candidates": 8,
-    "p_multipliers": [0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
-    "i_candidates": [0, 25, 50, 100, 200],
+    "extended_max_candidates": 20,
+    "extended_refinement_max_candidates": 12,
+    "p_multipliers": [0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0],
+    "i_candidates": [0, 25, 50, 100, 200, 400, 800, 1600, 3200],
     "d_candidates": [0, 16, 32, 64, 128],
     "velocity_candidates": [100, 150, 200, 250, 300],
     "acceleration_candidates": [100, 200, 300, 400, 600],
@@ -126,7 +127,7 @@ def tuning_from_response(response):
 
 
 def metric_score(metrics, step_ticks, pass_error_ticks=3.0, lag_limit_s=0.08):
-    if not metrics or not metrics.get("hard_safe"):
+    if not metrics or not metrics.get("search_safe", metrics.get("hard_safe")):
         return None
     step = max(1.0, abs(float(step_ticks)))
     integrated = float(metrics.get("integrated_abs_error_tick_s", step * 0.8)) / (step * 0.8)
@@ -353,6 +354,7 @@ def combine_step_metrics(
     result["endpoint_pass"] = all(metric.get("endpoint_pass", metric["safe"]) for metric in direction_metrics)
     result["overshoot_safe"] = all(metric.get("overshoot_safe", False) for metric in direction_metrics)
     result["oscillation_safe"] = all(metric.get("oscillation_safe", False) for metric in direction_metrics)
+    result["search_safe"] = result["fatal_safe"] and result["overshoot_safe"]
     result["hard_safe"] = (
         result["feedback_safe"] and result["current_safe"] and
         result["overshoot_safe"] and result["oscillation_safe"]
@@ -449,7 +451,36 @@ def ranked_safe_tuning_trials(result):
             continue
         signatures.add(signature)
         unique.append(trial)
-    return unique
+    diverse = []
+    deferred = []
+    pid_signatures = set()
+    for trial in unique:
+        tuning = trial.get("tuning", {})
+        pid_signature = tuple(int(tuning.get(key, 0)) for key in ("p", "i", "d"))
+        if pid_signature in pid_signatures:
+            deferred.append(trial)
+            continue
+        pid_signatures.add(pid_signature)
+        diverse.append(trial)
+    return diverse + deferred
+
+
+def extended_refinement_candidates(active, config):
+    values_by_key = dict(tuning_axis_values(active, config))
+    candidates = []
+    for key in ("d", "acceleration", "velocity"):
+        active_value = int(active[key])
+        values = [int(value) for value in values_by_key[key] if int(value) != active_value]
+        if key == "d":
+            values.sort(key=lambda value: (value < active_value, abs(value - active_value)))
+        else:
+            values.sort()
+        for value in values:
+            candidate = dict(active)
+            candidate[key] = value
+            candidates.append(("%s_%d" % (key, value), candidate))
+    limit = max(1, int(config.get("extended_refinement_max_candidates", 12)))
+    return candidates[:limit]
 
 
 def bench_result_passed(result):
@@ -883,15 +914,13 @@ class DxlAutoTuner(object):
             motor_id, abs(step_ticks), label + "_plus", session_dir, max_current_a,
         )
         positive_fatal_safe = step_fatal_safe(positive, max_current_a)
-        positive_hard_safe = (
-            positive_fatal_safe and positive.get("overshoot_safe") and
-            positive.get("oscillation_safe")
-        )
-        if not positive_hard_safe:
+        positive_search_safe = positive_fatal_safe and positive.get("overshoot_safe")
+        if not positive_search_safe:
             combined = {
                 "safe": False,
                 "hard_safe": False,
                 "fatal_safe": positive_fatal_safe,
+                "search_safe": False,
                 "directions": [positive],
                 "score": None,
             }
@@ -902,15 +931,13 @@ class DxlAutoTuner(object):
             motor_id, -abs(step_ticks), label + "_minus", session_dir, max_current_a,
         )
         negative_fatal_safe = step_fatal_safe(negative, max_current_a)
-        negative_hard_safe = (
-            negative_fatal_safe and negative.get("overshoot_safe") and
-            negative.get("oscillation_safe")
-        )
-        if not negative_hard_safe:
+        negative_search_safe = negative_fatal_safe and negative.get("overshoot_safe")
+        if not negative_search_safe:
             combined = {
                 "safe": False,
                 "hard_safe": False,
                 "fatal_safe": positive_fatal_safe and negative_fatal_safe,
+                "search_safe": False,
                 "directions": [positive, negative],
                 "score": None,
             }
@@ -930,7 +957,7 @@ class DxlAutoTuner(object):
     def _improves(candidate, baseline):
         candidate_score = candidate.get("score")
         baseline_score = baseline.get("score")
-        if candidate_score is None or not candidate.get("hard_safe"):
+        if candidate_score is None or not candidate.get("search_safe", candidate.get("hard_safe")):
             return False
         if baseline.get("safe"):
             return bool(candidate.get("safe") and
@@ -983,7 +1010,7 @@ class DxlAutoTuner(object):
         selected_trial = baseline_trial if selected is not None else None
         attempts = []
         candidates = ranked_safe_tuning_trials(result)
-        limit = max(1, int(self.autotune.get("extended_max_candidates", 8)))
+        limit = max(1, int(self.autotune.get("extended_max_candidates", 20)))
         baseline_signature = tuple(int(baseline["tuning"].get(key, 0)) for key in (
             "p", "i", "d", "velocity", "acceleration",
         ))
@@ -1007,6 +1034,48 @@ class DxlAutoTuner(object):
                      candidate_trial["score"] < selected_trial["score"])):
                 selected = candidate
                 selected_trial = candidate_trial
+
+        if selected is None:
+            refinable = [
+                attempt for attempt in attempts
+                if attempt["validation"].get("search_safe") and
+                attempt["validation"].get("score") is not None
+            ]
+            refinable.sort(key=lambda attempt: (
+                not attempt["validation"].get("endpoint_pass"),
+                float(attempt["validation"]["score"]),
+            ))
+            if refinable:
+                seed = refinable[0]["bench"]["tuning"]
+                seen = set(
+                    tuple(int(attempt["bench"]["tuning"].get(key, 0)) for key in (
+                        "p", "i", "d", "velocity", "acceleration",
+                    ))
+                    for attempt in attempts
+                )
+                for index, (label, tuning) in enumerate(
+                        extended_refinement_candidates(seed, self.autotune), 1):
+                    signature = tuple(int(tuning.get(key, 0)) for key in (
+                        "p", "i", "d", "velocity", "acceleration",
+                    ))
+                    if signature in seen:
+                        continue
+                    seen.add(signature)
+                    trial = self._run_trial(
+                        motor_id, tuning, int(self.autotune["validation_step_ticks"]),
+                        "extended_refine_%02d_%s" % (index, label), session_dir,
+                    )
+                    attempts.append({
+                        "bench": {"label": label, "tuning": tuning},
+                        "validation": trial,
+                        "refinement": True,
+                    })
+                    if trial.get("safe") and (
+                            selected_trial is None or trial.get("score") is not None and
+                            (selected_trial.get("score") is None or
+                             trial["score"] < selected_trial["score"])):
+                        selected = trial
+                        selected_trial = trial
 
         result["extended"] = {
             "baseline": baseline_trial,

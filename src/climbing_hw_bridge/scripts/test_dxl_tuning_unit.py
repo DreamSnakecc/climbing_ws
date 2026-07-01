@@ -155,7 +155,9 @@ class DxlTuningUnitTest(unittest.TestCase):
         labels = [item[0] for item in candidates]
         self.assertIn("p_600", labels)
         self.assertIn("p_4800", labels)
+        self.assertIn("p_9600", labels)
         self.assertIn("i_200", labels)
+        self.assertIn("i_3200", labels)
         self.assertIn("d_128", labels)
         self.assertIn("velocity_300", labels)
         self.assertIn("acceleration_600", labels)
@@ -280,11 +282,73 @@ class DxlTuningUnitTest(unittest.TestCase):
         overshooting = {"safe": False, "hard_safe": False, "score": None}
         partial = {"safe": False, "hard_safe": True, "score": 2.0}
         improved_partial = {"safe": False, "hard_safe": True, "score": 1.0}
+        dampable_oscillation = {
+            "safe": False, "hard_safe": False, "search_safe": True, "score": 0.8,
+        }
         passed = {"safe": True, "hard_safe": True, "score": 1.5}
         self.assertTrue(tuner.DxlAutoTuner._improves(partial, overshooting))
         self.assertTrue(tuner.DxlAutoTuner._improves(improved_partial, partial))
+        self.assertTrue(tuner.DxlAutoTuner._improves(dampable_oscillation, improved_partial))
         self.assertTrue(tuner.DxlAutoTuner._improves(passed, improved_partial))
         self.assertFalse(tuner.DxlAutoTuner._improves(improved_partial, passed))
+
+    def test_extended_candidates_prioritize_distinct_pid(self):
+        def trial(score, p_value, i_value, d_value, velocity):
+            return {
+                "safe": True,
+                "score": score,
+                "tuning": {
+                    "p": p_value, "i": i_value, "d": d_value,
+                    "velocity": velocity, "acceleration": 300,
+                },
+            }
+
+        result = {"trials": [
+            trial(1.0, 7200, 25, 0, 200),
+            trial(1.1, 7200, 25, 0, 300),
+            trial(1.2, 7200, 25, 32, 200),
+        ]}
+        ranked = tuner.ranked_safe_tuning_trials(result)
+        self.assertEqual(ranked[0]["tuning"]["d"], 0)
+        self.assertEqual(ranked[1]["tuning"]["d"], 32)
+        self.assertEqual(ranked[2]["tuning"]["velocity"], 300)
+
+    def test_extended_validation_refines_damping_candidate(self):
+        base_tuning = {
+            "p": 800, "i": 0, "d": 0, "velocity": 150, "acceleration": 300,
+        }
+        candidate_tuning = dict(base_tuning)
+        candidate_tuning["d"] = 16
+        baseline = {"safe": False, "score": 3.0, "tuning": base_tuning}
+        candidate = {"safe": True, "score": 1.0, "tuning": candidate_tuning}
+        result = {"baseline": baseline, "selected": candidate, "trials": [candidate]}
+        test_tuner = object.__new__(tuner.DxlAutoTuner)
+        test_tuner.autotune = dict(tuner.DEFAULT_AUTOTUNE)
+        test_tuner.autotune.update({
+            "validation_step_ticks": 100,
+            "extended_max_candidates": 1,
+            "extended_refinement_max_candidates": 1,
+        })
+        applied = []
+
+        def run_trial(_motor_id, tuning, _step_ticks, label, _session_dir):
+            safe = label.startswith("extended_refine") and int(tuning["d"]) == 32
+            return {
+                "safe": safe,
+                "hard_safe": safe,
+                "search_safe": True,
+                "endpoint_pass": True,
+                "score": 0.5 if safe else 1.5,
+                "tuning": dict(tuning),
+                "label": label,
+            }
+
+        test_tuner._run_trial = run_trial
+        test_tuner._set_tuning = lambda _motor_id, tuning: applied.append(dict(tuning))
+        self.assertTrue(test_tuner._validate_extended(13, result, "/tmp"))
+        self.assertEqual(result["selected"]["tuning"]["d"], 32)
+        self.assertTrue(result["extended"]["attempts"][-1]["refinement"])
+        self.assertEqual(applied[-1]["d"], 32)
 
 
 if __name__ == "__main__":
