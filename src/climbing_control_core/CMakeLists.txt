@@ -26,5 +26,6 @@ catkin_install_python(PROGRAMS
   scripts/test_actual_tracking_unit.py
   scripts/test_workspace_guard_unit.py
   scripts/record_static_motor_current.py
+  scripts/calibrate_fan_adhesion_current.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

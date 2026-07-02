@@ -36,8 +36,8 @@ mission_supervisor:
   pause_on_adhesion_loss: false
   high_slip_threshold: 0.92
   adhesion_required_count: 0
-  attach_rpm: 35000.0
-  climb_rpm: 35000.0
+  attach_rpm: 45000.0
+  climb_rpm: 45000.0
   # pause_rpm: 35000.0
   # fault_rpm: 35000.0
   release_rpm: 0.0  #Init
@@ -180,7 +180,7 @@ swing_leg_controller:
   swing_duration_s: 0.65
   clearance_m: 0.10
   # Lift/press along wall_normal during swing: positive lifts, negative presses, 0=hold height.
-  swing_lift_normal_m: 0.008
+  swing_lift_normal_m: 0.015
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
   stride_length_m: 0.05
@@ -265,7 +265,7 @@ dynamixel_telemetry:
   support_operating_mode: 3  #3 position mode ,5 current-based position control
   default_operating_mode_marker: 255 
   # Distal joint servos are passive while supporting and active while swinging.
-  support_torque_disable_ids: [15, 16, 17, 18]
+  support_torque_disable_ids: []
   jacobian_delta_rad: 0.001
   support_current_margin_a: 0.08
   max_goal_current_a: 4.8
