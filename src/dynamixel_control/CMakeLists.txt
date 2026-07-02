@@ -15,6 +15,7 @@ add_message_files(
   SetCurrent.msg
   SetOperatingMode.msg
   SetPosition.msg
+  SetTorqueEnable.msg
 )
 
 add_service_files(

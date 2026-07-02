@@ -7,7 +7,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32MultiArray
 
 from climbing_msgs.msg import LegCenterCommand, StanceWrenchCommand
-from dynamixel_control.msg import SetCurrent, SetOperatingMode, SetPosition
+from dynamixel_control.msg import SetCurrent, SetOperatingMode, SetPosition, SetTorqueEnable
 from dynamixel_control.srv import GetCurrent, GetPosition, GetBulkPositions, GetBulkCurrents
 from std_msgs.msg import Int32MultiArray, MultiArrayLayout, MultiArrayDimension
 
@@ -33,6 +33,9 @@ class DynamixelBridge(object):
         self.current_lsb_ma = float(get_cfg("current_lsb_ma", 2.69))
         self.support_operating_mode = int(get_cfg("support_operating_mode", 5))
         self.default_operating_mode_marker = int(get_cfg("default_operating_mode_marker", 255))
+        self.support_torque_disable_ids = set([
+            int(value) for value in get_cfg("support_torque_disable_ids", [15, 16, 17, 18])
+        ])
         self.jacobian_delta_rad = float(get_cfg("jacobian_delta_rad", 1e-3))
         self.support_current_margin_a = float(get_cfg("support_current_margin_a", 0.08))
         self.max_goal_current_a = float(get_cfg("max_goal_current_a", 4.8))
@@ -92,9 +95,14 @@ class DynamixelBridge(object):
 
         self.cmd_pub = rospy.Publisher("/set_position", SetPosition, queue_size=200)
         self.bulk_cmd_pubs = {}
+        self.torque_enable_pubs = {}
         for board_name in sorted(self.board_configs.keys()):
             board_topic = self._qualify_service(board_name, "set_bulk_positions")
             self.bulk_cmd_pubs[board_name] = rospy.Publisher(board_topic, Int32MultiArray, queue_size=20)
+            torque_topic = self._qualify_service(board_name, "set_torque_enable")
+            self.torque_enable_pubs[board_name] = rospy.Publisher(
+                torque_topic, SetTorqueEnable, queue_size=20
+            )
         self.current_cmd_pub = rospy.Publisher("/set_current", SetCurrent, queue_size=200)
         self.mode_cmd_pub = rospy.Publisher("/set_operating_mode", SetOperatingMode, queue_size=100)
         self.telemetry_pub = rospy.Publisher("~joint_state", JointState, queue_size=20)
@@ -450,6 +458,19 @@ class DynamixelBridge(object):
     def _set_leg_mode(self, leg_name, support_mode):
         requested_mode = self.support_operating_mode if support_mode else self.default_operating_mode_marker
         for motor_id in self.leg_to_motors.get(leg_name, []):
+            if int(motor_id) in self.support_torque_disable_ids:
+                board_name = self._board_name_for_motor(motor_id)
+                publisher = self.torque_enable_pubs.get(board_name)
+                if publisher is None:
+                    rospy.logwarn_throttle(2.0, "No torque-enable publisher for motor %d", motor_id)
+                    continue
+                packet = SetTorqueEnable()
+                packet.id = int(motor_id)
+                packet.enable = not support_mode
+                publisher.publish(packet)
+                continue
+            if not self.enable_auto_mode_switching:
+                continue
             if self.current_operating_mode.get(int(motor_id)) == requested_mode:
                 continue
             packet = SetOperatingMode()
@@ -459,7 +480,7 @@ class DynamixelBridge(object):
             self.current_operating_mode[int(motor_id)] = int(requested_mode)
 
     def swing_target_callback(self, msg):
-        if not self.enable_auto_mode_switching:
+        if not self.enable_auto_mode_switching and not self.support_torque_disable_ids:
             return
         if msg.leg_name not in self.leg_support_mode:
             return

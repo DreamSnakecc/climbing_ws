@@ -9,6 +9,7 @@
 #include "dynamixel_control/SetCurrent.h"
 #include "dynamixel_control/SetOperatingMode.h"
 #include "dynamixel_control/SetPosition.h"
+#include "dynamixel_control/SetTorqueEnable.h"
 #include "dynamixel_control/GetPosition.h"
 #include "dynamixel_control/GetBulkPositions.h"
 #include "dynamixel_control/GetBulkCurrents.h"
@@ -471,6 +472,24 @@ void setOperatingModeCallback(const dynamixel_control::SetOperatingMode::ConstPt
         requested_mode = default_it->second;
     }
     setOperatingModeInternal(id, requested_mode);
+}
+
+void setTorqueEnableCallback(const dynamixel_control::SetTorqueEnable::ConstPtr &msg)
+{
+    const uint8_t id = static_cast<uint8_t>(msg->id);
+    if (!containsId(controlled_ids, id))
+        return;
+
+    std::lock_guard<std::mutex> lock(serial_mutex);
+    dxl_comm_result = packetHandler->write1ByteTxRx(
+        portHandler, id, ADDR_TORQUE_ENABLE, msg->enable ? 1 : 0, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS || dxl_error != 0)
+    {
+        ROS_ERROR("[ID %d] Failed set Torque Enable=%d: %s", id,
+                  msg->enable ? 1 : 0, packetHandler->getTxRxResult(dxl_comm_result));
+        return;
+    }
+    ROS_INFO("[ID %d] Torque %s", id, msg->enable ? "enabled" : "disabled");
 }
 
 bool getPositionService(dynamixel_control::GetPosition::Request &req,
@@ -1067,6 +1086,7 @@ int main(int argc, char **argv)
     ros::Subscriber bulk_sub = nh.subscribe("set_bulk_positions", 100, setBulkPositionsCallback);
     ros::Subscriber current_sub = nh.subscribe("set_current", 100, setCurrentCallback);
     ros::Subscriber mode_sub = nh.subscribe("set_operating_mode", 100, setOperatingModeCallback);
+    ros::Subscriber torque_enable_sub = nh.subscribe("set_torque_enable", 100, setTorqueEnableCallback);
     ros::ServiceServer srv = nh.advertiseService("get_position", getPositionService);
     ros::ServiceServer current_srv = nh.advertiseService("get_current", getCurrentService);
     ros::ServiceServer bulk_srv = nh.advertiseService("get_bulk_positions", getBulkPositionsService);
