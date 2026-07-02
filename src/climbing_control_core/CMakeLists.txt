@@ -25,5 +25,6 @@ catkin_install_python(PROGRAMS
   scripts/test_single_leg_swing.py
   scripts/test_actual_tracking_unit.py
   scripts/test_workspace_guard_unit.py
+  scripts/record_static_motor_current.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
