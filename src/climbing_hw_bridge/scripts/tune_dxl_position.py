@@ -46,9 +46,12 @@ DEFAULT_AUTOTUNE = {
     "lag_limit_ms": 80.0,
     "minimum_valid_ratio": 0.95,
     "minimum_cycles_per_leg": 2,
-    "leg_max_trials": 12,
+    "leg_max_trials": 32,
+    "leg_motor_max_trials": 8,
     "extended_max_candidates": 20,
     "extended_refinement_max_candidates": 12,
+    "bench_fallback_max_candidates": 3,
+    "bench_fallback_max_overshoot_ticks": 6.0,
     "loaded_max_p_multiplier": 2.0,
     "loaded_max_i_gain": 100,
     "p_multipliers": [0.75, 1.0, 1.25, 1.5, 2.0],
@@ -392,21 +395,23 @@ def motor_ids_for_leg(config, leg_name):
     return [int(value) for value in leg_config.get("motor_ids", [])]
 
 
-def failed_leg_motor_id(result, motor_ids, pass_error_ticks):
+def failed_leg_motor_id(result, motor_ids, pass_error_ticks, excluded_motor_ids=None):
+    excluded = set(int(value) for value in (excluded_motor_ids or []))
     errors = list(result.get("terminal_errors_tick", []))
     if len(motor_ids) != SERVO_JOINT_COUNT or len(errors) != SERVO_JOINT_COUNT:
         return None
     failing = [
         (abs(float(error)), int(motor_id))
         for motor_id, error in zip(motor_ids, errors)
-        if abs(float(error)) > float(pass_error_ticks)
+        if abs(float(error)) > float(pass_error_ticks) and int(motor_id) not in excluded
     ]
     if failing:
         return max(failing)[1]
     p95_errors = result.get("motor_p95_abs_error_tick", {})
     available = [
         (float(p95_errors[str(int(motor_id))]), int(motor_id))
-        for motor_id in motor_ids if str(int(motor_id)) in p95_errors
+        for motor_id in motor_ids
+        if str(int(motor_id)) in p95_errors and int(motor_id) not in excluded
     ]
     return max(available)[1] if available else None
 
@@ -583,6 +588,37 @@ def select_best_loaded_extended(result, config=None):
     result["extended"] = extended
     result["extended_reverted"] = selected is baseline
     return True
+
+
+def loaded_extended_fallback_candidates(result, config=None):
+    config = config or DEFAULT_AUTOTUNE
+    stable = result.get("stable_tuning") or (
+        (result.get("baseline") or {}).get("tuning") or {}
+    )
+    limit = float(config.get("bench_fallback_max_overshoot_ticks", 6.0))
+    options = []
+    seen = set()
+    for attempt in (result.get("extended") or {}).get("attempts", []):
+        validation = attempt.get("validation") or {}
+        tuning = validation.get("tuning") or (attempt.get("bench") or {}).get("tuning") or {}
+        signature = tuple(int(tuning.get(key, 0)) for key in (
+            "p", "i", "d", "velocity", "acceleration",
+        ))
+        directions = validation.get("directions") or []
+        if (signature in seen or not directions or not validation.get("fatal_safe") or
+                not loaded_tuning_safe(tuning, stable, config)):
+            continue
+        if any(float(item.get("overshoot_tick", float("inf"))) > limit or
+               int(item.get("zero_crossings", 0)) > int(config["max_zero_crossings"])
+               for item in directions):
+            continue
+        seen.add(signature)
+        endpoint = max(float(item.get("final_error_tick", float("inf"))) for item in directions)
+        overshoot = max(float(item.get("overshoot_tick", float("inf"))) for item in directions)
+        current = max(float(item.get("max_current_a", float("inf"))) for item in directions)
+        options.append(((endpoint, overshoot, current, signature), dict(tuning)))
+    options.sort(key=lambda item: item[0])
+    return [item[1] for item in options]
 
 
 def motor_current_limit_a(config, motor_id, hardware_limit_a):
@@ -969,7 +1005,12 @@ class DxlAutoTuner(object):
         if not response.success:
             raise RuntimeError("motor %d tuning write failed: %s" % (motor_id, response.message))
 
-    def _run_step(self, motor_id, step_ticks, label, session_dir, max_current_a):
+    def _run_step(self, motor_id, step_ticks, label, session_dir, max_current_a,
+                  max_overshoot_ticks=None):
+        max_overshoot_ticks = (
+            self.autotune["max_overshoot_ticks"] if max_overshoot_ticks is None
+            else float(max_overshoot_ticks)
+        )
         output_dir = os.path.join(session_dir, "bench", "id_%d" % motor_id, label)
         ensure_dir(output_dir)
         command = [
@@ -984,7 +1025,7 @@ class DxlAutoTuner(object):
             "--sample-rate-hz", "100",
             "--feedback-age-limit-s", str(self.autotune["feedback_age_limit_s"]),
             "--max-current-a", str(max_current_a),
-            "--max-overshoot-ticks", str(self.autotune["max_overshoot_ticks"]),
+            "--max-overshoot-ticks", str(max_overshoot_ticks),
             "--no-confirm",
             "--output-dir", output_dir,
         ]
@@ -996,13 +1037,14 @@ class DxlAutoTuner(object):
             max(paths, key=os.path.getmtime),
             self.autotune["pass_error_ticks"],
             self.autotune["feedback_age_limit_s"],
-            self.autotune["max_overshoot_ticks"],
+            max_overshoot_ticks,
             self.autotune["max_zero_crossings"],
         )
         metrics["process_returncode"] = int(result)
         return metrics
 
-    def _run_trial(self, motor_id, tuning, step_ticks, label, session_dir):
+    def _run_trial(self, motor_id, tuning, step_ticks, label, session_dir,
+                   max_overshoot_ticks=None):
         self._set_tuning(motor_id, tuning)
         rospy.sleep(0.10)
         hardware_limit_a = float(tuning["current_limit"]) * self.current_lsb_ma / 1000.0
@@ -1010,6 +1052,7 @@ class DxlAutoTuner(object):
         max_current_a = float(self.autotune["max_current_ratio"]) * current_limit_a
         positive = self._run_step(
             motor_id, abs(step_ticks), label + "_plus", session_dir, max_current_a,
+            max_overshoot_ticks,
         )
         positive_fatal_safe = step_fatal_safe(positive, max_current_a)
         positive_search_safe = positive_fatal_safe and positive.get("overshoot_safe")
@@ -1027,6 +1070,7 @@ class DxlAutoTuner(object):
             return combined
         negative = self._run_step(
             motor_id, -abs(step_ticks), label + "_minus", session_dir, max_current_a,
+            max_overshoot_ticks,
         )
         negative_fatal_safe = step_fatal_safe(negative, max_current_a)
         negative_search_safe = negative_fatal_safe and negative.get("overshoot_safe")
@@ -1186,6 +1230,8 @@ class DxlAutoTuner(object):
             "candidate": selected_trial,
             "attempts": attempts,
         }
+        if selected is None and self._validate_extended_fallback(motor_id, result, session_dir):
+            return True
         if selected is None:
             self._set_tuning(motor_id, baseline["tuning"])
             result["selected"] = baseline
@@ -1195,6 +1241,38 @@ class DxlAutoTuner(object):
         result["selected"] = selected
         result["extended_reverted"] = selected is baseline
         return True
+
+    def _validate_extended_fallback(self, motor_id, result, session_dir):
+        candidates = loaded_extended_fallback_candidates(result, self.autotune)
+        limit = max(1, int(self.autotune.get("bench_fallback_max_candidates", 3)))
+        overshoot_limit = float(self.autotune.get("bench_fallback_max_overshoot_ticks", 6.0))
+        attempts = []
+        for index, tuning in enumerate(candidates[:limit], 1):
+            trial = self._run_trial(
+                motor_id, tuning, int(self.autotune["validation_step_ticks"]),
+                "extended_fallback_%02d" % index, session_dir,
+                max_overshoot_ticks=overshoot_limit,
+            )
+            attempts.append(trial)
+            if not trial.get("safe"):
+                continue
+            trial["bench_fallback_accepted"] = True
+            result.setdefault("extended", {})["candidate"] = trial
+            result["extended"]["fallback_attempts"] = attempts
+            result["selected"] = trial
+            result["extended_reverted"] = False
+            self._set_tuning(motor_id, tuning)
+            rospy.logwarn(
+                "tune_dxl_position: motor %d accepted loaded fallback with %.1f tick "
+                "overshoot envelope; leg endpoint validation is still required",
+                motor_id, overshoot_limit,
+            )
+            return True
+        result.setdefault("extended", {})["fallback_attempts"] = attempts
+        stable = result.get("stable_tuning") or (result.get("baseline") or {}).get("tuning")
+        if stable:
+            self._set_tuning(motor_id, stable)
+        return False
 
 
 def new_session(args):
@@ -1378,6 +1456,10 @@ def run_leg_endpoint_stage(args, session_path, session):
         raise RuntimeError("leg %s must define exactly four motor_ids" % args.leg)
 
     endpoints = session.setdefault("leg_endpoints", {})
+    if args.restart_leg_endpoint:
+        endpoints.pop(args.leg, None)
+        session.pop("leg_endpoint", None)
+        save_session(session_path, session)
     if session.get("leg_endpoint") is not None and session["leg_endpoint"].get("leg") == args.leg:
         endpoints.setdefault(args.leg, session.pop("leg_endpoint"))
     endpoint = endpoints.get(args.leg)
@@ -1397,6 +1479,7 @@ def run_leg_endpoint_stage(args, session_path, session):
             "original_tuning": original_tuning,
             "active_tuning": dict(original_tuning),
             "trials": [],
+            "exhausted_motors": [],
             "status": "running",
         }
         session["motor_ids"] = list(motor_ids)
@@ -1423,25 +1506,31 @@ def run_leg_endpoint_stage(args, session_path, session):
             endpoint["status"] = "failed_max_trials"
             break
 
+        exhausted_motors = endpoint.setdefault("exhausted_motors", [])
         failed_motor = failed_leg_motor_id(
             current, motor_ids, current.get("endpoint_tolerance_ticks", args.pass_error_ticks),
+            excluded_motor_ids=exhausted_motors,
         )
         if failed_motor is None:
-            endpoint["status"] = "failed_without_identifiable_tick_error"
+            endpoint["status"] = "failed_all_motors_exhausted"
             break
 
         motor_key = str(failed_motor)
         original = endpoint["original_tuning"][motor_key]
         active = endpoint["active_tuning"][motor_key]
         accepted = False
+        motor_trial_count = 0
         if not tuner._confirm("Run loaded candidate search for motor %d on leg %s?" % (failed_motor, args.leg)):
             endpoint["status"] = "paused_by_operator"
             save_session(session_path, session)
             return 0
         for label, candidate in tuning_axis_candidates(original, active, tuner.autotune):
+            if motor_trial_count >= int(tuner.autotune.get("leg_motor_max_trials", 8)):
+                break
             stable = session.get("baseline_tuning", {}).get(motor_key, original)
             if not loaded_tuning_safe(candidate, stable, tuner.autotune):
                 continue
+            motor_trial_count += 1
             trial_label = "trial_%02d_id_%d_%s" % (candidate_trials + 1, failed_motor, label)
             try:
                 tuner._set_tuning(failed_motor, candidate)
@@ -1475,8 +1564,10 @@ def run_leg_endpoint_stage(args, session_path, session):
                 break
 
         if not accepted:
-            endpoint["status"] = "failed_no_improving_candidate"
-            break
+            if failed_motor not in exhausted_motors:
+                exhausted_motors.append(failed_motor)
+            endpoint["status"] = "running_next_motor"
+            save_session(session_path, session)
 
     if current.get("passed"):
         candidates = leg_endpoint_candidates_by_board(tuner, endpoint["active_tuning"])
@@ -1521,6 +1612,7 @@ def parse_args():
     parser.add_argument("--leg-hold-before-s", type=float, default=1.0)
     parser.add_argument("--leg-hold-after-s", type=float, default=1.0)
     parser.add_argument("--leg-max-trials", type=int, default=12)
+    parser.add_argument("--restart-leg-endpoint", action="store_true")
     parser.add_argument("--no-confirm", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print the bounded search plan without ROS or motor writes")
     return parser.parse_args()
@@ -1621,6 +1713,7 @@ def main():
         bench_results = dict(session.get("bench", {}).get("motors", {}))
         for motor_id in tuner.motor_ids:
             existing = bench_results.get(str(motor_id))
+            tuning = None
             if existing is not None and select_best_loaded_extended(existing, tuner.autotune):
                 session["bench"] = {"motors": bench_results}
                 save_session(session_path, session)
@@ -1635,6 +1728,11 @@ def main():
                 session["stage"] = "bench_paused"
                 save_session(session_path, session)
                 return 0
+            if existing is not None and tuner._validate_extended_fallback(
+                    motor_id, existing, session["session_dir"]):
+                session["bench"] = {"motors": bench_results}
+                save_session(session_path, session)
+                continue
             baseline_tuning.setdefault(str(motor_id), dict(tuning))
             bench_results[str(motor_id)] = tuner._tune_motor(motor_id, tuning, session["session_dir"])
             bench_results[str(motor_id)]["stable_tuning"] = dict(baseline_tuning[str(motor_id)])

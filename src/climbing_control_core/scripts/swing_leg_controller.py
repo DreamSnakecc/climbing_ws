@@ -16,7 +16,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from workspace_guard import joint_transfer_path, workspace_guard
+from workspace_guard import joint_transfer_path_free_end_z, workspace_guard
 from actual_tracking import tracking_readiness
 
 
@@ -233,6 +233,9 @@ class SwingLegController(object):
         self.workspace_clamp_max_iter = self._int_cfg("workspace_clamp_max_iter", 10, 1)
         self.workspace_warn_throttle_s = self._float_cfg("workspace_warn_throttle_s", 2.0, 0.1)
         self.workspace_fk_tolerance_m = self._float_cfg("workspace_fk_tolerance_m", 0.002, 1e-5)
+        self.transfer_endpoint_z_search_m = self._float_cfg("transfer_endpoint_z_search_m", 0.08, 0.0)
+        self.transfer_endpoint_z_step_m = self._float_cfg("transfer_endpoint_z_step_m", 0.005, 1e-4)
+        self.transfer_min_abs_knee_deg = self._float_cfg("transfer_min_abs_knee_deg", 10.0, 0.0)
         self.workspace_q234_sum_limit_deg = self._float_list_cfg("workspace_q234_sum_limit_deg", [-5.0, 5.0])
         self.actual_tracking_enabled = bool(self._cfg("actual_tracking_enabled", True))
         self.actual_tracking_tangent_tolerance_m = self._float_cfg("actual_tracking_tangent_tolerance_m", 0.006, 0.0)
@@ -1187,7 +1190,7 @@ class SwingLegController(object):
         swing_target = list(state["lift_swing_target"])
         reference_joint_deg = [math.degrees(value) for value in state.get("last_joint_vector", [0.0, 0.0, 0.0, 0.0])]
         sample_count = max(2, int(round(self.rate_hz * self.transfer_duration_s)) + 1)
-        path = joint_transfer_path(
+        path = joint_transfer_path_free_end_z(
             leg_name=leg_name,
             start_position_m=lift_target,
             end_position_m=[
@@ -1200,6 +1203,9 @@ class SwingLegController(object):
             reference_joint_deg=reference_joint_deg,
             sample_count=sample_count,
             fk_tol_m=self.workspace_fk_tolerance_m,
+            end_z_search_m=self.transfer_endpoint_z_search_m,
+            end_z_step_m=self.transfer_endpoint_z_step_m,
+            min_abs_knee_deg=self.transfer_min_abs_knee_deg,
         )
         if not path:
             state["transfer_path_error"] = "no reachable joint-space transfer path"

@@ -150,6 +150,11 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertEqual(metrics["endpoint_count"], 1)
         self.assertEqual(metrics["terminal_errors_tick"], [2.0, -15.0, 1.0, 4.0])
         self.assertEqual(tuner.failed_leg_motor_id(metrics, [11, 1, 2, 15], 10.0), 1)
+        metrics["motor_p95_abs_error_tick"] = {"11": 20.0, "1": 80.0, "2": 60.0, "15": 40.0}
+        self.assertEqual(
+            tuner.failed_leg_motor_id(metrics, [11, 1, 2, 15], 10.0, excluded_motor_ids=[1]),
+            2,
+        )
 
     def test_single_leg_candidate_selection(self):
         baseline = {"passed": False, "timed_out": True, "endpoint_count": 0, "terminal_max_abs_error_tick": 15.0}
@@ -253,6 +258,46 @@ class DxlTuningUnitTest(unittest.TestCase):
         self.assertFalse(tuner.bench_result_passed(result))
         result["extended"]["candidate"] = None
         self.assertFalse(tuner.bench_result_passed(result))
+
+    def test_loaded_extended_fallback_retests_small_overshoot(self):
+        stable = {"p": 900, "i": 0, "d": 0, "velocity": 200, "acceleration": 300}
+        candidate = dict(stable)
+        candidate["d"] = 64
+        result = {
+            "stable_tuning": stable,
+            "baseline": {"tuning": stable},
+            "extended": {"attempts": [{
+                "bench": {"tuning": candidate},
+                "validation": {
+                    "fatal_safe": True,
+                    "tuning": candidate,
+                    "directions": [{
+                        "final_error_tick": 5.0,
+                        "overshoot_tick": 5.0,
+                        "zero_crossings": 0,
+                        "max_current_a": 0.8,
+                    }],
+                },
+            }]},
+        }
+        config = dict(tuner.DEFAULT_AUTOTUNE)
+        test_tuner = object.__new__(tuner.DxlAutoTuner)
+        test_tuner.autotune = config
+        limits = []
+        selected = []
+
+        def run_trial(_motor_id, tuning, _step_ticks, _label, _session_dir,
+                      max_overshoot_ticks=None):
+            limits.append(max_overshoot_ticks)
+            return {"safe": True, "score": 1.0, "tuning": dict(tuning)}
+
+        test_tuner._run_trial = run_trial
+        test_tuner._set_tuning = lambda _motor_id, tuning: selected.append(dict(tuning))
+        self.assertTrue(test_tuner._validate_extended_fallback(5, result, "/tmp"))
+        self.assertEqual(limits, [6.0])
+        self.assertEqual(selected[-1]["d"], 64)
+        self.assertTrue(result["extended"]["candidate"]["bench_fallback_accepted"])
+        self.assertTrue(tuner.bench_result_passed(result, config))
         self.assertFalse(tuner.bench_result_passed(None))
 
     def test_loaded_gain_limits_reject_aggressive_candidate(self):

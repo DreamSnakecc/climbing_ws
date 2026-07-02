@@ -7,6 +7,7 @@ from workspace_guard import (
     _ik_candidates_deg,
     _within_limits,
     joint_transfer_path,
+    joint_transfer_path_free_end_z,
     workspace_guard,
 )
 
@@ -157,6 +158,22 @@ def run_tests():
         fk_tol_m=0.003,
     )
     assert impossible is None, "unreachable transfer endpoint must fail closed"
+
+    # The real LF lift point cannot move 45 mm at fixed Z, but transfer Z is free.
+    lf_lift = [0.1436, 0.0986, -0.2573]
+    fixed_end = [lf_lift[0] + 0.045, lf_lift[1], lf_lift[2]]
+    assert joint_transfer_path(
+        "lf", lf_lift, fixed_end, model, limits, [0.0, 65.0, -65.0, 0.0], 41, 0.002,
+    ) is None
+    free_z_path = joint_transfer_path_free_end_z(
+        "lf", lf_lift, fixed_end, model, limits, [0.0, 65.0, -65.0, 0.0],
+        sample_count=41, fk_tol_m=0.002, end_z_search_m=0.08,
+        end_z_step_m=0.005, min_abs_knee_deg=10.0,
+    )
+    assert free_z_path is not None
+    assert abs(free_z_path[-1]["position"][0] - fixed_end[0]) < 1e-9
+    assert free_z_path[-1]["position"][2] > fixed_end[2]
+    assert abs(free_z_path[-1]["joint_deg"][2]) >= 10.0
 
     print("workspace_guard unit tests passed")
 

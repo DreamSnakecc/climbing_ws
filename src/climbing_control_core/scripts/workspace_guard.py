@@ -204,6 +204,45 @@ def joint_transfer_path(
     return path
 
 
+def joint_transfer_path_free_end_z(
+    leg_name,
+    start_position_m,
+    end_position_m,
+    model,
+    joint_limits_deg,
+    reference_joint_deg,
+    sample_count=41,
+    fk_tol_m=0.002,
+    end_z_search_m=0.08,
+    end_z_step_m=0.005,
+    min_abs_knee_deg=10.0,
+):
+    """Find the nearest reachable transfer endpoint while allowing positive Z lift."""
+    step = max(float(end_z_step_m), 1e-4)
+    count = max(0, int(round(max(0.0, float(end_z_search_m)) / step)))
+    fallback = None
+    for index in range(count + 1):
+        candidate = list(end_position_m)
+        candidate[2] += float(index) * step
+        path = joint_transfer_path(
+            leg_name=leg_name,
+            start_position_m=start_position_m,
+            end_position_m=candidate,
+            model=model,
+            joint_limits_deg=joint_limits_deg,
+            reference_joint_deg=reference_joint_deg,
+            sample_count=sample_count,
+            fk_tol_m=fk_tol_m,
+        )
+        if not path:
+            continue
+        if fallback is None:
+            fallback = path
+        if abs(float(path[-1]["joint_deg"][2])) >= float(min_abs_knee_deg):
+            return path
+    return fallback
+
+
 def workspace_guard(
     leg_name,
     candidate_center_body_m,

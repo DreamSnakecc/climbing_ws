@@ -166,14 +166,10 @@ swing_leg_controller:
   swing_duration_s: 0.65
   clearance_m: 0.10
   # Lift/press along wall_normal during swing: positive lifts, negative presses, 0=hold height.
-  swing_lift_normal_m: 0.03
+  swing_lift_normal_m: 0.02
   raibert_height_gain: 1.0
   raibert_velocity_gain: 1.0
-  stride_length_m: 0.06
-  # stride_length_m: stride gait mode.  When >0, enables passive-advance gait
-  # where swing distance = 3*stride_length_m/4 and body advances
-  # stride_length_m/4 per leg swing.  No body_planner velocity needed.
-  # stride_length_m: 0.0
+  stride_length_m: 0.05
   foot_delta_x_limit_m: 0.45
   foot_delta_y_limit_m: 0.45
   max_position_offset_m: [0.45, 0.35, 0.45]
@@ -188,13 +184,16 @@ swing_leg_controller:
   # Fixed-stride phases: normal lift first, then joint-space transfer with L/4 body advance.
   lift_duration_s: 0.5 #0.20
   transfer_duration_s: 0.8 #0.28
+  transfer_endpoint_z_search_m: 0.08
+  transfer_endpoint_z_step_m: 0.005
+  transfer_min_abs_knee_deg: 10.0
   preload_duration_s: 0.5 #0.16
   compliant_settle_timeout_s: 0.80
   preload_extra_normal_m: 0.001
   fan_attach_sink_m: 0.002
   fan_off_dwell_s: 1.0
   fan_off_rpm_threshold: 21000.0
-  fan_recovery_rpm_threshold: 24000.0
+  fan_recovery_rpm_threshold: 30000.0
   normal_alignment_tolerance_m: 0.002
   preload_normal_force_limit_n: 15.0
   attach_normal_force_limit_n: 35.0
@@ -226,7 +225,7 @@ swing_leg_controller:
   # PRELOAD each hold their final command until all four leg joints stay
   # within tolerance, otherwise the phase remains at that endpoint.
   servo_tracking_gate_enabled: true
-  servo_tracking_tolerance_ticks: 20.0
+  servo_tracking_tolerance_ticks: 25.0
   servo_tracking_hold_s: 0.1
   servo_tracking_timeout_s: 3.0
   servo_tracking_feedback_timeout_s: 0.25
@@ -360,10 +359,13 @@ position_autotune:
   lag_limit_ms: 80.0
   minimum_valid_ratio: 0.95
   minimum_cycles_per_leg: 2
-  leg_max_trials: 12
+  leg_max_trials: 32
+  leg_motor_max_trials: 8
   extended_max_candidates: 20
   extended_refinement_max_candidates: 12
-  loaded_max_p_multiplier: 2.0
+  bench_fallback_max_candidates: 3
+  bench_fallback_max_overshoot_ticks: 6.0
+  loaded_max_p_multiplier: 3.0
   loaded_max_i_gain: 100
   p_multipliers: [0.75, 1.0, 1.25, 1.5, 2.0,2.5, 3.0]
   i_candidates: [0, 25, 50, 100]
@@ -496,16 +498,16 @@ left_board:
   motor_ids: [11, 1, 2, 15, 14, 7, 8, 18]
   multi_turn_ids: []
   position_gains:
-    "11": {p: 800, i: 0, d: 0}
-    "1": {p: 1200, i: 0, d: 0}
-    "2": {p: 1200, i: 0, d: 0}
-    "15": {p: 900, i: 0, d: 0}
-    "14": {p: 800, i: 0, d: 0}
-    "7": {p: 900, i: 0, d: 0}
-    "8": {p: 1200, i: 0, d: 0}
-    "18": {p: 900, i: 0, d: 0}
+    "11": {p: 1600, i: 0, d: 32}
+    "1": {p: 900, i: 0, d: 0}
+    "2": {p: 2400, i: 0, d: 0}
+    "15": {p: 1800, i: 0, d: 0}
+    "14": {p: 2000, i: 50, d: 64}
+    "7": {p: 675, i: 0, d: 0}
+    "8": {p: 2400, i: 0, d: 0}
+    "18": {p: 2700, i: 0, d: 0}
   position_profiles:
-    "11": {velocity: 200, acceleration: 300}
+    "11": {velocity: 250, acceleration: 300}
     "1": {velocity: 200, acceleration: 300}
     "2": {velocity: 200, acceleration: 300}
     "15": {velocity: 200, acceleration: 300}
@@ -520,14 +522,14 @@ right_board:
   motor_ids: [12, 3, 4, 16, 13, 5, 6, 17]
   multi_turn_ids: []
   position_gains:
-    "12": {p: 800, i: 0, d: 0}
-    "3": {p: 900, i: 0, d: 0}
-    "4": {p: 1200, i: 0, d: 0}
-    "16": {p: 900, i: 0, d: 0}
-    "13": {p: 800, i: 0, d: 0}
-    "5": {p: 900, i: 0, d: 0}
-    "6": {p: 1200, i: 0, d: 0}
-    "17": {p: 900, i: 0, d: 0}
+    "12": {p: 1600, i: 0, d: 0}
+    "3": {p: 1350, i: 0, d: 0}
+    "4": {p: 1500, i: 0, d: 0}
+    "16": {p: 1800, i: 0, d: 0}
+    "13": {p: 1600, i: 100, d: 0}
+    "5": {p: 2700, i: 50, d: 16}
+    "6": {p: 1500, i: 0, d: 0}
+    "17": {p: 2250, i: 0, d: 32}
   position_profiles:
     "12": {velocity: 200, acceleration: 300}
     "3": {velocity: 200, acceleration: 300}
@@ -536,4 +538,4 @@ right_board:
     "13": {velocity: 200, acceleration: 300}
     "5": {velocity: 200, acceleration: 300}
     "6": {velocity: 200, acceleration: 300}
-    "17": {velocity: 200, acceleration: 300}
+    "17": {velocity: 200, acceleration: 400}
